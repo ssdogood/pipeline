@@ -1,0 +1,2 @@
+folder,table_name,dedup_columns,sort_order
+etl,ACCT_OPENING,processinstanceid|current_wsname,mmyy

@@ -1,0 +1,34 @@
+# ==============================================================================
+# WRAPPER CONFIG — orchestration policy (not paths, not tuning; those live in
+# settings.<env>.yaml). Validated by wrapper/profiles.WRAPPER_SCHEMA.
+# ==============================================================================
+
+retention:
+  landing_days: 10        # landing date-dirs kept (DuckLake bronze window)
+  manifest_days: 90       # runs/ archive kept; ALSO the update_history scan window
+
+# run_id format: prefix + strftime pattern (filesystem-safe chars only)
+run_id:
+  prefix: "run_"
+  ts_format: "%Y%m%d_%H%M%S"
+
+# ---------------------------------------------------------------------------
+# PROFILES. A profile is a step list + per-step args. Step vocabulary is
+# CLOSED (validated): generate_schemas | reconcile_pending | extract |
+# update_history | housekeeping. Unknown step name -> exit 3.
+# ---------------------------------------------------------------------------
+profiles:
+
+  full:                     # nightly default: regenerate, reconcile, extract all
+    steps:
+      - {name: generate_schemas, force: true}
+      - {name: reconcile_pending}
+      - {name: extract, force: true}
+      - {name: update_history}
+      - {name: housekeeping}
+
+  inc:                     # incremental: skip-if-exists semantics
+    steps:
+      - {name: extract, force: false}
+      - {name: update_history}
+      - {name: housekeeping}

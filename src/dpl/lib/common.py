@@ -1,0 +1,1207 @@
+# dpl/lib/common.py
+"""Shared utilities: config loading, secrets, manifest writing, path helpers.
+
+Run smoke tests:  python -m dpl.lib.common   (from project root)
+"""
+
+from __future__ import annotations
+
+import os
+import json
+import shutil
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
+
+from schema import Schema, SchemaError, And, Optional
+
+import yaml
+import csv
+
+from dpl.lib.paths import get_project_root
+from dpl.lib.logger import setup_logging, get_run_logger
+
+log = get_run_logger()
+
+# ------------------------------------------------------------------ paths
+PROJECT_ROOT = get_project_root()
+CONFIG_DIR = PROJECT_ROOT / "config"
+SECRET_DIR = PROJECT_ROOT / "secrets"
+
+VALID_COMPRESSIONS = frozenset(["zstd", "snappy"])
+
+RETIRED_TABLE_KEYS = ("dedup_columns",)
+
+# Terminal statuses that count as failure for manifest/exit-code purposes.
+FAILURE_STATUSES = frozenset({"failed"})
+
+# ------------------------------------------------------------------- schema helpers
+
+def _valid_folder_segment(folder: str) -> str:
+    """Validate that `folder` is a safe single path segment."""
+    if not isinstance(folder, str):
+        raise SchemaError("folder must be a string")
+    if not folder or folder.strip() == "":
+        raise SchemaError("folder cannot be empty")
+    if "/" in folder or "\\" in folder:
+        raise SchemaError("folder cannot contain path separators (/ or \\)")
+    if ".." in folder or folder.startswith(".") or folder.endswith("."):
+        raise SchemaError("folder cannot contain '..' or start/end with '.'")
+    if folder.lower().startswith(("http://", "https://", "ftp://")):
+        raise SchemaError("folder cannot be a URL")
+    return folder
+
+# ------------------------------------------------------------------- schemas
+CONFIG_SCHEMA = Schema({
+    "connections": {
+        str: {  # Dynamic key: Matches 'ora_db', 'postgres_prod', etc.
+            "type": And(str, len),
+            "username": And(str, len),
+            "secret": And(str, len),
+            "host": And(str, len),
+            "port": int,
+            "service": And(str, len),
+            "folder": And(str, len),  # required folder name per connection
+            Optional(str): object  # Future-proof: allows adding new keys like 'timeout: 30' later
+            # NOTE: "folder_validated" is NOT declared here — it is runtime
+            # state set top-level by validate_config_folders(), never config.
+        }
+    },
+
+    "transforms": {
+        Optional(str): object  # Allows you to easily append more text transforms later
+    },
+
+    "tables": [
+        {
+            "connection": And(str, len),
+            "schema": And(str, len),
+            "name": And(str, len),
+            "query": And(str, len),
+            Optional(str): object  # Future-proof
+        }
+    ],
+    Optional(str): object  # Future-proof
+})
+
+SETTINGS_SCHEMA = Schema({
+    Optional("polars"): {
+        Optional("batch_rows", default=50000): And(int, lambda n: n > 0),
+        Optional("strict_cast", default=True): bool,
+        Optional(str): object
+    },
+
+    "paths": {                          # mandatory per settings.yaml docs
+        "landing_root": And(str, len),
+        "scratch_root": And(str, len),
+        # runs_root: manifest archive root. Optional; the derived default
+        # (<landing_root>/_runs) is applied by normalize_settings() AFTER
+        # validation — it needs landing_root, which the schema doesn't
+        # see at validate time. A misspelled sibling key is NOT this key:
+        # it falls into Optional(str) and is ignored (known limitation,
+        # see settings.yaml DESIGN RULES note 3).
+        Optional("runs_root"): And(str, len),
+        Optional("history_db"): And(str, len),
+        Optional(str): object
+    },
+    "duckdb": {                         # mandatory: memory_limit is required
+        "memory_limit": And(str, lambda s: len(s.strip()) > 0),  # e.g. "10GB"
+        Optional("threads"): And(int, lambda n: n > 0),
+        Optional(str): object
+    },
+    Optional("writer"): {              # section optional: every child has a default
+        Optional("compression", default="zstd"): And(
+            str, lambda s: s.lower() in VALID_COMPRESSIONS
+        ),
+        Optional("compression_level"): And(
+            int, lambda n: 1 <= n <= 22,  # DuckDB 1.4.5 documented range
+            error="compression_level must be 1–22 for zstd (DuckDB 1.4.5 default: 3)"
+        ),
+        Optional("max_file_mb", default=512): And(int, lambda n: n > 0),
+        Optional("keep_scratch_on_success", default=False): bool,
+        Optional(str): object
+    }
+})
+
+def normalize_settings(settings: dict) -> dict:
+    """Post-validation fix-ups. Currently: derive runs_root default.
+
+    runs_root omitted -> <landing_root>/_runs (sibling of the landing
+    date-dirs, inside the staging root — the prune-safety contract in
+    _prune_date_dirs depends on this location staying non-date-named).
+    """
+    if settings is None:
+        return None
+    paths = settings.get("paths", {})
+    if not paths.get("runs_root"):
+        paths["runs_root"] = str(Path(paths["landing_root"]) / "_runs")
+    return settings
+
+
+def runs_dir(runs_root: str | Path, load_date: date, folder: str) -> Path:
+    """Manifest archive path: <runs_root>/<date>/<folder> (mirrors landing)."""
+    return Path(runs_root) / load_date.isoformat() / folder
+
+# ------------------------------------------------------------------- dedup
+def parse_dedup_spec(spec: Any) -> dict:
+    """Parse a dedup_columns value into a structured mode description.
+
+    Supported forms (from config.yaml):
+        None / omitted            -> {"mode": "none"}
+        "none" / "NONE" (scalar)  -> {"mode": "none"}
+        "all"  / "ALL"  (scalar)  -> {"mode": "all"}
+        [a, b]                    -> {"mode": "include", "columns": [a, b]}
+        [-a, -b]                  -> {"mode": "exclude", "columns": [a, b]}
+
+    Rules:
+      - Column names are NOT validated here (they can only be checked against
+        the actual result set at write time — that's the writer's job).
+      - Exclude mode is all-or-nothing: EVERY entry must start with '-'.
+        Mixing positive and negative entries raises ValueError.
+      - Scalar keywords are case-insensitive and normalize to lowercase.
+      - A scalar that isn't a recognized keyword raises ValueError (catches
+        typos like "al", "everything", "*").
+
+    Returns a dict with:
+        mode: "none" | "all" | "include" | "exclude"
+        columns: normalized (lowercased, '-' stripped) list — empty for
+                 "none"/"all"
+    """
+    if spec is None:
+        return {"mode": "none", "columns": []}
+
+    # --- scalar keyword ---
+    if isinstance(spec, str):
+        keyword = spec.strip().lower()
+        if keyword == "none":
+            return {"mode": "none", "columns": []}
+        if keyword == "all":
+            return {"mode": "all", "columns": []}
+        raise ValueError(
+            f"dedup_columns: unrecognized value '{spec}'. Use 'none', 'all', "
+            f"a list of column names, or a list of '-column' exclusions."
+        )
+
+    # --- list form ---
+    if isinstance(spec, list):
+        if not spec:
+            return {"mode": "none", "columns": []}
+
+        entries = [str(c).strip() for c in spec]
+        if any(not c for c in entries):
+            raise ValueError("dedup_columns: empty entry in column list")
+
+        negatives = [c for c in entries if c.startswith("-")]
+        positives = [c for c in entries if not c.startswith("-")]
+
+        if negatives and positives:
+            raise ValueError(
+                "dedup_columns: cannot mix positive and negative entries. "
+                f"Got {positives} and {negatives}. Use all plain columns "
+                "or all '-column' exclusions."
+            )
+
+        if negatives:
+            columns = [c[1:].strip() for c in negatives]
+            if any(not c for c in columns):
+                raise ValueError(
+                    "dedup_columns: exclusion entry with no column name "
+                    "(bare '-')"
+                )
+            return {"mode": "exclude", "columns": [c.lower() for c in columns]}
+
+        return {"mode": "include", "columns": [c.lower() for c in positives]}
+
+    raise ValueError(
+        f"dedup_columns must be a keyword ('none'/'all') or a list of "
+        f"column names, got {type(spec).__name__}"
+    )
+
+# ------------------------------------------------------------------- sort
+def parse_sort_spec(cell: str) -> list[tuple[str, str]]:
+    """Parse a sort_order cell into [(column, 'asc'|'desc'), ...].
+
+    Grammar (comma-free, '|' separated):
+        updated_at           -> [("updated_at", "asc")]
+        updated_at-          -> [("updated_at", "desc")]   trailing '-'
+        updated_at+          -> [("updated_at", "asc")]    '+' = optional sugar
+        updated_at-|id       -> [("updated_at", "desc"), ("id", "asc")]
+        ''                   -> []                        no sort
+
+    Rules:
+      - Position = precedence (first token = primary sort key)
+      - Columns are lowercased; trailing sign stripped
+      - Malformed tokens raise ValueError: '--', '+-', bare '-', empty
+      - Note: '-' on a sort token is TRAILING (desc); a LEADING '-' on a
+        dedup token means exclusion — never mix the conventions.
+    """
+    if not cell or not cell.strip():
+        return []
+
+    result: list[tuple[str, str]] = []
+    for token in cell.split(CELL_SEPARATOR):
+        tok = token.strip()
+        if not tok:
+            raise ValueError(
+                f"sort_order: empty token in '{cell}' "
+                f"(consecutive '|' or stray whitespace)")
+
+        direction = "asc"
+        if tok.endswith("-"):
+            direction = "desc"
+            tok = tok[:-1].strip()
+        elif tok.endswith("+"):
+            tok = tok[:-1].strip()
+
+        if not tok:
+            raise ValueError(
+                f"sort_order: bare direction sign in '{token}' "
+                f"(no column name)")
+        if tok.endswith("-") or tok.endswith("+"):
+            # catches 'col--' and 'col-+' after the first strip
+            raise ValueError(
+                f"sort_order: malformed token '{token}' "
+                f"(multiple trailing signs)")
+
+        result.append((tok.lower(), direction))
+    return result
+
+# ------------------------------------------------- CSV registries (M1)
+SCHEMA_MASTER_COLUMNS = ["folder", "connection_name", "schema", 
+                         "table_name", "column_seq", "column_name",
+                         "dtype", "description", "policy_flags"]
+TABLE_RULES_COLUMNS = ["folder", "table_name", "dedup_columns", "sort_order"]
+CELL_SEPARATOR = "|"          # multi-value cells: never comma (see spec D3.2)
+
+PENDING_FILE = CONFIG_DIR / "_pending.yaml"
+
+def _read_registry_csv(path: str | Path, expected_header: list[str],
+                       required: bool) -> list[tuple[int, list[str]]] | None:
+    """Read a registry CSV into (lineno, cells) tuples.
+
+    - '#' as the FIRST non-blank character of a line marks a comment (D3.2)
+    - blank lines ignored
+    - header must match expected_header exactly (case-insensitive)
+    - wrong-width rows raise with line number — no silent truncation
+    """
+    p = Path(path)
+    if not p.exists():
+        if required:
+            raise FileNotFoundError(
+                f"Registry file not found: {p} "
+                f"(expected header: {expected_header})")
+        return None
+
+    rows: list[tuple[int, list[str]]] = []
+    header_seen = False
+    with p.open(newline="", encoding="utf-8") as fh:
+        for lineno, raw in enumerate(csv.reader(fh), 1):
+            cells = [c.strip() for c in raw]
+            if not any(cells) or cells[0].startswith("#"):
+                continue
+            if not header_seen:
+                if [c.lower() for c in cells] != expected_header:
+                    raise ValueError(
+                        f"{p}:{lineno}: header must be {expected_header}, "
+                        f"got {cells}")
+                header_seen = True
+                continue
+            if len(cells) != len(expected_header):
+                raise ValueError(
+                    f"{p}:{lineno}: expected {len(expected_header)} cells, "
+                    f"got {len(cells)}: {cells} "
+                    f"(hint: does a value contain a comma? cell values must be comma-free - use '.' inside dtype notation, "
+                    f"e.g. Decimal(12.2) not Decimal(12,2), and '|' between multi-values)")
+            rows.append((lineno, cells))
+    if not header_seen:
+        raise ValueError(f"{p}: no header row found")
+    return rows
+
+def _parse_flags(cell: str) -> dict:
+    """Parse 'k=v|k2|k3=v3' policy_flags into a dict."""
+    if not cell:
+        return {}
+    flags: dict = {}
+    for part in cell.split(CELL_SEPARATOR):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            flags[k.strip().lower()] = v.strip()
+        elif part:
+            flags[part.lower()] = True
+    return flags
+
+def _check_master_row(path, lineno, cells):
+    (folder, conn, schema, table, seq, column, dtype, *_rest) = cells
+    if not (folder and conn and schema and table and column and dtype):
+        raise ValueError(
+            f"{path}:{lineno}: table-level identity cells cannot be empty")
+    try:
+        int(seq)
+    except (TypeError, ValueError):
+        raise ValueError(f"{path}:{lineno}: column_seq must be an integer")
+
+def _insert_master_row(master, path, lineno, folder, conn, schema, table,
+                       seq, column, dtype, description, flags):
+    key = f"{folder}.{table}".lower()
+    entry = master.setdefault(key, {
+        "columns": {}, "descriptions": {}, "flags": {},
+        "connection": conn, "schema": schema})
+    col = column.lower()
+    if col in entry["columns"]:
+        raise ValueError(
+            f"{path}:{lineno}: duplicate column '{col}' for '{key}'")
+    entry["columns"][col] = dtype.lower()
+    entry["descriptions"][col] = description or None
+    entry["flags"][col] = _parse_flags(flags)
+
+def load_schema_master(auto_path: str | Path,
+                        ad_path: str | Path | None = None) -> dict:
+    """Load and merge auto (generated) + ad (hand-maintained) master CSVs.
+
+    auto_path is required. ad_path optional (absent -> no AD tables).
+    STRICT RULE: a table key may exist in ONE file only. Duplication
+    raises — it means two owners for one table.
+
+    Returns: { "<folder>.<table>" -> {"columns": {...},
+               "descriptions": {...}, "flags": {...},
+               "connection": str, "schema": str} }
+    """
+    master = {}
+    # -- auto file --
+    rows = _read_registry_csv(auto_path, SCHEMA_MASTER_COLUMNS, required=True)
+    assert rows is not None
+
+    for lineno, cells in rows:
+        (folder, conn, schema, table, seq, column, dtype, description, flags) = cells
+        _check_master_row(auto_path, lineno, cells)
+        _insert_master_row(master, auto_path, lineno, folder, conn, schema,
+                           table, seq, column, dtype, description, flags)
+
+    # -- ad file: merge with disjointness check --
+    if ad_path is not None:
+        ad_rows = _read_registry_csv(ad_path, SCHEMA_MASTER_COLUMNS,
+                                     required=False)
+        if ad_rows is not None:
+            for lineno, cells in ad_rows:
+                (folder, conn, schema, table, seq, column,
+                 dtype, description, flags) = cells
+                _check_master_row(ad_path, lineno, cells)
+                key = f"{folder}.{table}".lower()
+                if key in master:
+                    raise ValueError(
+                        f"table '{key}' exists in BOTH {auto_path} and "
+                        f"{ad_path} — remove it from one of them")
+                _insert_master_row(master, ad_path, lineno, folder, conn,
+                                   schema, table, seq, column, dtype,
+                                   description, flags)
+    return master
+
+def load_table_rules(path: str | Path) -> dict | None:
+    """Load the curated table rules CSV. OPTIONAL (D3).
+
+    Missing file -> None (caller degrades visibly: no dedup/sort).
+    Malformed -> raises. Dedup cells reuse parse_dedup_spec grammar;
+    multi-value cells split on '|'.
+
+    Returns: { "<folder>.<table>" (lowercased) ->
+                 {"dedup": parsed_spec | None,
+                  "sort_cols": [col, ...],
+                  "raw_dedup": str} }
+    """
+    rows = _read_registry_csv(path, TABLE_RULES_COLUMNS, required=False)
+    if rows is None:
+        return None
+
+    rules: dict = {}
+    for lineno, (folder, table, dedup_cell, sort_cell) in rows:
+        key = f"{folder}.{table}".lower()
+        if key in rules:
+            raise ValueError(
+                f"{path}:{lineno}: duplicate rules entry for '{key}'")
+
+        dedup_parsed = None
+        if dedup_cell:
+            spec = dedup_cell  # default: single token ('all'/'none')
+            if CELL_SEPARATOR in dedup_cell:
+                spec = [c for c in dedup_cell.split(CELL_SEPARATOR)]
+            elif dedup_cell.strip().lower() in ("all", "none"):
+                spec = dedup_cell.strip()
+            else:
+                spec = [dedup_cell.strip()]
+            dedup_parsed = parse_dedup_spec(spec)  # raises on typos
+
+        sort_spec = parse_sort_spec(sort_cell)
+
+        rules[key] = {"dedup": dedup_parsed,
+                      "sort_spec": sort_spec,
+                      "sort_cols": [c for c, _d in sort_spec],
+                      "raw_dedup": dedup_cell}
+
+    return rules
+
+def _reject_retired_keys(cfg: dict) -> None:
+    """Config keys that moved elsewhere (e.g. dedup -> table_rules_oracle_to_stg.csv)
+    must fail loudly if they reappear — silent ignore is drift."""
+    offenders = [
+        (i, k) for i, t in enumerate(cfg.get("tables", []))
+        for k in RETIRED_TABLE_KEYS if k in t
+    ]
+    if offenders:
+        detail = ", ".join(f"tables[{i}].{k}" for i, k in offenders)
+        raise ValueError(
+            f"retired config key(s) present: {detail}. "
+            f"These now live in config/extractors/table_rules_oracle_to_stg.csv — remove them "
+            f"from config yaml.")
+
+def validate_rules_references(schema_master: dict, rules: dict | None) -> None:
+    """Every rules column (dedup keys, sort columns) must exist in the master.
+
+    Strict fail (D4) — typo'd rules stop the run BEFORE any connection opens.
+    A rules entry for a table absent from the master also raises: that pair
+    is unresolvable, not merely stale.
+    """
+    if not rules:
+        return
+    problems = []
+    for key, rule in rules.items():
+        entry = schema_master.get(key)
+        if entry is None:
+            problems.append(f"table_rules entry '{key}' not in schema master")
+            continue
+        available = set(entry["columns"])
+        mode = rule["dedup"]["mode"] if rule["dedup"] else "none"
+        if mode in ("include", "exclude"):
+            missing = [c for c in rule["dedup"]["columns"]
+                       if c not in available]
+            if missing:
+                problems.append(
+                    f"{key}: dedup column(s) {missing} not in master")
+        for c, _direction in rule["sort_spec"]:
+            if c not in available:
+                problems.append(f"{key}: sort column '{c}' not in master")
+
+    if problems:
+        raise ValueError(
+            "table_rules references unknown columns:\n  - "
+            + "\n  - ".join(problems))
+
+def validate_master_vs_config(cfg: dict, schema_master: dict,
+                              source_type: str) -> None:
+    """Master-CSV table-level fields must match config.yaml. Strict fail.
+
+    Only checks tables whose connection type is `source_type` — the master
+    CSV is per-extractor (each extractor validates its own subset).
+    A config-side rename (connection/schema) without master regeneration
+    is drift the pipeline must refuse to paper over.
+    """
+    problems = []
+    for t in cfg["tables"]:
+        conn = cfg["connections"].get(t["connection"], {})
+        if conn.get("type") != source_type:
+            continue
+        key = f"{conn['folder']}.{t['name']}".lower()
+        entry = schema_master.get(key)
+        if entry is None:
+            problems.append(f"configured table '{key}' absent from master CSV "
+                           f"— run: python -m lib.generate_schemas --force")
+            continue
+        if entry["connection"].lower() != t["connection"].lower():
+            problems.append(f"{key}: connection is '{t['connection']}' in "
+                            f"config but '{entry['connection']}' in master")
+        if entry["schema"].lower() != t["schema"].lower():
+            problems.append(f"{key}: schema is '{t['schema']}' in config "
+                            f"but '{entry['schema']}' in master")
+    if problems:
+        raise ValueError("master CSV inconsistent with config.yaml:\n  - "
+                         + "\n  - ".join(problems))
+
+# ---------------------------------------------------- pending ledger (D5)
+def read_pending(path: str | Path | None = None) -> dict:
+    """Read config/_pending.yaml (or an explicit path). Empty if absent."""
+    p = Path(path) if path else PENDING_FILE
+    if not p.exists():
+        return {}
+    return yaml.safe_load(p.read_text()) or {}
+
+def update_pending(findings: list[dict], path: str | Path | None = None) -> dict:
+    """Record undocumented-column findings; bump counters.
+
+    findings: [{"folder": ..., "table": ..., "column": ...}, ...]
+    Entries persist until reconcile_pending clears them (i.e. until the
+    column appears in a regenerated master CSV).
+    """
+    pending = read_pending(path)
+    today = date.today().isoformat()
+    for f in findings:
+        key = f"{f['folder']}.{f['table']}.{f['column']}".lower()
+        e = pending.get(key, {"first_seen": today, "occurrences": 0})
+        e["last_seen"] = today
+        e["occurrences"] += 1
+        pending[key] = e
+    Path(path).write_text(yaml.safe_dump(pending, sort_keys=True)) if path \
+        else PENDING_FILE.write_text(yaml.safe_dump(pending, sort_keys=True))
+    return pending
+
+def reconcile_pending(schema_master: dict,
+                       path: str | Path | None = None) -> list[str]:
+    """Drop ledger entries whose column now exists in the master CSV.
+
+    Returns the resolved keys — the 'you finished something' report.
+    Call after every master regeneration.
+    """
+    pending = read_pending(path)
+    resolved = []
+    for key in list(pending):
+        table_key, _, column = key.rpartition(".")
+        entry = schema_master.get(table_key)
+        if entry and column in entry["columns"]:
+            del pending[key]
+            resolved.append(key)
+    if resolved or pending:
+        p = Path(path) if path else PENDING_FILE
+        p.write_text(yaml.safe_dump(pending, sort_keys=True))
+    return resolved
+
+
+# -------------------------------------------------------------- validators
+def validate_config_folders(cfg: dict) -> None:
+    """Validate folders are unique across connections and safe path segments.
+
+    Raises ValueError on first violation so the pipeline doesn't proceed with
+    broken config. Mutates cfg['folder_validated'] = True on success.
+    """
+    folders_seen: dict[str, str] = {}  # folder -> connection_name
+
+    for conn_name, conn_cfg in cfg["connections"].items():
+        folder = conn_cfg["folder"]
+
+        # Safe-path-segment check
+        _valid_folder_segment(folder)
+
+        # Uniqueness check
+        if folder in folders_seen:
+            raise ValueError(
+                f"Duplicate folder '{folder}' declared for connections "
+                f"'{folders_seen[folder]}' and '{conn_name}'. "
+                "Each connection must have a unique folder."
+            )
+        folders_seen[folder] = conn_name
+
+    cfg["folder_validated"] = True
+
+def table_collision_check(cfg: dict) -> None:
+    """Detect tables with same (folder, table_name) → silent overwrite risk.
+
+    Raises ValueError on collision. Caller (extractor) invokes this once at
+    startup before opening any connections.
+    """
+    seen: dict[str, str] = {}  # "(folder,table)" -> "connection.schema.name"
+
+    for table_cfg in cfg["tables"]:
+        conn_name = table_cfg["connection"]
+        try:
+            folder = cfg["connections"][conn_name]["folder"]
+        except KeyError:
+            raise ValueError(f"Connection '{conn_name}' in table '{table_cfg['name']}' not found")
+
+        table_key = f"{folder}:{table_cfg['name'].lower()}"
+        if table_key in seen:
+            raise ValueError(
+                f"Table collision: '{seen[table_key]}' and "
+                f"'{conn_name}.{table_cfg['schema']}.{table_cfg['name']}' both "
+                f"map to folder '{folder}'/table '{table_cfg['name']}'. "
+                "Rename one table or use a different folder for its connection."
+            )
+        seen[table_key] = f"{conn_name}.{table_cfg['schema']}.{table_cfg['name']}"
+
+# ------------------------------------------------------------------- loaders
+def load_config(path: str, schema: Schema = CONFIG_SCHEMA) -> dict:
+    """Load and validate a YAML file. Defaults to the per-source CONFIG_SCHEMA."""
+    try:
+        with open(path, "r") as fh:
+            cfg = yaml.safe_load(fh)
+    except yaml.YAMLError as exc:
+        log.error("syntax error in %s: invalid YAML -> %s", path, exc)
+        return None
+    except FileNotFoundError:
+        log.error("configuration file not found: %s", path)
+        return None
+
+    try:
+        schema.validate(cfg)
+    except SchemaError as e:
+        log.error("validation error in %s: %s", path, e)
+        return None
+
+    _reject_retired_keys(cfg)     # NEW — raises ValueError
+    return cfg
+
+
+def load_settings(path: str) -> dict:
+    """Load the global writer/runtime settings from the given YAML file.
+
+    Mandatory path argument — no guessing or defaults. Applies the
+    runs_root derived default after schema validation.
+    """
+    settings = load_config(path, SETTINGS_SCHEMA)
+    return normalize_settings(settings) if settings else settings
+
+# --------------------------------------------------------------- landing i/o
+def landing_dir(landing_root: str | Path, load_date: date, source: str) -> Path:
+    """Build landing path: <root>/<date>/<source>."""
+    return Path(landing_root) / load_date.isoformat() / source
+
+def write_manifest(directory: Path, name: str, payload: dict) -> None:
+    """Write a JSON manifest into the directory. Creates dir if needed."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"_manifest_{name}.json").write_text(json.dumps(payload, indent=2))
+
+def clean_scratch(root: Path) -> None:
+    """Remove all *.parquet files from scratch (transient files)."""
+    root.mkdir(parents=True, exist_ok=True)
+    for f in root.glob("*.parquet"):
+        f.unlink()
+
+def _prune_date_dirs(root: Path, days: int, what: str) -> None:
+    """Remove YYYY-MM-DD-named subdirectories older than `days`.
+
+    NON-date subdirectories are DELIBERATELY EXEMPT: runs/ and history/
+    (manifest archive, SQLite) live under the staging root alongside the
+    landing date-dirs. Their survival depends on failing the date-name
+    check below — locked by _smoke_prune_protects_non_date_dirs. Never
+    relax this to 'delete everything older than cutoff'.
+    """
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    for d in sorted(root.iterdir()):
+        if d.is_dir() and d.name[:4].isdigit() and d.name < cutoff:
+            log.info("pruning %s: %s", what, d)
+            shutil.rmtree(d)
+
+
+def prune_old_landing(root: Path, days: int) -> None:
+    """Remove landing date-dirs older than `days` (YYYY-MM-DD named)."""
+    root.mkdir(parents=True, exist_ok=True)
+    _prune_date_dirs(root, days, "landing")
+
+
+def prune_old_runs(root: Path, days: int) -> None:
+    """Remove manifest-archive date-dirs older than `days`.
+
+    Wrapper housekeeping calls this with wrapper.yaml's
+    retention.manifest_days (default 90) — also the update_history
+    backfill window: files outside it don't exist, so the filesystem
+    bounds the scan.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    _prune_date_dirs(root, days, "manifest archive")
+
+def make_run_id(prefix: str = "run_",
+                ts_format: str = "%Y%m%d_%H%M%S") -> str:
+    """Timestamp-derived run identifier: filesystem-safe, sortable.
+
+    Shared by the extractor's CLI (manual runs -> 'manual_...' prefix)
+    and the wrapper (wrapper.yaml prefix/format). The same value
+    prefixes log lines, manifest filenames, and SQLite rows.
+    """
+    import time
+    return f"{prefix}{time.strftime(ts_format)}"
+
+# =================================================================== smoke tests
+def _smoke_load_config():
+    """Test loading config.yaml (requires your real config)."""
+    try:
+        cfg = load_config("config/extractors/oracle_to_stg.yaml")
+        assert cfg is not None, "config.yaml failed to load/validate"
+        print(f"[PASS] config loaded: {len(cfg['tables'])} table(s), "
+              f"{len(cfg['connections'])} connection(s)")
+        return cfg
+    except AssertionError as e:
+        print(f"[SKIP] config.yaml not present: {e}")
+        return None
+
+def _smoke_load_settings(tmp: Path):
+    """Test loading settings.yaml from temp dir."""
+    settings = {
+        "paths": {"landing_root": str(tmp / "landing"), "scratch_root": str(tmp / "scratch")},
+        "duckdb": {"memory_limit": "2GB", "threads": 2},
+        "writer": {"compression": "zstd", "max_file_mb": 512},
+    }
+    settings_file = tmp / "settings.yaml"
+    settings_file.write_text(yaml.dump(settings))
+
+    loaded = load_settings(str(settings_file))
+    assert loaded is not None, "settings.yaml failed to load/validate"
+    print(f"[PASS] settings loaded: memory_limit={loaded['duckdb']['memory_limit']}")
+
+def _smoke_load_config_missing_file(tmp: Path):
+    """Missing config returns None."""
+    result = load_config(str(tmp / "no_such_file.yaml"))
+    assert result is None, "missing file should return None"
+    print("[PASS] missing config file -> None")
+
+def _smoke_landing_dir(tmp: Path):
+    """landing_dir takes root explicitly."""
+    d = landing_dir(str(tmp), date(2026, 10, 17), "oracle")
+    expected = tmp / "2026-10-17" / "oracle"
+    assert d == expected, f"expected {expected}, got {d}"
+    print(f"[PASS] landing_dir -> {d}")
+
+def _smoke_write_manifest(tmp: Path):
+    """write_manifest writes JSON round-trip."""
+    d = tmp / "manifest_test"
+    payload = {"tables": 2, "source": "oracle"}
+    write_manifest(d, "oracle", payload)
+
+    out = d / "_manifest_oracle.json"
+    assert out.exists(), "manifest not written"
+    loaded = json.loads(out.read_text())
+    assert loaded == payload, "manifest mismatch"
+    print("[PASS] write_manifest round-trip")
+
+def _smoke_clean_scratch(tmp: Path):
+    """clean_scratch removes only *.parquet, keeps others."""
+    scratch = tmp / "scratch"
+    scratch.mkdir(parents=True)  # fixture dir must exist before writing files
+    (scratch / "x.parquet").write_bytes(b"junk")
+    (scratch / "keep.txt").write_text("junk")
+    (scratch / "y.pq").write_bytes(b"junk")  # .pq extension, not .parquet
+
+    clean_scratch(scratch)
+
+    assert not (scratch / "x.parquet").exists(), "parquet not removed"
+    assert (scratch / "keep.txt").exists(), "text file removed"
+    assert (scratch / "y.pq").exists(), ".pq file removed"
+    print("[PASS] clean_scratch removes only *.parquet")
+
+def _smoke_prune_old_landing(tmp: Path):
+    """prune_old_landing removes only old date dirs, preserves recent/non-date."""
+    (tmp / "2026-01-01").mkdir()
+    (tmp / "2026-01-01" / "f.parquet").write_bytes(b"x")
+    (tmp / "2026-10-17").mkdir()  # recent, must survive
+    (tmp / "not_a_date").mkdir()  # non-date, must survive
+
+    prune_old_landing(tmp, days=30)
+
+    assert not (tmp / "2026-01-01").exists(), "old date dir survived"
+    assert (tmp / "2026-10-17").exists(), "recent date dir removed"
+    assert (tmp / "not_a_date").exists(), "non-date dir removed"
+    print("[PASS] prune_old_landing removes only old date dirs")
+
+def _smoke_validate_folders_unique(tmp: Path):
+    """Unique folder check passes for distinct folders."""
+    cfg = {
+        "connections": {
+            "ora_db": {"folder": "oracle", "type": "oracle", "username": "", "secret": "",
+                       "host": "", "port": 1523, "service": ""},
+            "pg_stg": {"folder": "postgres", "type": "postgres", "username": "", "secret": "",
+                       "host": "", "port": 5432, "service": ""},
+        }
+    }
+    validate_config_folders(cfg)
+    assert cfg["folder_validated"] is True
+    print("[PASS] unique folders validated")
+
+def _smoke_validate_folders_duplicate_raises(tmp: Path):
+    """Duplicate folders raise ValueError."""
+    cfg = {
+        "connections": {
+            "ora_db": {"folder": "oracle", "type": "oracle", "username": "", "secret": "",
+                       "host": "", "port": 1523, "service": ""},
+            "pg_stg": {"folder": "oracle", "type": "postgres", "username": "", "secret": "",
+                       "host": "", "port": 5432, "service": ""},
+        }
+    }
+    try:
+        validate_config_folders(cfg)
+        raise AssertionError("duplicate folder did not raise")
+    except ValueError as e:
+        assert "Duplicate folder 'oracle'" in str(e), f"wrong error: {e}"
+        print("[PASS] duplicate folder raises ValueError")
+
+def _smoke_validate_folder_safe_segments(tmp: Path):
+    """Unsafe folder names raise SchemaError."""
+    unsafe = ["../evil", "/absolute", "http://bad", "contains/slash"]
+    for folder in unsafe:
+        try:
+            _valid_folder_segment(folder)
+            raise AssertionError(f"unsafe folder '{folder}' did not raise")
+        except SchemaError:
+            pass
+    print("[PASS] unsafe folder segments rejected")
+
+def _smoke_table_collision_detection(tmp: Path):
+    """Same table name in same folder → ValueError."""
+    cfg = {
+        "connections": {
+            "ora_db": {"folder": "oracle", "type": "oracle", "username": "", "secret": "",
+                       "host": "", "port": 1523, "service": ""},
+            "pg_stg": {"folder": "oracle", "type": "postgres", "username": "", "secret": "",
+                       "host": "", "port": 5432, "service": ""},
+        },
+        "transforms": {},
+        "tables": [
+            {"connection": "ora_db", "schema": "STG", "name": "CUSTOMER", "query": "SELECT 1"},
+            {"connection": "pg_stg", "schema": "STG", "name": "CUSTOMER", "query": "SELECT 1"},
+        ]
+    }
+    try:
+        table_collision_check(cfg)
+        raise AssertionError("table collision did not raise")
+    except ValueError as e:
+        assert "Table collision" in str(e), f"wrong error: {e}"
+        print("[PASS] table collision detected and raised")
+
+# --------------------------------------------------- dedup spec smoke tests
+def _smoke_dedup_modes(tmp: Path):
+    """All four modes parse correctly; keywords case-insensitive."""
+    cases = [
+        (None,                   {"mode": "none",    "columns": []}),
+        ("none",                 {"mode": "none",    "columns": []}),
+        ("NONE",                 {"mode": "none",    "columns": []}),
+        ("All",                  {"mode": "all",     "columns": []}),
+        (["a", "b"],             {"mode": "include", "columns": ["a", "b"]}),
+        (["CUSTOMER_ID"],        {"mode": "include", "columns": ["customer_id"]}),
+        (["-updated_at", "-rv"], {"mode": "exclude", "columns": ["updated_at", "rv"]}),
+        (["-A"],                 {"mode": "exclude", "columns": ["a"]}),
+    ]
+    for spec, expected in cases:
+        got = parse_dedup_spec(spec)
+        assert got == expected, f"spec {spec!r}: expected {expected}, got {got}"
+
+    # omitted key handled at caller level; empty list == none
+    assert parse_dedup_spec([]) == {"mode": "none", "columns": []}
+    print("[PASS] dedup modes: none/include/exclude/all parse correctly")
+
+def _smoke_dedup_invalid_specs_raise(tmp: Path):
+    """Bad specs raise with useful messages; nothing silently accepted."""
+    bad = [
+        "alll",                # typo'd keyword
+        "*",                   # reserved-YAML char someone quoted
+        ["-a", "b"],           # mixed signs
+        ["b", "-a"],           # mixed signs, other order
+        ["-"],                 # bare minus
+        [""],                  # empty entry
+        ["a", ""],             # one empty entry
+        42,                    # wrong type
+    ]
+    for spec in bad:
+        try:
+            parse_dedup_spec(spec)
+            raise AssertionError(f"spec {spec!r} did not raise")
+        except ValueError:
+            pass
+    print("[PASS] invalid dedup specs rejected loudly")
+
+
+# ------------------------------------------------- registry smoke tests
+def _write(tmp: Path, name: str, text: str) -> Path:
+    f = tmp / name
+    f.write_text(text, encoding="utf-8")
+    return f
+
+def _smoke_load_schema_master(tmp: Path):
+     """Master loader: 9-col format, comments, order, duplicates."""
+     auto = _write(tmp, "master_auto.csv",
+         "# generated - do not edit by hand\n"
+         "folder,connection_name,schema,table_name,column_seq,column_name,dtype,description,policy_flags\n"
+         "oracle,ora_db,STG,customer,1,id,Int64,PK,tz=utc\n"
+         "oracle,ora_db,STG,customer,2,name,Utf8,display name,\n"
+         "\n"
+         "etl,ora_db,STG,account,1,balance,Decimal(12.2),,\n")
+
+     master = load_schema_master(auto)          # ad omitted -> no AD tables
+     cust = master["oracle.customer"]
+     assert list(cust["columns"]) == ["id", "name"], cust      # order preserved
+     assert cust["flags"]["id"] == {"tz": "utc"}
+     assert cust["descriptions"]["name"] == "display name"
+     assert cust["connection"] == "ora_db" and cust["schema"] == "STG"
+     assert master["etl.account"]["columns"]["balance"] == "decimal(12.2)"
+
+     # duplicate column raises
+     dup = _write(tmp, "dup.csv",
+"folder,connection_name,schema,table_name,column_seq,column_name,dtype,description,policy_flags\n"
+         "o,c,S,t,1,x,Utf8,,\n"
+         "o,c,S,t,2,x,Utf8,,\n")
+     try:
+         load_schema_master(dup)
+         raise AssertionError("duplicate column accepted")
+     except ValueError as e:
+         assert "duplicate column" in str(e)
+     print("[PASS] schema master: 9-col load, comments, order, duplicates")
+
+def _smoke_master_bad_seq(tmp: Path):
+     """Non-integer column_seq rejected with line number."""
+     bad = _write(tmp, "m_seq.csv","folder,connection_name,schema,table_name,column_seq,column_name,dtype,description,policy_flags\n"
+         "o,c,S,t,xyz,col,Utf8,,\n")
+     try:
+         load_schema_master(bad)
+         raise AssertionError("bad column_seq accepted")
+     except ValueError as e:
+         assert "column_seq" in str(e), e
+     print("[PASS] master loader: non-integer column_seq rejected")
+
+
+def _smoke_load_table_rules(tmp: Path):
+    f = _write(tmp, "rules.csv",
+               "# curated by hand\n"
+               "folder,table_name,dedup_columns,sort_order\n"
+               "oracle,customer,id|region,id\n"
+               "oracle,customer2,id|region,updated_at|id\n"
+               "oracle,customer3,-update_at|-rv,updated_at\n"
+               "oracle,customer4,all,\n"
+               "etl,plain,,created\n")
+    rules = load_table_rules(f)
+    assert rules["oracle.customer"]["dedup"] == {"mode": "include", "columns": ["id", "region"]}
+    assert rules["oracle.customer"]["sort_cols"] == ["id"]
+    assert rules["oracle.customer2"]["dedup"] == {"mode": "include", "columns": ["id", "region"]}
+    assert rules["oracle.customer2"]["sort_cols"] == ["updated_at", "id"]
+    assert rules["oracle.customer3"]["dedup"]["mode"] == "exclude"
+    assert rules["oracle.customer4"]["dedup"]["mode"] == "all"
+    assert rules["etl.plain"]["dedup"] is None
+    assert rules["etl.plain"]["sort_cols"] == ["created"]
+
+    # missing file -> None (the visible-degrade contract)
+    assert load_table_rules(tmp / "nope.csv") is None
+    print("[PASS] table rules: pipe grammar, missing-file degrade")
+
+def _smoke_validate_rules_references(tmp: Path):
+     master = load_schema_master(_write(tmp, "m2.csv", "folder,connection_name,schema,table_name,column_seq,column_name,dtype,description,policy_flags\n"
+         "oracle,ora_db,STG,customer,1,id,Int64,,\n"
+         "oracle,ora_db,STG,customer,2,region,Utf8,,\n"
+         "oracle,ora_db,STG,customer,3,updated_at,Datetime,,\n"))
+     good = load_table_rules(_write(tmp, "r2.csv",
+         "folder,table_name,dedup_columns,sort_order\n"
+         "oracle,customer,id|region,updated_at|id\n"))
+     validate_rules_references(master, good)          # passes silently
+
+     bad = load_table_rules(_write(tmp, "r3.csv",
+         "folder,table_name,dedup_columns,sort_order\n"
+         "oracle,customer,customr_id,id\n"))
+     try:
+         validate_rules_references(master, bad)
+         raise AssertionError("typo'd rule accepted")
+     except ValueError as e:
+         assert "customr_id" in str(e)
+
+     ghost = load_table_rules(_write(tmp, "r4.csv",
+         "folder,table_name,dedup_columns,sort_order\n"
+         "oracle,nosuchtable,id,\n"))
+     try:
+         validate_rules_references(master, ghost)
+         raise AssertionError("unknown table accepted")
+     except ValueError as e:
+         assert "not in schema master" in str(e)
+     print("[PASS] rules reference validation: strict on typos + ghosts")
+
+
+def _smoke_pending_ledger(tmp: Path):
+    p = tmp / "_pending.yaml"
+    findings = [{"folder": "oracle", "table": "customer", "column": "deptcode"}]
+    update_pending(findings, p)
+    update_pending(findings, p)
+    pend = read_pending(p)
+    key = "oracle.customer.deptcode"
+    assert pend[key]["occurrences"] == 2, pend
+    assert "first_seen" in pend[key] and "last_seen" in pend[key]
+
+    master = {"oracle.customer": {"columns": {"deptcode": "varchar"},
+                                  "descriptions": {}, "flags": {}}}
+    resolved = reconcile_pending(master, p)
+    assert resolved == [key], resolved
+    assert read_pending(p) == {}
+    print("[PASS] pending ledger: accumulate, then reconcile clears")
+
+def _smoke_registry_csv_malformed(tmp: Path):
+    bad = _write(tmp, "ragged.csv",
+                 "folder,table_name,dedup_columns,sort_order\n"
+                 "oracle,customer,id|region,updated_at,EXTRA\n")  # 5 cells
+    try:
+        load_table_rules(bad)
+        raise AssertionError("ragged row accepted")
+    except ValueError as e:
+        assert ":2:" in str(e), str(e)                 # line number present
+    print("[PASS] registry CSV: ragged rows rejected with line numbers")
+
+def _smoke_schema_rejects_retired_keys(tmp: Path):
+    """Retired config keys fail loudly (drift, not silent ignore)."""
+    base = (
+        "connections:\n"
+        "  ora_db:\n    {type: oracle, username: u, secret: s, host: h,\n"
+        "     port: 1521, service: svc, folder: etl}\n"
+        "transforms: {}\n"
+        "tables:\n"
+        "  - {connection: ora_db, schema: STG, name: T,\n"
+        "     query: 'SELECT 1'%s}\n"
+    )
+
+    f_ok = tmp / "cfg_ok.yaml"
+    f_ok.write_text(base % "")
+    cfg = load_config(str(f_ok))
+    assert cfg is not None, "clean config rejected"
+
+    for extra in [", dedup_columns: all", ", dedup_columns: 42",
+                  ", dedup_columns: [a, b]"]:
+        f_bad = tmp / "cfg_bad.yaml"
+        f_bad.write_text(base % extra)
+        try:
+            load_config(str(f_bad))
+            raise AssertionError(f"retired key accepted: {extra!r}")
+        except ValueError as e:
+            assert "retired config key" in str(e), e
+    print("[PASS] config schema: retired/unknown table keys rejected")
+
+def _smoke_parse_sort_spec(tmp: Path):
+    """Sort grammar: asc default, trailing '-', '+' sugar, combos, errors."""
+    assert parse_sort_spec("") == []
+    assert parse_sort_spec(None) == []
+    assert parse_sort_spec("updated_at") == [("updated_at", "asc")]
+    assert parse_sort_spec("updated_at-") == [("updated_at", "desc")]
+    assert parse_sort_spec("updated_at+") == [("updated_at", "asc")]
+    assert parse_sort_spec("UPDATED_AT-|CUSTNO") == \
+        [("updated_at", "desc"), ("custno", "asc")]
+    assert parse_sort_spec("a-|b|c+") == \
+        [("a", "desc"), ("b", "asc"), ("c", "asc")]
+
+    bad = ["col--", "col-+", "-", "+", "a|--", "a||b", "a|-"]
+    for cell in bad:
+        try:
+            parse_sort_spec(cell)
+            raise AssertionError(f"sort cell {cell!r} accepted")
+        except ValueError:
+            pass
+    print("[PASS] sort spec: grammar asc/desc/sugar, malformed rejected")
+
+def _smoke_rules_with_sort(tmp: Path):
+    """Rules loader carries parsed sort_spec; validate checks stripped names."""
+    master = load_schema_master(_write(tmp, "ms.csv",
+        "folder,connection_name,schema,table_name,column_seq,column_name,dtype,description,policy_flags\n"
+        "etl,ora_db,STG,customer,1,updated_at,Datetime,,\n"
+        "etl,ora_db,STG,customer,2,custno,Int64,,\n"
+        "etl,ora_db,STG,customer,3,region,Utf8,,\n"))
+
+    rules = load_table_rules(_write(tmp, "rs.csv",
+        "folder,table_name,dedup_columns,sort_order\n"
+        "etl,customer,custno,updated_at-|custno\n"))
+    assert rules["etl.customer"]["sort_spec"] == \
+        [("updated_at", "desc"), ("custno", "asc")]
+    assert rules["etl.customer"]["sort_cols"] == ["updated_at", "custno"]
+    #assert rules["etl.plain"]["sort_spec"] == []
+
+    validate_rules_references(master, rules)     # desc column passes now
+
+    # typo AFTER the dash must name the stripped column, not 'custn-'
+    bad = load_table_rules(_write(tmp, "rb.csv",
+        "folder,table_name,dedup_columns,sort_order\n"
+        "etl,customer,custno,custn-\n"))
+    try:
+        validate_rules_references(master, bad)
+        raise AssertionError("typo'd sort column accepted")
+    except ValueError as e:
+        assert "'custn'" in str(e) and "custn-" not in str(e), e
+    print("[PASS] rules + sort: parsed spec, stripped-name validation")
+
+def _smoke_settings_runs_root(tmp: Path):
+    """runs_root: explicit value honored; absent -> derived landing/_runs."""
+    base = {
+        "paths": {"landing_root": str(tmp / "landing"),
+                  "scratch_root": str(tmp / "scratch")},
+        "duckdb": {"memory_limit": "2GB"},
+    }
+
+    # absent -> derived
+    f = tmp / "s_derived.yaml"
+    f.write_text(yaml.dump(base))
+    s = load_settings(str(f))
+    assert s["paths"]["runs_root"] == str(tmp / "landing" / "_runs"), s["paths"]
+
+    # explicit -> honored verbatim
+    base["paths"]["runs_root"] = str(tmp / "elsewhere" / "runs")
+    f2 = tmp / "s_explicit.yaml"
+    f2.write_text(yaml.dump(base))
+    s2 = load_settings(str(f2))
+    assert s2["paths"]["runs_root"] == str(tmp / "elsewhere" / "runs")
+
+    # empty string -> rejected by schema (And(str, len))
+    base["paths"]["runs_root"] = ""
+    f3 = tmp / "s_empty.yaml"
+    f3.write_text(yaml.dump(base))
+    assert load_settings(str(f3)) is None
+    print("[PASS] settings: runs_root explicit honored, absent derived, empty rejected")
+
+
+def _smoke_runs_dir(tmp: Path):
+    """runs_dir mirrors landing layout: <root>/<date>/<folder>."""
+    d = runs_dir(str(tmp), date(2026, 10, 28), "etl")
+    assert d == tmp / "2026-10-28" / "etl", d
+    print("[PASS] runs_dir -> mirrored <date>/<folder> layout")
+
+
+def _smoke_prune_protects_non_date_dirs(tmp: Path):
+    """THE safety lock: prune never removes runs/, history/, non-date dirs.
+
+    Locks the invariant the shared staging root depends on (design note
+    rev.2 §1). If prune ever learns to delete non-date dirs, manifests
+    and history die with them.
+    """
+    # staging root with landing data + history siblings
+    root = tmp / "prune_safety"          # private sandbox: earlier tests
+    root.mkdir()                          # already own names like 'not_a_date'
+    (root / "2026-01-01").mkdir()         # old landing date-dir: pruned
+    (root / "2026-01-02").mkdir()         # old archive date-dir: pruned
+    (root / "_runs").mkdir()              # non-date: MUST SURVIVE
+    (root / "_history").mkdir()           # non-date: MUST SURVIVE
+    (root / "not_a_date").mkdir()        # non-date: MUST SURVIVE
+
+    prune_old_landing(root, days=30)
+    prune_old_runs(root, days=30)
+
+    assert not (root / "2026-01-01").exists(), "old landing dir survived"
+    assert not (root / "2026-01-02").exists(), "old archive dir survived"
+    assert (root / "_runs").exists(),    "PRUNE SAFETY VIOLATION: runs/ deleted"
+    assert (root / "_history").exists(), "PRUNE SAFETY VIOLATION: history/ deleted"
+    assert (root / "not_a_date").exists(), "PRUNE SAFETY VIOLATION: non-date dir deleted"
+    print("[PASS] prune protects runs/, history/, non-date dirs")
+
+
+
+if __name__ == "__main__":
+    import tempfile
+
+    setup_logging()   # dictConfig from lib/logger.py (falls back to defaults)
+
+    print("Running smoke tests for dpl.lib.common...\n")
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        _smoke_load_config_missing_file(tmp)
+        _smoke_load_settings(tmp)
+        _smoke_landing_dir(tmp)
+        _smoke_write_manifest(tmp)
+        _smoke_clean_scratch(tmp)
+        _smoke_prune_old_landing(tmp)
+        _smoke_validate_folders_unique(tmp)
+        _smoke_validate_folders_duplicate_raises(tmp)
+        _smoke_validate_folder_safe_segments(tmp)
+        _smoke_table_collision_detection(tmp)
+        _smoke_dedup_modes(tmp)
+        _smoke_dedup_invalid_specs_raise(tmp)
+        _smoke_load_schema_master(tmp)
+        _smoke_load_table_rules(tmp)
+        _smoke_validate_rules_references(tmp)
+        _smoke_schema_rejects_retired_keys(tmp)
+        _smoke_pending_ledger(tmp)
+        _smoke_registry_csv_malformed(tmp)
+        _smoke_master_bad_seq(tmp)
+        _smoke_parse_sort_spec(tmp)
+        _smoke_rules_with_sort(tmp)
+        _smoke_prune_protects_non_date_dirs(tmp)
+        _smoke_settings_runs_root(tmp)
+        _smoke_runs_dir(tmp)
+
+    # Try real config if present
+    cfg = _smoke_load_config()
+    if cfg and cfg.get("folder_validated"):
+        table_collision_check(cfg)
+        print("[PASS] real config passed collision + dedup checks")
+
+    print("\nALL SMOKE TESTS PASSED")

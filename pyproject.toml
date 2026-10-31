@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dpl"
+version = "0.1.0"
+description = "Data pipeline: Oracle/AD extraction to staging, parquet and DuckLake"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "duckdb>=1.0.0",
+    "oracledb>=2.0.0",
+    "polars>=2.0.0",
+    "pandas>=2.0.0",
+    "pyarrow>=18.0.0",
+    "psycopg[binary]>=3.0.0",
+    "pyyaml>=6.0",
+    "schema>=0.7.0",
+    "ldap3>=2.9.0",
+    "click>=8.0.0",
+    "tenacity>=9.0.0",
+    "cryptography>=50.0.0",
+    "authlib>=1.6.0",
+    "expiringdict>=1.2.0",
+    "jinja2>=3.0.0",
+    "pydantic>=2.0.0",
+    "orjson>=3.9.0",
+    "pyodbc>=5.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+dpl-run = "dpl.wrapper.run:main"
+dpl-update-history = "dpl.wrapper.update_history:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dpl = ["*.yaml", "*.csv"]
+
+[tool.pyrefly]
+conda-environment = "dpl"
+python-interpreter-path = "/opt/homebrew/Caskroom/miniconda/base/envs/dpl/bin/python"

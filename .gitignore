@@ -1,0 +1,39 @@
+# Secrets
+secrets/*
+
+# Logs
+logs/
+
+# Data Folders
+data/
+
+# Backup files
+*.bak
+
+# Unnecessary folders and its contents
+.vscode/
+.tmp/
+.conda/
+notes/
+.pytest_cache/
+__pycache__/
+
+# Unecessary files within a folder
+config/extractors/backups/*
+
+# Unnecessary files
+data_pipe_line_project*
+*.pyc
+.env
+*.db
+
+# macOS junk
+.DS_Store
+
+# Build artifacts
+*.egg-info/
+build/
+dist/
+
+# Staging (runtime output)
+staging/

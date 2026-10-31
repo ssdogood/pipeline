@@ -1,0 +1,81 @@
+# ==============================================================================
+# PER-SOURCE CONFIGURATION
+# ------------------------------------------------------------------------------
+# Connections, global text transforms, and the tables to extract.
+# NO paths here — landing/scratch roots live in settings.yaml.
+#
+# SECRETS: the `secret` value is a filename inside the secrets/ directory
+# containing the password (one line, whitespace-stripped at read time).
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# CONNECTIONS
+#
+# One entry per database connection. Each key IS the connection name used
+# by tables below and recorded in the manifest.
+#
+#   type     : driver selector ('oracle' always)
+#   username : database user
+#   secret   : filename in secrets/ holding the password
+#   host/port/service : database endpoint
+#   folder   : REQUIRED. Physical folder name under landing/<date>/ where this
+#              connection's tables are written. Rules enforced at startup:
+#                - unique across ALL connections (duplicates fail loudly)
+#                - single safe path segment (no '/', '\\', '..', leading '.')
+#              Renaming the connection later does NOT move data on disk;
+#              renaming `folder` DOES (treat as a new data location).
+# ------------------------------------------------------------------------------
+connections:
+  ora_db:
+    type: oracle
+    username: user_name
+    secret: ora.db.sec 
+    host: serv.subd.maind.com
+    port: 1523
+    service: prd
+    folder: etl
+
+
+# ------------------------------------------------------------------------------
+# TRANSFORMS (global)
+#
+# Text cleansing applied AT WRITE TIME to VARCHAR columns only.
+# Numeric and date columns are never touched by these settings.
+#
+#   uppercase           : true -> upper() all string values
+#   collapse_whitespace : true -> trim leading/trailing whitespace and
+#                                 collapse internal runs (spaces, tabs, etc.)
+#                                 to a single space
+#
+# NOTE: dedup is NOT configured here — it is per-table via 
+# `table_rules_oracle_to_stg`.
+# ------------------------------------------------------------------------------
+transforms:
+  uppercase: true
+  collapse_whitespace: true
+
+
+# ------------------------------------------------------------------------------
+# TABLES
+#
+# One entry per extracted table. Executed sequentially; a failed table does
+# not stop the others.
+#
+#   connection     : must match a key under `connections` above
+#   schema / name  : source identifiers (also recorded in the manifest)
+#   query          : the SELECT executed. Plain `SELECT * FROM schema.table`
+#                    is typical; joins must alias duplicate column names.
+#
+#   Output location: landing/<date>/<folder>/<name.lower()>/<name>-NNNN.parquet
+#   Table names within the same folder must be unique — the startup check
+#   fails loudly otherwise.
+# ------------------------------------------------------------------------------
+tables:
+
+  - connection: ora_db
+    schema: ETL
+    name: ACCT_OPENING
+    query: SELECT * FROM ETL.ACCT_OPENING
+
+  # add more tables as needed

@@ -1,0 +1,57 @@
+# ==============================================================================
+# CENTRALIZED LOGGING CONFIG — loaded by lib/logger.py:setup_logging()
+#
+# The built-in fallback in lib/logger.py mirrors this file. Keep both in sync.
+# Relative handler `filename` values are anchored to PROJECT_ROOT/logs/ at
+# load time, so this file stays portable across machines.
+#
+# NOTE on `defaults`: belt-and-braces only. Some Python versions do not
+# forward the formatter `defaults` key through dictConfig (observed in this
+# project's environment). The REAL guarantee that every record carries
+# run_id/table is the LoggerAdapter from get_run_logger() — all component
+# loggers emit through it, never through a bare getLogger().
+# ==============================================================================
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  standard:
+    format: "%(asctime)s | %(name)s | %(funcName)s | %(levelname)-8s | run_id=%(run_id)s | table=%(table)s | %(message)s"
+    defaults:
+      run_id: "-"
+      table: "-"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: INFO
+    formatter: standard
+    stream: ext://sys.stdout
+
+  file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: standard
+    filename: dpl_pipeline.log
+    maxBytes: 5242880
+    backupCount: 30
+    encoding: utf-8
+
+  errors:
+    class: logging.handlers.RotatingFileHandler
+    level: ERROR
+    formatter: standard
+    filename: dpl_errors.log
+    maxBytes: 5242880
+    backupCount: 30
+    encoding: utf-8
+
+loggers:
+  dpl:
+    handlers: [console, file, errors]
+    level: DEBUG
+    propagate: false
+
+root:
+  handlers: [console]
+  level: WARNING
