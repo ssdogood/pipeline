@@ -151,4 +151,4 @@ pytest test/
 You can contact me on silencesdogood at pm dot me.
 
 #### End Note
-I am only designed the application and tested it. The code is written by AI including the yaml files. 
+I only designed the application and tested it. The code is written by AI including the yaml files. 
