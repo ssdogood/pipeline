@@ -1,4 +1,4 @@
-# extractors/oracle_to_stg.py
+# dpl/extractors/oracle_to_stg.py
 """Oracle ETL extractor — glue between ora_connect, writer, and manifests.
 
 Usage:
@@ -14,15 +14,14 @@ fields (run_id, profile, times, status, pending_tables) so history can
 be rebuilt from files alone.
 
 Declared schema (M3/M5):
-    The master CSV (config/schema_master_*.csv + optional
-    config/schema_master_ad.csv) is the SINGLE source of truth for column
-    names, order and dtypes. It is loaded once per run, cross-checked
-    against config.yaml, and handed to iter_batches() so every batch
-    DataFrame is CONSTRUCTED with the declared dtypes instead of inferring
-    them from the data (which mis-types all-null columns and blows up later
-    in the writer).
+    The master CSV (config/extractors/schema_master_oracle_to_stg.csv) is 
+    the SINGLE source of truth for column names, order and dtypes. It is 
+    loaded once per run, cross-checkedagainst config.yaml, and handed to 
+    iter_batches() so every batch DataFrame is CONSTRUCTED with the declared 
+    dtypes instead of inferring them from the data (which mis-types all-null 
+    columns and blows up later in the writer).
 
-Logging: lib/logger.py — "dpl.oracle_to_stg" under the central dpl tree.
+Logging: dpl/lib/logger.py — "dpl.oracle_to_stg" under the central dpl tree.
 Every log line in the per-table scope carries run_id= and table= context
 (injected via get_run_logger), so one table's story across retries and
 interleaved output can be isolated with grep.
@@ -56,7 +55,7 @@ from dpl.lib.common import (
     FAILURE_STATUSES
 )
 
-from dpl.lib.ora_connect import connect, iter_batches, resolve_dtype
+from dpl.lib.ora_connect import connect, iter_batches, resolve_dtype, ORACLE_CONFIG_SCHEMA
 from dpl.lib.write_parquet import ParquetWriter
 from dpl.lib.logger import setup_logging, get_run_logger
 
@@ -68,7 +67,6 @@ SETTINGS_FILE = "config/settings.laptop.yaml"
 # Registry files — auto is generator-owned, ad is hand-maintained.
 # They are merged at load time; a table key may appear in only one of them.
 MASTER_AUTO = "config/extractors/schema_master_oracle_to_stg.csv"
-MASTER_AD = "config/extractors/schema_master_ad_to_stg.csv"
 RULES_CSV = "config/extractors/table_rules_oracle_to_stg.csv"
 
 
@@ -328,7 +326,7 @@ def extract_all(
     table_collision_check(cfg)
 
     # --- master CSV: load once, cross-check against config, then it rules ---
-    schema_master = load_schema_master(MASTER_AUTO, MASTER_AD)
+    schema_master = load_schema_master(MASTER_AUTO)
     validate_master_vs_config(cfg, schema_master, SOURCE_TYPE)
     rules = load_table_rules(RULES_CSV)
     validate_rules_references(schema_master, rules)
@@ -417,7 +415,7 @@ def main(run_id: str = "-") -> int:
         log.setLevel(logging.DEBUG)     # bump only this component, not the tree
 
     try:
-        cfg = load_config(CONFIG_FILE)
+        cfg = load_config(CONFIG_FILE, ORACLE_CONFIG_SCHEMA)
         if cfg is None:
             raise RuntimeError(f"Failed to load {CONFIG_FILE}")
 

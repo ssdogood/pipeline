@@ -1,4 +1,4 @@
-# lib/generate_schemas.py
+# dpl/lib/generate_schemas.py
 """Bootstrap schema generator — introspect configured queries, emit master CSV.
 
 Usage (from project root):
@@ -28,7 +28,7 @@ from dpl.lib.common import (
     _read_registry_csv,
 )
 
-from dpl.lib.ora_connect import connect
+from dpl.lib.ora_connect import connect, ORACLE_CONFIG_SCHEMA
 from dpl.lib.logger import setup_logging, get_run_logger
 
 log = get_run_logger("dpl.schema")
@@ -248,7 +248,7 @@ def generate_schemas(config_path: str, output_path: str,
     Returns: 0 success, 1 partial failure (some tables skipped).
     """
     log.info("loading config from %s", config_path)
-    cfg = load_config(config_path)
+    cfg = load_config(config_path, ORACLE_CONFIG_SCHEMA)
     if cfg is None:
         log.critical("Config load failed: %s", config_path)
         return 1

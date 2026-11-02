@@ -1,4 +1,4 @@
-# lib/ora_connect.py
+# dpl/lib/ora_connect.py
 """
 Oracle connection and query helpers (python-oracledb thin mode).
 
@@ -15,6 +15,8 @@ import oracledb
 import polars as pl
 import re
 
+from schema import Schema, And, Optional
+
 from dpl.lib.common import load_config, load_settings, SECRET_DIR
 from dpl.lib.logger import get_run_logger, setup_logging
 
@@ -26,12 +28,44 @@ SETTINGS_FILE = "config/settings.laptop.yaml"
 
 DEFAULT_BATCH_SIZE = 50_000
 
+ORACLE_CONFIG_SCHEMA = Schema({
+    "connections": {
+        str: {  # Dynamic key: Matches 'ora_db', 'postgres_prod', etc.
+             "type": And(str, len, lambda t: t.lower() == "oracle"),
+            "username": And(str, len),
+            "secret": And(str, len),
+            "host": And(str, len),
+            "port": int,
+            "service": And(str, len),
+            "folder": And(str, len),  # required folder name per connection
+            Optional(str): object  # Future-proof: allows adding new keys like 'timeout: 30' later
+            # NOTE: "folder_validated" is NOT declared here — it is runtime
+            # state set top-level by validate_config_folders(), never config.
+        }
+    },
+
+    "transforms": {
+        Optional(str): object  # Allows you to easily append more text transforms later
+    },
+
+    "tables": [
+        {
+            "connection": And(str, len),
+            "schema": And(str, len),
+            "name": And(str, len),
+            "query": And(str, len),
+            Optional(str): object  # Future-proof
+        }
+    ],
+    Optional(str): object  # Future-proof
+})
+
 # connect
 @contextmanager
 def connect(cfg: dict, connection_name: str):
     """
     Yield an open Oracle connection; always closed on exit.
-    with connect(cfg, "ora_caradb") as conn:
+    with connect(cfg, "ora_db") as conn:
         ...
     """
     try:
@@ -82,7 +116,7 @@ def _batch_rows(settings: dict) -> int:
     """
     if settings and settings.get("polars", {}).get("batch_rows"):
         return settings["polars"]["batch_rows"]
-    return DEFAULT_BATCH_ROWS
+    return DEFAULT_BATCH_SIZE
 
 def iter_batches(conn, query: str, batch_size: int = DEFAULT_BATCH_SIZE,
                  declared: dict[str, pl.DataType] = None,
@@ -199,13 +233,45 @@ def _smoke_declared_for(cfg: dict, table_name: str) -> dict | None:
 
 
 def _smoke_load_config() -> dict:
-    cfg = load_config(CONFIG_FILE)
+    cfg = load_config(CONFIG_FILE, ORACLE_CONFIG_SCHEMA)
     assert cfg is not None, f"Could not load/validate {CONFIG_FILE}"
     print(
         f"[PASS] config loaded: {len(cfg['tables'])} table(s), "
         f"{len(cfg['connections'])} connection(s)"
     )
     return cfg
+
+def _smoke_schema_rejects_retired_keys():
+    """Retired config keys fail loudly (drift, not silent ignore)."""
+    import tempfile
+    from pathlib import Path
+
+    base = (
+        "connections:\n"
+        "  ora_db:\n    {type: oracle, username: u, secret: s, host: h,\n"
+        "     port: 1521, service: svc, folder: etl}\n"
+        "transforms: {}\n"
+        "tables:\n"
+        "  - {connection: ora_db, schema: STG, name: T,\n"
+        "     query: 'SELECT 1'%s}\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        f_ok = tmp / "cfg_ok.yaml"
+        f_ok.write_text(base % "")
+        cfg = load_config(str(f_ok), ORACLE_CONFIG_SCHEMA)
+        assert cfg is not None, "clean config rejected"
+
+        for extra in [", dedup_columns: all", ", dedup_columns: 42",
+                      ", dedup_columns: [a, b]"]:
+            f_bad = tmp / "cfg_bad.yaml"
+            f_bad.write_text(base % extra)
+            try:
+                load_config(str(f_bad), ORACLE_CONFIG_SCHEMA)
+                raise AssertionError(f"retired key accepted: {extra!r}")
+            except ValueError as e:
+                assert "retired config key" in str(e), e
+    print("[PASS] config schema: retired/unknown table keys rejected")
 
 def _smoke_load_settings() -> dict:
     settings = load_settings(SETTINGS_FILE)
@@ -217,7 +283,7 @@ def _smoke_load_settings() -> dict:
     return settings
 
 def _smoke_connect(cfg: dict):
-    with connect(cfg, "ora_caradb") as conn:
+    with connect(cfg, "ora_db") as conn:
         v = conn.cursor().execute("SELECT 1 FROM dual").fetchone()[0]
         assert v == 1
         print("[PASS] connected; SELECT 1 FROM dual -> 1")
@@ -258,7 +324,7 @@ def _smoke_first_table_streamed(cfg: dict, settings: dict, table_name: str = Non
 def _smoke_read_query(cfg: dict, settings: dict):
     declared = {"one": pl.Int64, "label": pl.String}
     strict_cast = settings.get("polars", {}).get("strict_cast", True)
-    df = read_query(cfg, "ora_caradb",
+    df = read_query(cfg, "ora_db",
                     "SELECT 1 AS ONE, 'x' AS LABEL FROM dual",
                     declared=declared, strict=strict_cast)
     assert df.height == 1 and df["one"][0] == 1
@@ -266,7 +332,7 @@ def _smoke_read_query(cfg: dict, settings: dict):
 
 
 def _smoke_bad_query_rejected(cfg: dict):
-    with connect(cfg, "ora_caradb") as conn:
+    with connect(cfg, "ora_db") as conn:
         try:
             next(iter_batches(conn, "BEGIN NULL; END;",
                               declared={"dummy": pl.Int64}))
@@ -283,6 +349,7 @@ if __name__ == "__main__":
     cfg = _smoke_load_config()
     settings = _smoke_load_settings()
     print(f"[INFO] strict_cast={settings.get('polars', {}).get('strict_cast', True)}")
+    _smoke_schema_rejects_retired_keys()
     _smoke_connect(cfg)
     _smoke_first_table_streamed(cfg, settings)
     _smoke_read_query(cfg, settings)

@@ -5,32 +5,47 @@
 # handles any number of connections; add ad_atm later if topology changes.
 
 connections:
+  ad_atm:
+    type: ldap
+    uri: 'ldaps://serv.subd.maind.com:636'
+    username: 'subd\support'
+    secret: active_dir_subd.sec          # secrets/active_dir_subd.sec (UTF-8, one line)
+    auth: ntlm
+    page_size: 500
+    folder: ad-atm
+
   ad_main:
     type: ldap
     uri: 'ldaps://serv.subd.maind.com:636'
     username: 'subd\support'
-    secret: ad_subd.txt          # secrets/ad_subd.txt (UTF-8, one line)
+    secret: active_dir_subd.sec          # secrets/active_dir_subd.sec (UTF-8, one line)
     auth: ntlm
     page_size: 500
+    folder: ad-main
 
 tables:
-  - name: sd-users
-    folder: ad
-    connection: ad_main
-    search_base: 'DC=subd,DC=maind,DC=com'
-    filter: '(&(cn=*)(objectClass=user)(!(objectClass=computer)))'
-  - name: sd-groups
-    folder: ad
-    connection: ad_main
-    search_base: 'DC=subd,DC=maind,DC=com'
-    filter: '(|(|(|(objectClass=posixGroup)(objectClass=groupOfUniqueNames))(objectClass=groupOfNames))(objectClass=group))'
-  - name: sd-computers
-    folder: ad
-    connection: ad_main
-    search_base: 'DC=subd,DC=maind,DC=com'
-    filter: '(&(cn=*)(objectClass=computer))'
   - name: atm-computers
-    folder: ad
-    connection: ad_main
+    connection: ad_atm
+    schema: atm
     search_base: 'DC=atm,DC=maind,DC=com'
     filter: '(&(cn=*)(objectClass=computer))'
+
+  - name: subd-users
+    connection: ad_main
+    schema: subd
+    search_base: 'DC=subd,DC=maind,DC=com'
+    filter: '(&(cn=*)(objectClass=user)(!(objectClass=computer)))'
+
+  - name: subd-groups
+    connection: ad_main
+    schema: subd
+    search_base: 'DC=subd,DC=maind,DC=com'
+    filter: '(|(|(|(objectClass=posixGroup)(objectClass=groupOfUniqueNames))(objectClass=groupOfNames))(objectClass=group))'
+
+  - name: subd-computers
+    connection: ad_main
+    schema: subd
+    search_base: 'DC=subd,DC=maind,DC=com'
+    filter: '(&(cn=*)(objectClass=computer))'
+
+  # add more tables here as needed, e.g. subd-contacts, atm-users, etc.
