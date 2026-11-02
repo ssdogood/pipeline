@@ -1,0 +1,12 @@
+folder,table_name,dedup_columns,sort_order
+ad-atm,atm-computers,objectguid,objectguid
+ad-atm,atm-computers_memberof,objectguid|value,objectguid|value
+ad-atm,atm-computers_serviceprincipalname,objectguid|value,objectguid|value
+ad-main,subd-users,objectguid,objectguid
+ad-main,subd-users_memberof,objectguid|value,objectguid|value
+ad-main,subd-users_proxyaddresses,objectguid|value,objectguid|value
+ad-main,subd-groups,objectguid,objectguid
+ad-main,subd-groups_member,objectguid|value,objectguid|value
+ad-main,subd-computers,objectguid,objectguid
+ad-main,subd-computers_memberof,objectguid|value,objectguid|value
+ad-main,subd-computers_serviceprincipalname,objectguid|value,objectguid|value

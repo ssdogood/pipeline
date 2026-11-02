@@ -1,4 +1,4 @@
-# lib/ldap_connect.py
+# dpl/lib/ldap_connect.py
 """LDAP connection layer for Active Directory extraction.
 
 Contract mirrors lib/ora_connect.py at the connection level:
@@ -8,7 +8,7 @@ Contract mirrors lib/ora_connect.py at the connection level:
       same discipline as ora_connect.iter_batches)
 
 Usage:
-    python -m lib.ldap_connect          # connection smoke tests
+    python -m dpl.lib.ldap_connect          # connection smoke tests
 """
 from __future__ import annotations
 
@@ -16,21 +16,50 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from ldap3 import ALL, NTLM, SIMPLE, SUBTREE, Connection, Server
+from schema import Schema, And, Optional
 
+from dpl.lib.common import load_config, load_settings, SECRET_DIR
 from dpl.lib.logger import get_run_logger, setup_logging
 
 log = get_run_logger("dpl.ldap")
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SECRETS_DIR = PROJECT_ROOT / "secrets"
 CONFIG_FILE = "config/extractors/ad_to_stg.yaml"
 PAGE_SIZE_DEFAULT = 500
 AUTH_MAP = {"ntlm": NTLM, "simple": SIMPLE}
 
+# The LDAP config contract. Sole owner: this module (the AD connector).
+LDAP_CONFIG_SCHEMA = Schema({
+    "connections": {
+        str: {
+            "type": And(str, len, lambda t: t.lower() == "ldap"),
+            "uri": And(str, len),
+            "username": And(str, len),
+            "secret": And(str, len),
+            Optional("auth", default="ntlm"): And(str, len),
+            Optional("page_size", default=500): And(int, lambda n: n > 0),
+            "folder": And(str, len),
+            Optional(str): object
+        }
+    },
+
+    Optional("transforms"): {Optional(str): object},
+
+    "tables": [
+        {
+            "connection": And(str, len),
+            "schema": And(str, len),
+            "name": And(str, len),
+            "search_base": And(str, len),
+            "filter": And(str, len),
+            Optional(str): object
+        }
+    ],
+    Optional(str): object
+})
 
 def _read_secret(secret_file: str) -> str:
     """Read one secret (UTF-8, whitespace-stripped). Raise loudly if absent."""
-    path = SECRETS_DIR / secret_file
+    path = SECRET_DIR / secret_file
     if not path.is_file():
         raise FileNotFoundError(f"secret file not found: {path}")
     return path.read_text(encoding="utf-8").strip()
@@ -126,8 +155,7 @@ def _smoke_first_entry(cfg: dict):
 
 def main() -> int:
     setup_logging()
-    from lib.common import load_config
-    cfg = load_config(CONFIG_FILE)
+    cfg = load_config(CONFIG_FILE, LDAP_CONFIG_SCHEMA)
     if cfg is None:
         print("[FAIL] config could not be loaded")
         return 3

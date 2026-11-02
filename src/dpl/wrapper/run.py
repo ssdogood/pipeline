@@ -1,4 +1,4 @@
-# wrapper/run.py
+# dpl/wrapper/run.py
 """Wrapper entry point: python -m dpl.wrapper.run [--profile NAME] [--tables a,b]
 
 Runs from project root only (relative config paths, like every other
@@ -38,6 +38,8 @@ from dpl.lib.common import (
     get_run_logger,
     runs_dir,
 )
+from dpl.lib.ora_connect import ORACLE_CONFIG_SCHEMA
+from dpl.lib.ldap_connect import LDAP_CONFIG_SCHEMA
 from dpl.lib.logger import setup_logging
 from dpl.wrapper.profiles import load_wrapper_config, resolve_profile
 from dpl.wrapper.update_history import (
@@ -51,10 +53,29 @@ EXIT_EXTRACT = 1
 EXIT_HISTORY = 2
 EXIT_CONFIG = 3
 
-CONFIG_PATH = "config/extractors/oracle_to_stg.yaml"
+CONFIG_PATH_ORACLE = "config/extractors/oracle_to_stg.yaml"
+CONFIG_PATH_AD = "config/extractors/ad_to_stg.yaml"
 SETTINGS_PATH = os.environ.get("DPL_SETTINGS", "config/settings.laptop.yaml")
 WRAPCFG_PATH = "config/wrapper.yaml"
-SCHEMA_MASTER_PATH = "config/extractors/schema_master_oracle_to_stg.csv"
+SCHEMA_MASTER_PATH_ORACLE = "config/extractors/schema_master_oracle_to_stg.csv"
+SCHEMA_MASTER_PATH_AD = "config/extractors/schema_master_ad_to_stg.csv"
+
+# Type-to-extractor registry — adding PostgreSQL/MSSQL later is just
+# "register a new source type and config path", no wrapper rewrite.
+SOURCE_TYPES = {
+    "oracle": {
+        "config_path": CONFIG_PATH_ORACLE,
+        "schema": ORACLE_CONFIG_SCHEMA,
+        "master": SCHEMA_MASTER_PATH_ORACLE,
+        "extractor": "dpl.extractors.oracle_to_stg",
+    },
+    "ldap": {
+        "config_path": CONFIG_PATH_AD,
+        "schema": LDAP_CONFIG_SCHEMA,
+        "master": SCHEMA_MASTER_PATH_AD,
+        "extractor": "dpl.extractors.ad_to_stg",
+    },
+}
 
 
 def _utc_now_iso() -> str:
@@ -80,9 +101,8 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------------
     wcfg = load_wrapper_config(WRAPCFG_PATH)
     settings = load_settings(SETTINGS_PATH)
-    cfg = load_config(CONFIG_PATH)
-    if wcfg is None or settings is None or cfg is None:
-        log.error("config validation failed — aborting before any step")
+    if wcfg is None or settings is None:
+        log.error("wrapper/settings config validation failed — aborting")
         return EXIT_CONFIG
 
     try:
@@ -96,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         validate_db_path(history_db, settings)
     except ValueError as e:
         log.error("%s", e)
-        return EXIT_CONFIG          # badly configured path = config error
+        return EXIT_CONFIG
 
     manifest_days = wcfg["retention"]["manifest_days"]
 
@@ -157,20 +177,51 @@ def main(argv: list[str] | None = None) -> int:
                         "will fail loudly at extraction if it matters)", rc)
 
             elif name == "reconcile_pending":
-                master = load_schema_master(SCHEMA_MASTER_PATH)
+                # Merge all master CSVs for cross-source validation
+                master_oracle = load_schema_master(SCHEMA_MASTER_PATH_ORACLE)
+                master_ad = load_schema_master(SCHEMA_MASTER_PATH_AD, None)
+                master = {**master_oracle, **master_ad}
                 resolved = reconcile_pending(master)
                 log.info("reconciled pending entries: %s",
                          resolved if resolved else "none")
 
             elif name == "extract":
-                from dpl.extractors.oracle_to_stg import extract_all
-                manifests, any_failed = extract_all(
-                    cfg, settings, load_date,
-                    force=step.get("force", False),
-                    only_tables=only_tables,
-                    run_id=run_id,
-                    profile=args.profile)
-                extract_failed = any_failed
+                # Multi-source extract: one config per type, shared settings
+                cfgs = {}
+                schemas = {}
+                masters = {}
+                for src_type, cfg in SOURCE_TYPES.items():
+                    try:
+                        cfgs[src_type] = load_config(cfg["config_path"], cfg["schema"])
+                        if cfgs[src_type] is None:
+                            log.error("failed to load %s config (%s)",
+                                      src_type, cfg["config_path"])
+                            extract_failed = True
+                            continue
+                        schemas[src_type] = cfgs[src_type]
+                        masters[src_type] = load_schema_master(cfg["master"])
+                    except Exception as exc:
+                        log.error("%s config/master load failed: %s", src_type, exc)
+                        extract_failed = True
+                        continue
+
+                # Call each extractor, collect manifests
+                for src_type, cfg in cfgs.items():
+                    try:
+                        mod = __import__(SOURCE_TYPES[src_type]["extractor"],
+                                        fromlist=["extract_all"])
+                        extractor_fn = getattr(mod, "extract_all")
+                        manifests_src, any_failed = extractor_fn(
+                            cfg, settings, load_date,
+                            force=step.get("force", False),
+                            only_tables=only_tables,
+                            run_id=run_id,
+                            profile=args.profile)
+                        if any_failed:
+                            extract_failed = True
+                    except Exception as exc:
+                        log.error("%s extract_all failed: %s", src_type, exc, exc_info=True)
+                        extract_failed = True
 
             elif name == "update_history":
                 ingested, skipped = update_history(

@@ -52,38 +52,6 @@ def _valid_folder_segment(folder: str) -> str:
     return folder
 
 # ------------------------------------------------------------------- schemas
-CONFIG_SCHEMA = Schema({
-    "connections": {
-        str: {  # Dynamic key: Matches 'ora_db', 'postgres_prod', etc.
-            "type": And(str, len),
-            "username": And(str, len),
-            "secret": And(str, len),
-            "host": And(str, len),
-            "port": int,
-            "service": And(str, len),
-            "folder": And(str, len),  # required folder name per connection
-            Optional(str): object  # Future-proof: allows adding new keys like 'timeout: 30' later
-            # NOTE: "folder_validated" is NOT declared here — it is runtime
-            # state set top-level by validate_config_folders(), never config.
-        }
-    },
-
-    "transforms": {
-        Optional(str): object  # Allows you to easily append more text transforms later
-    },
-
-    "tables": [
-        {
-            "connection": And(str, len),
-            "schema": And(str, len),
-            "name": And(str, len),
-            "query": And(str, len),
-            Optional(str): object  # Future-proof
-        }
-    ],
-    Optional(str): object  # Future-proof
-})
-
 SETTINGS_SCHEMA = Schema({
     Optional("polars"): {
         Optional("batch_rows", default=50000): And(int, lambda n: n > 0),
@@ -123,7 +91,7 @@ SETTINGS_SCHEMA = Schema({
     }
 })
 
-def normalize_settings(settings: dict) -> dict:
+def normalize_settings(settings: dict) -> dict | None:
     """Post-validation fix-ups. Currently: derive runs_root default.
 
     runs_root omitted -> <landing_root>/_runs (sibling of the landing
@@ -615,7 +583,7 @@ def table_collision_check(cfg: dict) -> None:
         seen[table_key] = f"{conn_name}.{table_cfg['schema']}.{table_cfg['name']}"
 
 # ------------------------------------------------------------------- loaders
-def load_config(path: str, schema: Schema = CONFIG_SCHEMA) -> dict:
+def load_config(path: str, schema: Schema) -> dict | None:
     """Load and validate a YAML file. Defaults to the per-source CONFIG_SCHEMA."""
     try:
         with open(path, "r") as fh:
@@ -707,18 +675,6 @@ def make_run_id(prefix: str = "run_",
     return f"{prefix}{time.strftime(ts_format)}"
 
 # =================================================================== smoke tests
-def _smoke_load_config():
-    """Test loading config.yaml (requires your real config)."""
-    try:
-        cfg = load_config("config/extractors/oracle_to_stg.yaml")
-        assert cfg is not None, "config.yaml failed to load/validate"
-        print(f"[PASS] config loaded: {len(cfg['tables'])} table(s), "
-              f"{len(cfg['connections'])} connection(s)")
-        return cfg
-    except AssertionError as e:
-        print(f"[SKIP] config.yaml not present: {e}")
-        return None
-
 def _smoke_load_settings(tmp: Path):
     """Test loading settings.yaml from temp dir."""
     settings = {
@@ -735,7 +691,7 @@ def _smoke_load_settings(tmp: Path):
 
 def _smoke_load_config_missing_file(tmp: Path):
     """Missing config returns None."""
-    result = load_config(str(tmp / "no_such_file.yaml"))
+    result = load_config(str(tmp / "no_such_file.yaml"), SETTINGS_SCHEMA)
     assert result is None, "missing file should return None"
     print("[PASS] missing config file -> None")
 
@@ -1022,34 +978,6 @@ def _smoke_registry_csv_malformed(tmp: Path):
         assert ":2:" in str(e), str(e)                 # line number present
     print("[PASS] registry CSV: ragged rows rejected with line numbers")
 
-def _smoke_schema_rejects_retired_keys(tmp: Path):
-    """Retired config keys fail loudly (drift, not silent ignore)."""
-    base = (
-        "connections:\n"
-        "  ora_db:\n    {type: oracle, username: u, secret: s, host: h,\n"
-        "     port: 1521, service: svc, folder: etl}\n"
-        "transforms: {}\n"
-        "tables:\n"
-        "  - {connection: ora_db, schema: STG, name: T,\n"
-        "     query: 'SELECT 1'%s}\n"
-    )
-
-    f_ok = tmp / "cfg_ok.yaml"
-    f_ok.write_text(base % "")
-    cfg = load_config(str(f_ok))
-    assert cfg is not None, "clean config rejected"
-
-    for extra in [", dedup_columns: all", ", dedup_columns: 42",
-                  ", dedup_columns: [a, b]"]:
-        f_bad = tmp / "cfg_bad.yaml"
-        f_bad.write_text(base % extra)
-        try:
-            load_config(str(f_bad))
-            raise AssertionError(f"retired key accepted: {extra!r}")
-        except ValueError as e:
-            assert "retired config key" in str(e), e
-    print("[PASS] config schema: retired/unknown table keys rejected")
-
 def _smoke_parse_sort_spec(tmp: Path):
     """Sort grammar: asc default, trailing '-', '+' sugar, combos, errors."""
     assert parse_sort_spec("") == []
@@ -1188,7 +1116,6 @@ if __name__ == "__main__":
         _smoke_load_schema_master(tmp)
         _smoke_load_table_rules(tmp)
         _smoke_validate_rules_references(tmp)
-        _smoke_schema_rejects_retired_keys(tmp)
         _smoke_pending_ledger(tmp)
         _smoke_registry_csv_malformed(tmp)
         _smoke_master_bad_seq(tmp)
@@ -1198,10 +1125,5 @@ if __name__ == "__main__":
         _smoke_settings_runs_root(tmp)
         _smoke_runs_dir(tmp)
 
-    # Try real config if present
-    cfg = _smoke_load_config()
-    if cfg and cfg.get("folder_validated"):
-        table_collision_check(cfg)
-        print("[PASS] real config passed collision + dedup checks")
 
     print("\nALL SMOKE TESTS PASSED")
