@@ -1,3 +1,8 @@
+.gitignore
+# Executables
+bin/sops-v*
+bin/age-keygen-v*
+
 # Secrets
 secrets/*
 
