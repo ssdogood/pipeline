@@ -29,12 +29,14 @@
 connections:
   ora_db:
     type: oracle
-    username: user_name
-    secret: ora.db.sec 
     host: serv.subd.maind.com
     port: 1523
     service: prd
     folder: etl
+    users:
+      user_name:
+        credential_ref: ora_db.user_name.password
+        role: read-only
 
 
 # ------------------------------------------------------------------------------

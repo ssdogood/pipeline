@@ -267,37 +267,50 @@ def _validate(
 # Path hygiene (used by providers via config.base_dir)
 # --------------------------------------------------------------------------
 
+def _expand_tilde_for_keys(raw_value: str, what: str) -> str:
+    """Expand leading ~ to the user's home directory.
+    
+    Called ONLY for key-file paths (age_key_file, key_file).
+    Returns the input unchanged if it doesn't start with ~.
+    """
+    if not isinstance(raw_value, str):
+        raise PassMgrConfigError(
+            f"pass_mgr: key path '{what}' must be a string, got {raw_value!r}."
+        )
+    if raw_value.startswith("~/"):
+        from pathlib import Path
+        expanded = str(Path.home() / raw_value[2:])
+        return expanded
+    return raw_value
+
 def resolve_relative_path(raw_value: Any, what: str, base_dir: Path) -> Path:
-    """Resolve a config-supplied path against `base_dir`, strictly.
+    """Resolve a config-supplied path.
 
-    Enforces the design rule that config paths are relative and stay inside
-    the project tree: absolute paths and traversal outside the root are
-    rejected with errors naming the offending value.
-
-    Args:
-        raw_value: the value from a method section (expected string).
-        what: human-readable description for error messages, e.g.
-            "sops.binary".
-        base_dir: project root to resolve against.
-
-    Returns:
-        Absolute, resolved Path inside the project tree.
-
-    Raises:
-        PassMgrConfigError: value missing, not a string, absolute, or
-            escaping the project root.
+    Key-file paths (age_key_file, key_file) may use ~/... — expanded to
+    the user's home, but the result must stay INSIDE home. Everything
+    else (binaries, vaults, manifest) must be relative and stay inside
+    the project tree, as before.
     """
     if not isinstance(raw_value, str) or not raw_value.strip():
         raise PassMgrConfigError(
             f"pass_mgr: path for '{what}' must be a non-empty string, got "
             f"{raw_value!r}."
         )
+    if what.endswith("_key_file") and raw_value.startswith("~"):
+        expanded = Path(raw_value).expanduser().resolve()
+        home = Path.home().resolve()
+        if expanded != home and home not in expanded.parents:
+            raise PassMgrConfigError(
+                f"pass_mgr: key path for '{what}' escapes the home "
+                f"directory ('{raw_value}' -> '{expanded}'). Not permitted."
+            )
+        return expanded
+
     candidate = Path(raw_value)
     if candidate.is_absolute():
         raise PassMgrConfigError(
             f"pass_mgr: path for '{what}' must be relative to the project "
-            f"root (got absolute path '{raw_value}'). Relative paths keep "
-            f"the tree portable across laptop/office/server transport."
+            f"root (got absolute path '{raw_value}')."
         )
     resolved = (base_dir / candidate).resolve()
     root = base_dir.resolve()

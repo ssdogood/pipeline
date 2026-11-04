@@ -39,6 +39,3 @@ data_pipe_line_project*
 *.egg-info/
 build/
 dist/
-
-# Staging (runtime output)
-staging/
