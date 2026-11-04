@@ -20,6 +20,10 @@ POLICY (enforced by design):
       actions, timestamps, and one-way fingerprints only.
     - The encrypted vault file always carries a human-readable
       warning header at the top, telling readers not to edit it.
+    - The `secrets:` mapping in config/pass_mgr.<env>.yaml is
+      machine-managed: scan cross-checks it against the extractors'
+      credential_refs and offers to regenerate it. Comments ABOVE the
+      `secrets:` line survive; everything below it is regenerated.
     - Backups (encrypted copies) keep the last 3 versions under
       secrets/backups/.
 """
@@ -28,6 +32,7 @@ import getpass
 import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -54,9 +59,7 @@ BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | [%(levelname)s] | %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-    ],
+    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8")],
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
@@ -78,7 +81,7 @@ def fail(message: str) -> None:
 
 
 def log_action(action: str, details: str) -> None:
-    """Log a vault operation to both file and stderr."""
+    """Log a vault operation to the audit file, echo one line."""
     msg = f"{action}: {details}"
     logger.info(msg)
     print(f"[LOG] {msg}")
@@ -136,7 +139,7 @@ def flatten(tree: dict, prefix: str = "") -> dict:
         name = f"{prefix}.{key}" if prefix else str(key)
         if isinstance(value, dict):
             if not value:
-                continue
+                continue  # tolerate empty namespaces (cleaned by prune)
             result.update(flatten(value, name))
         elif isinstance(value, str):
             result[name] = value
@@ -170,6 +173,7 @@ def merge_tree(base: dict, extra: dict) -> dict:
             result[key] = value
     return result
 
+
 def prune_empty_namespaces(tree: dict) -> list:
     """Remove empty namespace dicts left behind by leaf deletions.
     Mutates the tree in place; returns names of removed namespaces."""
@@ -182,8 +186,15 @@ def prune_empty_namespaces(tree: dict) -> list:
                 removed.append(key)
     return removed
 
+
 def discover_credential_refs() -> list:
-    """Scan config/extractors/*.yaml and collect all credential_ref paths."""
+    """Scan config/extractors/*.yaml and collect all credential_ref paths.
+
+    Returns a list of tuples: [(vault_path, source_file, connection, user)]
+    Users WITHOUT a credential_ref are ignored — a connection may exist
+    with no managed password. Commenting out a credential_ref retires it:
+    the next scan flags the corresponding vault secret as stale.
+    """
     refs = []
     if not EXTRACTORS_DIR.is_dir():
         log_action("SCAN", f"extractors directory not found at {EXTRACTORS_DIR}")
@@ -217,6 +228,77 @@ def discover_credential_refs() -> list:
     log_action("SCAN", f"discovered {len(refs)} credential_ref entries "
                        f"across {len(cfg_files)} config files")
     return refs
+
+
+# -------------------------------------------------------- config crosscheck --
+
+def sync_secret_mapping(env: str, required_paths: set, dry_run: bool) -> None:
+    """Cross-check extractor credential_refs against the `secrets:` mapping
+    in config/pass_mgr.<env>.yaml and offer to regenerate the mapping so it
+    contains EXACTLY the declared refs.
+
+    The mapping is derived data — machine-managed. Rewrite rules:
+      - everything ABOVE the `secrets:` line is preserved verbatim
+        (comments included — keep your comments there);
+      - the `secrets:` section itself is regenerated to match the refs.
+    Returns silently when the two sides already agree.
+    """
+    config_path = CONFIG_DIR / f"pass_mgr.{env}.yaml"
+    if not config_path.is_file():
+        fail(f"no config for environment '{env}' ({config_path})")
+
+    cfg = yaml.safe_load(config_path.read_text())
+    current = set((cfg.get("secrets") or {}).keys())
+
+    missing = sorted(required_paths - current)
+    stale = sorted(current - required_paths)
+    if not missing and not stale:
+        return  # already canonical — say nothing
+
+    print(f"\n--- CONFIG CROSS-CHECK (pass_mgr.{env}.yaml) ---")
+    if missing:
+        print(f"  + declared in extractors, missing from config ({len(missing)}):")
+        for name in missing:
+            print(f"      {name}")
+    if stale:
+        print(f"  - in config, but no extractor declares them ({len(stale)}):")
+        for name in stale:
+            print(f"      {name}")
+
+    if dry_run:
+        print("  [DRY RUN] mapping left unchanged")
+        return
+
+    resp = input("  Regenerate the secrets: mapping to match the extractors? (y/N) "
+                 ).strip().lower()
+    if resp != "y":
+        print("  [skip] Config left unchanged. Note: get_secret() will refuse "
+              "names that are not declared in this mapping.")
+        log_action("SYNC_MAPPING", f"declined for {env}")
+        return
+
+    lines = config_path.read_text().splitlines(keepends=True)
+    cut_index = None
+    for idx, line in enumerate(lines):
+        if re.match(r"^secrets:\s*(#.*)?$", line):
+            cut_index = idx
+            break
+
+    block = "secrets:\n" + "".join(f'  "{n}": {{}}\n'
+                                   for n in sorted(required_paths))
+    if cut_index is None:
+        new_text = "".join(lines).rstrip("\n") + "\n\n" + block
+    else:
+        new_text = "".join(lines[:cut_index]) + block
+
+    tmp = config_path.with_name(config_path.name + ".tmp")
+    tmp.write_text(new_text)
+    os.replace(tmp, config_path)
+
+    log_action("SYNC_MAPPING",
+               f"pass_mgr.{env}.yaml regenerated: "
+               f"added={[n for n in missing]}, removed={[n for n in stale]}")
+    print("  [ok] Config mapping updated (commit this change).")
 
 
 # --------------------------------------------------------------- sops I/O ---
@@ -328,8 +410,7 @@ def seal_and_verify(binary: Path, key_file: Path, target: Path,
                     tree: dict) -> Path:
     """Encrypt tree, verify the candidate decrypts correctly, back up
     the old vault, THEN atomically replace it. The old vault survives
-    any failure short of the final os.replace. The warning header is
-    prepended to the written file and survives every re-seal."""
+    any failure short of the final os.replace."""
     expected_names = set(flatten(tree))
     fd, tmp_name = tempfile.mkstemp(dir=target.parent,
                                     prefix=".vault-", suffix=".sops.tmp")
@@ -340,7 +421,6 @@ def seal_and_verify(binary: Path, key_file: Path, target: Path,
             fh.write(vault_header())
             fh.write(ciphertext)
 
-        # Round-trip verification
         reopened = run_sops(
             binary,
             ["--decrypt", "--input-type", "yaml", "--output-type", "yaml",
@@ -383,10 +463,12 @@ def cmd_list(env: str) -> None:
 
 
 def cmd_scan(env: str, dry_run: bool = False) -> None:
-    """Declarative sync: config files are the source of truth; the vault
-    is the implementation. Flow: discover -> categorize -> prompt ->
-    confirm -> backup -> write. Nothing is written until the final
-    confirmation, so Ctrl-C during password entry is a clean abort."""
+    """Declarative sync: extractor configs are the source of truth; the
+    vault (and the config's secrets mapping) are implementations.
+    Flow: cross-check config mapping -> discover -> categorize -> prompt
+    -> confirm -> backup -> write. Nothing is written to the vault until
+    the final confirmation, so Ctrl-C during password entry is clean.
+    """
     log_action("SCAN_START", f"environment={env}, dry_run={dry_run}")
     binary, key_file, encrypted_file = sops_settings(load_env_config(env))
 
@@ -396,8 +478,11 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     if not required_paths:
         print("\nNo credential_ref entries found in config/extractors/*.yaml")
         print("Hint: under a user, add "
-              "'credential_ref: connections.<conn>.<user>.password'")
+              "'credential_ref: <conn>.<user>.password'")
         return
+
+    # Cross-check + optional regeneration of the config secrets mapping.
+    sync_secret_mapping(env, required_paths, dry_run=dry_run)
 
     existing_tree = decrypt_to_tree(binary, key_file, encrypted_file)
     existing_paths = set(flatten(existing_tree).keys())
@@ -408,6 +493,7 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     existing_but_stale = sorted(existing_paths - required_paths)
     existing_and_needed = sorted(required_paths & existing_paths)
 
+    # Detect empty namespaces left by earlier deletions (cleanup candidates)
     cleanup_probe = dict(existing_tree)
     pending_cleanup = prune_empty_namespaces(cleanup_probe)
     if pending_cleanup:
@@ -441,7 +527,7 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
         print(f"To proceed, run: ./vault.sh scan {env}")
         return
 
-    # Interactive collection (nothing written yet)
+    # Interactive collection (nothing written to the vault yet)
     final_tree = dict(existing_tree)
     additions = []
     updates = []
@@ -518,7 +604,7 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     cleaned = prune_empty_namespaces(final_tree)
 
     # Summary and final confirmation
-    if not (additions or updates or deletions):
+    if not (additions or updates or deletions or cleaned):
         print(f"\n{'='*60}")
         print("NO CHANGES REQUIRED")
         print(f"{'='*60}")
@@ -531,7 +617,7 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     print(f"Additions:  {len(additions)}")
     print(f"Updates:    {len(updates)}")
     print(f"Deletions:  {len(deletions)}")
-    print(f"Cleanup:    {len(cleaned)} empty namespace(s) removed") 
+    print(f"Cleanup:    {len(cleaned)} empty namespace(s) removed")
     print(f"Unchanged:  {len(existing_and_needed) - len(updates)}")
 
     print(f"\nReady to write the reconciled vault.")
@@ -555,7 +641,8 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
 
     log_action("SCAN_COMPLETE",
                f"added={len(additions)}, updated={len(updates)}, "
-               f"deleted={len(deletions)}, final_count={len(final_names)}")
+               f"deleted={len(deletions)}, cleaned={len(cleaned)}, "
+               f"final_count={len(final_names)}")
 
 
 # ------------------------------------------------------------------ main ----
@@ -570,6 +657,8 @@ notes:
   - 'scan' is the ONLY way to add, rotate, or delete secrets.
     New secrets are entered via a masked prompt; no plaintext
     fragment files are ever used.
+  - 'scan' also cross-checks and regenerates the secrets: mapping in
+    config/pass_mgr.<env>.yaml to match the extractors' credential_refs.
   - Always run with --dry-run first to preview the reconciliation plan.
   - A vault is created automatically on the first 'scan' if none exists.
 """
