@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Smoke tests for the vault operations tool (scripts/vault_ops.py).
 
-These test the OPERATOR TOOL, not the library — the library has its
+These test the OPERATOR TOOL, not the library - the library has its
 own 67-test suite. Offline doctrine applies: everything runs in temp
 directories against fixture configs; no network; no real secrets.
 
 What is deliberately NOT tested here: anything that requires the
-real sops binary, the real age key, or the real vault — the library
+real sops binary, the real age key, or the real vault - the library
 suite already covers the crypto round-trip. These tests cover the
 logic that burned us live: argument parsing, categorization, tree
 merging, pruning, and the config cross-check.
@@ -20,6 +20,10 @@ from pathlib import Path
 
 import pytest
 import yaml
+import json
+
+import pytest
+from cryptography.fernet import Fernet
 
 # Import vault_ops from the scripts directory (it is NOT a package).
 SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
@@ -57,7 +61,7 @@ def write_extractor(tmp_project, filename, connections: dict) -> None:
 
 def write_pass_cfg(tmp_project, env: str, secrets: list) -> None:
     p = tmp_project / "config" / f"pass_mgr.{env}.yaml"
-    body = ("# header comment — must survive\n"
+    body = ("# header comment - must survive\n"
             "version: 1\n"
             "default_method: sops\n"
             "methods:\n"
@@ -209,7 +213,7 @@ class TestSecretMappingSync:
         vault_ops.sync_secret_mapping("laptop", {"n.v"}, dry_run=False)
 
         text = (tmp_project / "config" / "pass_mgr.laptop.yaml").read_text()
-        assert "# header comment — must survive" in text
+        assert "# header comment - must survive" in text
         assert "default_method: sops" in text
         assert "methods:" in text
 
@@ -264,7 +268,7 @@ class TestRegressions:
         # when the real password never reached final_tree. Guard: any
         # value routed through the additions loop must be real. Here we
         # assert the API contract: unflatten inserts exactly what it is
-        # given — so callers must only ever feed it prompted values.
+        # given - so callers must only ever feed it prompted values.
         assert vault_ops.unflatten({"a.b": "typed-value"})["a"]["b"] \
             == "typed-value"
 
@@ -279,7 +283,202 @@ class TestRegressions:
         assert fp1 != fp4                 # name-salted
 
     def test_vault_header_has_do_not_edit_and_timestamp(self):
-        h = vault_ops.vault_header()
-        assert "DO NOT EDIT" in h
-        assert "Last sealed:" in h
-        assert h.startswith("# ")         # it is pure YAML comment
+        for header in (vault_ops.fernet_header(), vault_ops.sops_header()):
+            assert "DO NOT EDIT" in header
+            assert "Last synced:" in header
+
+"""Sync-behavior smoke tests for the fernet-canonical vault_ops.
+
+Covers the five sync guarantees plus a full tool-side round trip:
+  1. sops mirror skipped QUIETLY (SYNC_SKIP logged) when binary missing
+  2. sops mirror skipped when no sops config section exists
+  3. missing fernet section is a HARD failure (canonical, not optional)
+  4. mirror absent / unreadable / drifted  -> refresh needed
+  5. mirror already in sync -> not rewritten
+  6. seal refuses an empty tree (anti-wipe guard)
+  7. seal -> decrypt round trip through the real envelope format,
+     including the DO-NOT-EDIT header
+"""
+
+# --------------------------------------------------------------- scaffolding --
+
+def install_project(monkeypatch, tmp_path):
+    """Point every vault_ops path constant at a throwaway tree."""
+    root = tmp_path / "pipeline"
+    dirs = {
+        "CONFIG_DIR": root / "config",
+        "EXTRACTORS_DIR": root / "config" / "extractors",
+        "SECRETS_DIR": root / "secrets",
+        "BACKUP_DIR": root / "secrets" / "backups",
+        "LOG_FILE": root / "secrets" / "logs" / "dpl_pass_mgr.log",
+        "PROJECT_ROOT": root,
+    }
+    for name, path in dirs.items():
+        monkeypatch.setattr(vault_ops, name, path)
+    for path in dirs.values():
+        if path.suffix == ".log":
+            path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def write_fernet_key(root):
+    key = Fernet.generate_key()
+    key_file = root / "secrets" / "fernet.key"
+    key_file.write_bytes(key)
+    return key_file
+
+
+def fake_sops_cfg(root, *, binary_exists=True, vault_exists=False):
+    binary = root / "secrets" / "sops"
+    if binary_exists:
+        binary.write_text("#!/bin/sh\nexit 0\n")
+    key = root / "secrets" / "age.key"
+    key.write_text("# public key: age1abc\nAGE-SECRET-KEY-xyz\n")
+    vault = root / "secrets" / "secrets.sops.yaml"
+    if vault_exists:
+        vault.write_text("# stub sops vault\n")
+    return binary, key, vault
+
+
+# ------------------------------------------------------------------- tests ----
+
+class TestSopsMirrorSkipping:
+    """Guarantee 1 & 2: missing sops prerequisites NEVER crash the flow."""
+
+    def test_skip_when_binary_missing(self, monkeypatch, tmp_path, capsys):
+        root = install_project(monkeypatch, tmp_path)
+        binary, key, vault = fake_sops_cfg(root, binary_exists=False)
+        cfg = {"methods": {"sops": {
+            "binary": "secrets/sops",               # resolved via PROJECT_ROOT
+            "age_key_file": str(key),               # resolved via expanduser
+            "encrypted_file": "secrets/secrets.sops.yaml",
+        }}}
+        assert vault_ops.optional_sops_settings(cfg) is None
+        out = capsys.readouterr().out
+        assert "SYNC_SKIP" in out and "sops binary not present" in out
+
+    def test_skip_when_no_sops_section(self, monkeypatch, tmp_path, capsys):
+        install_project(monkeypatch, tmp_path)
+        assert vault_ops.optional_sops_settings({"methods": {}}) is None
+        assert "SYNC_SKIP" in capsys.readouterr().out
+
+    def test_provisioned_when_all_present(self, monkeypatch, tmp_path, capsys):
+        root = install_project(monkeypatch, tmp_path)
+        binary, key, vault = fake_sops_cfg(root, vault_exists=True)
+        cfg = {"methods": {"sops": {
+            "binary": "secrets/sops",
+            "age_key_file": str(key),
+            "encrypted_file": "secrets/secrets.sops.yaml",
+        }}}
+        assert vault_ops.optional_sops_settings(cfg) is not None
+        assert "SYNC_SKIP" not in capsys.readouterr().out
+
+
+class TestCanonicalFernetPrerequisites:
+    """Guarantee 3: the canonical vault's prerequisites are HARD failures."""
+
+    def test_missing_fernet_section_is_fatal(self, monkeypatch, tmp_path, capsys):
+        install_project(monkeypatch, tmp_path)
+        with pytest.raises(SystemExit):
+            vault_ops.fernet_settings({"methods": {}})
+        assert "no 'fernet' method section" in capsys.readouterr().err
+
+    def test_missing_fernet_key_is_fatal(self, monkeypatch, tmp_path, capsys):
+        root = install_project(monkeypatch, tmp_path)
+        cfg = {"methods": {"fernet": {
+            "key_file": "secrets/fernet.key",       # never written
+            "encrypted_file": "secrets/secrets.fernet.bin",
+        }}}
+        with pytest.raises(SystemExit):
+            vault_ops.fernet_settings(cfg)
+        assert "fernet key file missing" in capsys.readouterr().err
+
+
+class TestMirrorDriftDetection:
+    """Guarantees 4 & 5: drift -> refresh; in sync -> leave alone."""
+
+    ENTRIES = {"oracle.scott.password": "pw-one"}
+
+    def test_absent_mirror_needs_refresh(self, monkeypatch, tmp_path):
+        root = install_project(monkeypatch, tmp_path)
+        sops_cfg = fake_sops_cfg(root, binary_exists=True, vault_exists=False)
+        assert vault_ops.sops_mirror_needed(sops_cfg, self.ENTRIES) is True
+
+    def test_unreadable_mirror_needs_refresh(self, monkeypatch, tmp_path):
+        root = install_project(monkeypatch, tmp_path)
+        sops_cfg = fake_sops_cfg(root, binary_exists=True, vault_exists=True)
+
+        def boom(*a, **kw):
+            raise SystemExit(1)  # simulate decrypt failure in sops_mirror_needed
+        monkeypatch.setattr(vault_ops, "decrypt_sops_tree", boom)
+        assert vault_ops.sops_mirror_needed(sops_cfg, self.ENTRIES) is True
+
+    def test_drifted_mirror_needs_refresh(self, monkeypatch, tmp_path):
+        root = install_project(monkeypatch, tmp_path)
+        sops_cfg = fake_sops_cfg(root, binary_exists=True, vault_exists=True)
+        monkeypatch.setattr(vault_ops, "decrypt_sops_tree",
+                            lambda *a, **kw: {"oracle": {"scott": {"password": "OLD"}}})
+        assert vault_ops.sops_mirror_needed(sops_cfg, self.ENTRIES) is True
+
+    def test_in_sync_mirror_is_left_alone(self, monkeypatch, tmp_path):
+        root = install_project(monkeypatch, tmp_path)
+        sops_cfg = fake_sops_cfg(root, binary_exists=True, vault_exists=True)
+        monkeypatch.setattr(vault_ops, "decrypt_sops_tree",
+                            lambda *a, **kw: {"oracle": {"scott": {"password": "pw-one"}}})
+        assert vault_ops.sops_mirror_needed(sops_cfg, self.ENTRIES) is False
+
+
+class TestSealIntegrity:
+    """Guarantees 6 & 7: anti-wipe guard + real envelope round trip."""
+
+    def test_seal_refuses_empty_tree(self, monkeypatch, tmp_path, capsys):
+        root = install_project(monkeypatch, tmp_path)
+        key_file = write_fernet_key(root)
+        target = root / "secrets" / "secrets.fernet.bin"
+        with pytest.raises(SystemExit):
+            vault_ops.seal_fernet_and_verify(key_file, target, {})
+        assert "refusing to seal an empty" in capsys.readouterr().err
+        assert not target.exists()          # nothing was written
+
+    def test_seal_then_decrypt_roundtrip_with_header(self, monkeypatch, tmp_path):
+        root = install_project(monkeypatch, tmp_path)
+        key_file = write_fernet_key(root)
+        target = root / "secrets" / "secrets.fernet.bin"
+        tree = {"oracle": {"scott": {"password": "pw-one"}},
+                "ad_atm": {"subd_support": {"password": "pw-two"}}}
+
+        vault_ops.seal_fernet_and_verify(key_file, target, tree)
+
+        # File carries the DO-NOT-EDIT banner, then exactly one token line.
+        lines = [ln for ln in target.read_text().splitlines() if ln.strip()]
+        assert lines[0].startswith("#"), "header banner must lead the file"
+        assert "DO NOT EDIT" in target.read_text()
+        token_lines = [ln for ln in lines if not ln.strip().startswith("#")]
+        assert len(token_lines) == 1
+
+        # And the tool's own reader recovers the identical tree.
+        assert vault_ops.decrypt_fernet_tree(key_file, target) == tree
+
+        # Cross-check the payload against the library's envelope contract.
+        key = key_file.read_text().strip()
+        envelope = json.loads(Fernet(key).decrypt(token_lines[0].encode()))
+        assert envelope["version"] == vault_ops.FERNET_ENVELOPE_VERSION
+        assert envelope["entries"] == vault_ops.flatten(tree)
+
+class TestSealEncoding:
+    """Regression (2026-11-04): on Windows, text writes without an explicit
+    encoding used the cp1252 locale, producing bytes the utf-8 readers
+    refused -- no vault could be written at all. Sealing must be
+    locale-independent: the header is ASCII and every write/read is utf-8."""
+
+    def test_seal_roundtrips_non_ascii_password(self, monkeypatch, tmp_path):
+        root = install_project(monkeypatch, tmp_path)
+        key_file = write_fernet_key(root)
+        target = root / "secrets" / "secrets.fernet.bin"
+        # deliberately non-ASCII value (a-umlaut o-umlaut em-dash u-umlaut),
+        # written with escapes so this source file stays pure ASCII
+        tree = {"svc": {"user": {"password": "p\u00e4ssw\u00f6rd-\u2014-\u00fc"}}}
+        vault_ops.seal_fernet_and_verify(key_file, target, tree)
+        assert vault_ops.decrypt_fernet_tree(key_file, target) == tree

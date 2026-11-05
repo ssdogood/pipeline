@@ -13,7 +13,7 @@ def mask(value: str) -> str:
     return value[:4] + "*" * max(len(value) - 4, 4)
 
 
-# One line of setup. No paths, no method, no key — the environment
+# One line of setup. No paths, no method, no key - the environment
 # config decides everything.
 pass_mgr.init("laptop")
 

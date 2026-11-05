@@ -1,5 +1,5 @@
 version: 1
-default_method: sops
+default_method: fernet
 
 methods:
   sops:

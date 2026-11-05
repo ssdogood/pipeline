@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 #
-# run_offline_tests.sh — the GREEN SCRIPT.
+# run_offline_tests.sh - the GREEN SCRIPT.
 #
 # Gates machine trust for the pipeline tree. A machine's copy of the
 # tree is trusted only after this script exits 0:
 #
 #   Step 1: verify every binary this platform needs, per bin/sops_manifest.txt
-#           (checksum verification — 'verify, then trust')
+#           (checksum verification - 'verify, then trust')
 #   Step 2: run the full offline test suite (zero network: pytest test/)
 #
 # Exits nonzero on ANY failure, with a message naming what to fix.
-# Works on macOS, RHEL, and Windows Git-Bash — platform auto-detected.
+# Works on macOS, RHEL, and Windows Git-Bash - platform auto-detected.
 #
 # Usage:   ./run_offline_tests.sh          (from the project root)
-# Success: "GREEN — this machine's tree is certified" + exit 0
+# Success: "GREEN - this machine's tree is certified" + exit 0
 
 set -u  # unset variables are errors (not -e: we handle failures ourselves
         # so we can print WHAT failed before exiting)
@@ -24,12 +24,12 @@ MANIFEST="$BIN_DIR/sops_manifest.txt"
 
 fail() {
     echo ""
-    echo "RED — certification FAILED: $1"
+    echo "RED - certification FAILED: $1"
     echo "Fix the issue above and re-run ./run_offline_tests.sh"
     exit 1
 }
 
-echo "=== pass_mgr green script — machine certification ==="
+echo "=== pass_mgr green script - machine certification ==="
 echo ""
 
 # --------------------------------------------------------------------------
@@ -44,7 +44,7 @@ KERNEL="$(uname -s)"
 
 case "$KERNEL" in
     Darwin*)
-        # One binary family on the Mac: darwin.arm64 (Apple Silicon) —
+        # One binary family on the Mac: darwin.arm64 (Apple Silicon) -
         # and darwin.amd64 would match Intel Macs too. Match the word.
         PLATFORM_PATTERN="darwin"
         PLATFORM_LABEL="macOS"
@@ -72,7 +72,7 @@ echo ""
 # --------------------------------------------------------------------------
 
 if [ ! -f "$MANIFEST" ]; then
-    fail "bin/sops_manifest.txt not found — the manifest is committed in git; your tree is incomplete."
+    fail "bin/sops_manifest.txt not found - the manifest is committed in git; your tree is incomplete."
 fi
 
 # Build a platform-filtered manifest in a temp file rather than process
@@ -100,7 +100,7 @@ echo ""
 # Step 2: run the offline test suite
 # --------------------------------------------------------------------------
 # The suite is hermetic: tmp_path worlds, throwaway keys, zero network.
-# It runs wherever pytest is on PATH — activate your dpl environment first
+# It runs wherever pytest is on PATH - activate your dpl environment first
 # (conda activate dpl) if pytest is not global.
 
 cd "$SCRIPT_DIR"
@@ -110,7 +110,7 @@ pytest test/ -v
 STATUS=$?
 
 if [ $STATUS -ne 0 ]; then
-    fail "test suite is RED — see failures above."
+    fail "test suite is RED - see failures above."
 fi
 
 # --------------------------------------------------------------------------
@@ -118,7 +118,7 @@ fi
 # --------------------------------------------------------------------------
 echo ""
 echo "=================================================="
-echo " GREEN — this machine's tree is certified:"
+echo " GREEN - this machine's tree is certified:"
 echo "   binaries checksum-verified, full offline"
 echo "   suite passing, zero network used."
 echo " Trust this copy for extraction work."

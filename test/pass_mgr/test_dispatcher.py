@@ -1,5 +1,5 @@
 """
-T5/T7/T8 — dispatcher composition tests: cache, routing, isolation.
+T5/T7/T8 - dispatcher composition tests: cache, routing, isolation.
 
 WHAT THESE TESTS PROVE
 ======================
@@ -7,12 +7,12 @@ The dispatcher (_Dispatcher behind the get_secret facade) COMPOSES the
 pieces the other suites proved individually:
 
   T5  Cache: each provider's vault is decrypted exactly once per
-      process, no matter how many get_secret calls are made — verified
+      process, no matter how many get_secret calls are made - verified
       by COUNTING real subprocess invocations with a spy, not by
       asserting the return value twice.
   T7  Cross-provider routing: a single config mixing SOPS and Fernet
       secrets, with per-secret method overrides, delivers each name
-      from the CORRECT vault — the scenario no single-provider suite
+      from the CORRECT vault - the scenario no single-provider suite
       could exercise.
   T8  Interface isolation: a method referenced in config but missing
       from the provider registry fails cleanly with a typed error;
@@ -40,7 +40,7 @@ from pass_mgr import (
 
 
 # ---------------------------------------------------------------------------
-# Shared world: a MIXED deployment — sops primary, fernet override
+# Shared world: a MIXED deployment - sops primary, fernet override
 # ---------------------------------------------------------------------------
 
 
@@ -82,7 +82,7 @@ def build_mixed_world(project):
 
 
 # ---------------------------------------------------------------------------
-# T7 — cross-provider routing (the headline composition tests)
+# T7 - cross-provider routing (the headline composition tests)
 # ---------------------------------------------------------------------------
 
 
@@ -91,7 +91,7 @@ class TestCrossProviderRouting:
     def test_every_secret_comes_from_its_own_vault(self, project):
         # Four names, two vaults. Correct values prove correct routing;
         # wrong routing delivers either SecretNotFound or the wrong
-        # value — either way this assertion catches it.
+        # value - either way this assertion catches it.
         build_mixed_world(project)
 
         init("laptop", project_root=project.root)
@@ -117,7 +117,7 @@ class TestCrossProviderRouting:
             get_secret("missing.everywhere")
 
     def test_interleaved_calls_stay_correct(self, project):
-        # Hammer both providers alternately — a cache-corruption or
+        # Hammer both providers alternately - a cache-corruption or
         # cross-provider bleed would surface as a wrong value.
         build_mixed_world(project)
 
@@ -134,7 +134,7 @@ class TestCrossProviderRouting:
 
 
 # ---------------------------------------------------------------------------
-# T5 — cache: decrypt-once, verified by counting subprocess launches
+# T5 - cache: decrypt-once, verified by counting subprocess launches
 # ---------------------------------------------------------------------------
 
 
@@ -198,14 +198,14 @@ class TestCacheInvocations:
 
 
 # ---------------------------------------------------------------------------
-# T8 — interface isolation and init() lifecycle
+# T8 - interface isolation and init() lifecycle
 # ---------------------------------------------------------------------------
 
 
 class TestInterfaceIsolation:
 
     def test_unknown_method_id_in_registry_fails_typed(self, project, monkeypatch):
-        # A config that references a method no provider implements —
+        # A config that references a method no provider implements -
         # e.g. someone hand-adds 'vault: {}' to methods and points a
         # secret at it BEFORE a Vault provider exists. The dispatcher
         # must refuse with a typed error naming the method and the
@@ -234,7 +234,7 @@ class TestInterfaceIsolation:
             providers_module.PROVIDER_TYPES.update(saved)
 
     def test_get_secret_before_init_raises(self, project_nobin):
-        # The facade demands initialization — a connector calling
+        # The facade demands initialization - a connector calling
         # get_secret without init() gets a startup-order error, not a
         # mysterious None.
         with pytest.raises(PassMgrConfigError, match="init"):
@@ -262,7 +262,7 @@ class TestInterfaceIsolation:
         finally:
             providers_module.subprocess.run = real_run
 
-        # probe + decrypt only — the second init contributed NOTHING
+        # probe + decrypt only - the second init contributed NOTHING
         assert len(calls) == 2
 
     def test_reinit_with_different_environment_resets(self, project):
@@ -331,6 +331,6 @@ class TestSpySanity:
             providers_module.subprocess.run = real_run
 
         assert calls, (
-            "Spy saw no sops invocations — the counting technique is "
+            "Spy saw no sops invocations - the counting technique is "
             "broken; the cache tests above may be passing vacuously."
         )

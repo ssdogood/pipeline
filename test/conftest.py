@@ -4,11 +4,11 @@ Shared pytest fixtures for the pipeline test suite.
 Conventions enforced here (industry standard, and the basis of the
 Phase 0 "offline, hermetic" guarantee):
 
-  * Every test builds its own world inside pytest's tmp_path — throwaway
+  * Every test builds its own world inside pytest's tmp_path - throwaway
     keys, throwaway vaults. Nothing ever touches the developer's real
     secrets/ directory or the real bin/ contents in place.
   * Real binaries are used (copied into the temp tree), never mocked
-    crypto — the tests must prove exactly what ships.
+    crypto - the tests must prove exactly what ships.
   * The pass_mgr module-level cache is reset around EVERY test (autouse
     fixture) so tests are independent and order-insensitive.
 
@@ -21,11 +21,11 @@ IMPORT WIRING (read this before touching sys.path lines):
   and never puts test/ itself on the search path.
 
 TWO PROJECT FIXTURES (choose deliberately):
-  * `project`     — temp tree WITH the pinned binaries copied in. Use for
+  * `project`     - temp tree WITH the pinned binaries copied in. Use for
                     SOPS/provider tests that exercise the real binary.
                     Fails loudly if bin/ is empty (by design: a machine
                     without verified binaries must not pass as green).
-  * `project_nobin` — temp tree WITHOUT binaries. Use for tests that
+  * `project_nobin` - temp tree WITHOUT binaries. Use for tests that
                     need no external tools (config, Fernet) so those
                     suites stay green on any machine, at any stage of
                     bootstrap. Binary-using methods on this instance
@@ -35,6 +35,7 @@ TWO PROJECT FIXTURES (choose deliberately):
 from __future__ import annotations
 
 import datetime
+import fnmatch
 import json
 import os
 import shutil
@@ -67,24 +68,37 @@ BINARY_HINTS = {
 
 
 def find_binary(tool: str, bin_dir: Path = BIN_DIR) -> Path:
-    """Locate a pinned tool in bin/ by its release-name prefix.
+    """Locate this platform's pinned tool in bin/.
 
-    Fails loudly with remediation if absent — never silently skips,
-    because the green script gates machine trust on a full green run.
+    Selection is PLATFORM-AWARE: a bare prefix match is unsafe on trees
+    that carry several platforms' binaries - on Windows it picked the
+    darwin/ELF build and every subprocess died with WinError 193
+    (2026-11-05 certification finding). Patterns mirror
+    run_offline_tests.sh's platform detection.
     """
-    hint = BINARY_HINTS[tool]
+    pattern = _platform_binary_pattern(tool)
     if bin_dir.is_dir():
-        matches = sorted(p for p in bin_dir.iterdir() if p.name.startswith(hint))
-    else:
-        matches = []
-    if not matches:
-        raise FileNotFoundError(
-            f"{tool} not found in {bin_dir}. Copy the pinned binary from "
-            f"the release named in sops_manifest.txt, keeping its exact "
-            f"filename, then verify with: cd bin && shasum -a 256 -c "
-            f"sops_manifest.txt"
+        platform_matches = sorted(
+            p for p in bin_dir.iterdir()
+            if fnmatch.fnmatch(p.name, pattern)
         )
-    return matches[0]
+    else:
+        platform_matches = []
+
+    if not platform_matches:
+        available = (
+            sorted(p.name for p in bin_dir.iterdir())
+            if bin_dir.is_dir()
+            else ["(bin/ directory missing)"]
+        )
+        raise FileNotFoundError(
+            f"{tool} not found for this platform in {bin_dir} "
+            f"(looked for pattern '{pattern}'). Files present: "
+            f"{available}. Copy the pinned binary for YOUR platform, "
+            f"keeping its exact filename from sops_manifest.txt, then "
+            f"re-run the test suite."
+        )
+    return platform_matches[0]
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +110,7 @@ def _cold_pass_mgr():
     """Reset the module-level dispatcher before and after every test.
 
     Without this, one test's init() would leak its cached vault into the
-    next test — order-dependence, the classic test-suite disease.
+    next test - order-dependence, the classic test-suite disease.
     """
     _reset_pass_mgr()
     yield
@@ -151,7 +165,7 @@ class TempProject:
             dst = bin_dir / src.name
             shutil.copy2(src, dst)  # copy2 preserves the exec bit
             self._bin_copied[tool] = dst
-        # Manifest: copied if present, absent otherwise — tests can add
+        # Manifest: copied if present, absent otherwise - tests can add
         # their own manifest variants to exercise version pinning.
         manifest_src = self.source_bin_dir / "sops_manifest.txt"
         if manifest_src.is_file():
@@ -161,7 +175,7 @@ class TempProject:
         """Relative (config-style) path to the copied binary."""
         if tool not in self._bin_copied:
             raise RuntimeError(
-                f"binary '{tool}' not copied into this temp tree — use the "
+                f"binary '{tool}' not copied into this temp tree - use the "
                 f"`project` fixture (not `project_nobin`) for binary-using "
                 f"tests."
             )
@@ -214,7 +228,7 @@ class TempProject:
     def add_age_identity(self) -> tuple[Path, str]:
         """Generate a throwaway age identity; returns (key_file, recipient).
 
-        Runs the real age-keygen binary — no keys are ever committed,
+        Runs the real age-keygen binary - no keys are ever committed,
         not even test keys (design §7, Phase 0).
         """
         key_file = self.secrets_dir / "age.key"
@@ -227,7 +241,7 @@ class TempProject:
         )
         
         # age-keygen writes the identity to the file and prints the public
-        # key ("# public key: age1...") — on stderr per the man page,
+        # key ("# public key: age1...") - on stderr per the man page,
         # though we scan both streams defensively across versions.
         recipient = ""
         output_lines = (result.stdout or "").splitlines() + (
@@ -254,18 +268,18 @@ class TempProject:
         """Encrypt a namespaced vault with the real sops binary.
 
         entries is the PLAINTEXT mapping (nested namespaces allowed):
-        {"oracle": {"stg_pass": "x"}} — mirrors production creation flow.
+        {"oracle": {"stg_pass": "x"}} - mirrors production creation flow.
 
         ENCRYPT/DECRYPT ASYMMETRY (why both identity_file and recipient
         are parameters): encryption needs only the PUBLIC recipient key
-        (--age <pub>); decryption — performed later by SopsProvider —
+        (--age <pub>); decryption - performed later by SopsProvider -
         needs the PRIVATE identity file via SOPS_AGE_KEY_FILE. Same pair
         of math keys, different directions.
 
         Environment hygiene: the child process gets this machine's
         environment MINUS SOPS_AGE_KEY_FILE, so a developer's real
         identity can never leak into a test. Remove only what can
-        interfere — not everything.
+        interfere - not everything.
         """
         plain = self.secrets_dir / f"{name}.plain.yaml"
         plain.write_text(yaml.safe_dump(entries, sort_keys=False), encoding="utf-8")
@@ -299,9 +313,9 @@ class TempProject:
     ) -> Path:
         """Create the Fernet backup envelope with a fresh key.
 
-        Envelope format per design §5.2 — the version field is present now
+        Envelope format per design §5.2 - the version field is present now
         solely so v2 rotation can detect old envelopes. Needs NO binaries
-        (pure-Python cryptography) — safe on project_nobin.
+        (pure-Python cryptography) - safe on project_nobin.
         """
         from cryptography.fernet import Fernet
 
@@ -323,7 +337,7 @@ def project(tmp_path: Path) -> TempProject:
     """A disposable pipeline tree WITH pinned binaries copied in.
 
     Use for tests that exercise the real sops binary. Fails loudly when
-    bin/ is empty — a machine without verified binaries must not look
+    bin/ is empty - a machine without verified binaries must not look
     green.
     """
     return TempProject(tmp_path)
@@ -333,7 +347,7 @@ def project(tmp_path: Path) -> TempProject:
 def project_nobin(tmp_path: Path) -> TempProject:
     """A disposable pipeline tree WITHOUT binaries.
 
-    Use for config and Fernet tests — they need no external tools, so
+    Use for config and Fernet tests - they need no external tools, so
     they stay green on any machine at any bootstrap stage. Calling a
     binary-using method on this instance raises RuntimeError.
     """
@@ -360,3 +374,13 @@ def flat_sample_entries(sample_entries: dict) -> dict:
         "oracle.stg_pass": "0ra-stg-pw-7f3",
         "ldap.service_pass": "ld4p-svc-pw-9k1",
     }
+
+def _platform_binary_pattern(stem: str) -> str:
+    """Mirror run_offline_tests.sh. A bare '<stem>-*' glob is unsafe: a
+    tree carrying several platforms' binaries picks the wrong one
+    (WinError 193 on Windows)."""
+    if sys.platform.startswith(("win32", "msys", "cygwin")) or os.environ.get("MSYSTEM"):
+        return f"{stem}-*amd64.exe"
+    if sys.platform == "darwin":
+        return f"{stem}-*darwin*"
+    return f"{stem}-*linux.amd64"

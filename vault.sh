@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# vault.sh — in-memory vault operations for pass_mgr.
+# vault.sh - in-memory vault operations for pass_mgr.
 #
 # Usage:
 #   ./vault.sh list  <env>              # print secret names (never values)

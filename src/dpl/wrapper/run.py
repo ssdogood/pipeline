@@ -4,6 +4,18 @@
 Runs from project root only (relative config paths, like every other
 module). No args -> profile 'full'.
 
+WHICH PIPES RUN is configured, never discovered-from-disk:
+    config/run.yaml lists the pipes (yaml stems in config/extractors/)
+    that the wrapper executes, in that order. Unregistered yamls in the
+    extractor folder are ignored (and logged as such). A registered name
+    whose yaml is missing, a name registered twice, or a yaml whose
+    connection type has no connector in lib/connectors.py aborts at
+    Tier 1 with a named error and exit 3 - never a silent skip.
+
+    Add a pipe:    drop the yaml, add one line to config/run.yaml.
+    Add a connector: lib connector + extractor module + ONE entry in
+        lib/connectors.py. This file never changes.
+
 Exit codes (cron contract):
     0 - success
     1 - extraction failures (history recorded fine)
@@ -20,12 +32,15 @@ record in detail.
 from __future__ import annotations
 
 import argparse
-import os
+import importlib
 import json
 import sqlite3
 import time
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+
+import yaml
 
 from dpl.lib.common import (
     load_config,
@@ -37,9 +52,9 @@ from dpl.lib.common import (
     make_run_id,
     get_run_logger,
     runs_dir,
+    validate_secrets_layout,
 )
-from dpl.lib.ora_connect import ORACLE_CONFIG_SCHEMA
-from dpl.lib.ldap_connect import LDAP_CONFIG_SCHEMA
+from dpl.lib.connectors import CONNECTORS
 from dpl.lib.logger import setup_logging
 from dpl.wrapper.profiles import load_wrapper_config, resolve_profile
 from dpl.wrapper.update_history import (
@@ -53,29 +68,122 @@ EXIT_EXTRACT = 1
 EXIT_HISTORY = 2
 EXIT_CONFIG = 3
 
-CONFIG_PATH_ORACLE = "config/extractors/oracle_to_stg.yaml"
-CONFIG_PATH_AD = "config/extractors/ad_to_stg.yaml"
-SETTINGS_PATH = os.environ.get("DPL_SETTINGS", "config/settings.laptop.yaml")
+SETTINGS_PATH = "config/settings.laptop.yaml"      # env override: DPL_SETTINGS
+EXTRACTOR_DIR = Path("config/extractors")
+RUN_REGISTRY = Path("config/run.yaml")
 WRAPCFG_PATH = "config/wrapper.yaml"
-SCHEMA_MASTER_PATH_ORACLE = "config/extractors/schema_master_oracle_to_stg.csv"
-SCHEMA_MASTER_PATH_AD = "config/extractors/schema_master_ad_to_stg.csv"
 
-# Type-to-extractor registry — adding PostgreSQL/MSSQL later is just
-# "register a new source type and config path", no wrapper rewrite.
-SOURCE_TYPES = {
-    "oracle": {
-        "config_path": CONFIG_PATH_ORACLE,
-        "schema": ORACLE_CONFIG_SCHEMA,
-        "master": SCHEMA_MASTER_PATH_ORACLE,
-        "extractor": "dpl.extractors.oracle_to_stg",
-    },
-    "ldap": {
-        "config_path": CONFIG_PATH_AD,
-        "schema": LDAP_CONFIG_SCHEMA,
-        "master": SCHEMA_MASTER_PATH_AD,
-        "extractor": "dpl.extractors.ad_to_stg",
-    },
-}
+
+# ----------------------------------------------------------- run registry ---
+@dataclass
+class Pipe:
+    """One registered extraction pipe, fully self-describing."""
+    name: str          # yaml stem, e.g. 'oracle_to_stg' - from run.yaml
+    path: str          # the extractor yaml (relative path)
+    source_type: str   # the ONE shared type across all its connections
+    master: str        # schema_master_<name>.csv (naming convention)
+    connector: dict    # CONNECTORS[source_type] entry
+
+
+def _load_run_registry(path: Path = RUN_REGISTRY) -> list[str]:
+    """Parse config/run.yaml; raise ValueError with named causes."""
+    if not path.is_file():
+        raise ValueError(
+            f"run registry not found: {path}. Create it listing the "
+            f"pipes (yaml stems in {EXTRACTOR_DIR}) that the wrapper "
+            f"should execute, e.g.\npipes:\n  - oracle_to_stg")
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{path}: invalid YAML: {exc}") from exc
+
+    pipes = (raw or {}).get("pipes")
+    if not isinstance(pipes, list) or not pipes:
+        raise ValueError(
+            f"{path}: must contain a non-empty 'pipes:' list of yaml "
+            f"stems, e.g.\npipes:\n  - oracle_to_stg")
+    seen: set[str] = set()
+    for entry in pipes:
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(f"{path}: every pipes: entry must be a "
+                            f"yaml stem string; got {entry!r}")
+        if entry in seen:
+            raise ValueError(f"{path}: pipe '{entry}' registered twice")
+        seen.add(entry)
+    return pipes
+
+
+def _route_pipe(name: str, extractor_dir: Path) -> Pipe:
+    """Validate ONE registered pipe against disk + connector registry.
+    Raises ValueError naming the pipe and the exact problem."""
+    yml = extractor_dir / f"{name}.yaml"
+    if not yml.is_file():
+        raise ValueError(
+            f"run.yaml registers pipe '{name}' but {yml} does not exist "
+            f"- remove the registration or restore the file")
+
+    try:
+        raw = yaml.safe_load(yml.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{yml}: invalid YAML: {exc}") from exc
+    if not isinstance(raw, dict) or \
+            not isinstance(raw.get("connections"), dict) or not raw["connections"]:
+        raise ValueError(
+            f"{yml}: no connections: block - a pipe yaml must declare at "
+            f"least one connection")
+
+    types = {
+        str(conn.get("type")).lower()
+        for conn in raw["connections"].values()
+        if isinstance(conn, dict) and conn.get("type")
+    }
+    if not types:
+        raise ValueError(
+            f"{yml}: connections declare no 'type' - cannot route this "
+            f"pipe to a connector")
+    if len(types) > 1:
+        raise ValueError(
+            f"{yml}: mixed source types {sorted(types)} - one extractor "
+            f"yaml serves exactly one connector type; split the file")
+
+    stype = types.pop()
+    connector = CONNECTORS.get(stype)
+    if connector is None:
+        raise ValueError(
+            f"{yml}: unknown source type '{stype}' - no connector "
+            f"registered in dpl/lib/connectors.py (known types: "
+            f"{sorted(CONNECTORS)})")
+
+    return Pipe(
+        name=name,
+        path=str(yml),
+        source_type=stype,
+        master=str(extractor_dir / f"schema_master_{name}.csv"),
+        connector=connector,
+    )
+
+
+def load_registered_pipes(registry_path: Path = RUN_REGISTRY,
+                          extractor_dir: Path = EXTRACTOR_DIR) -> list[Pipe]:
+    """THE pipe list: exactly the run.yaml registrations, in order.
+
+    Raises ValueError on any registry/routing problem (caller converts
+    to exit 3). Registered-but-unmatched yamls in the extractor dir are
+    logged as unregistered visibility notes, never errors - dropping an
+    experimental yaml in the folder must never break the run.
+    """
+    registered = _load_run_registry(registry_path)
+    pipes = [_route_pipe(n, extractor_dir) for n in registered]
+
+    # visibility (not validation): yamls present but intentionally not run
+    on_disk = {p.stem for p in extractor_dir.glob("*.yaml")}
+    unregistered = sorted(on_disk - set(registered))
+    if unregistered:
+        log = get_run_logger("dpl.wrapper")
+        log.info("unregistered yaml(s) present, ignored: %s "
+                 "(register in config/run.yaml to run them)",
+                 ", ".join(unregistered))
+    return pipes
 
 
 def _utc_now_iso() -> str:
@@ -90,6 +198,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="profile name from wrapper.yaml (default: full)")
     parser.add_argument("--tables", default=None,
                         help="comma-separated table filter (testing/targeted)")
+    parser.add_argument("--settings", default=None,
+                        help="path to settings yaml "
+                             "(default: config/settings.laptop.yaml; "
+                             "env override DPL_SETTINGS)")
     args = parser.parse_args(argv)
 
     setup_logging()
@@ -99,10 +211,11 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------------
     # Tier 1: validate ALL configs before any step runs -> exit 3
     # ------------------------------------------------------------------
+    settings_path = args.settings or _settings_path_from_env()
     wcfg = load_wrapper_config(WRAPCFG_PATH)
-    settings = load_settings(SETTINGS_PATH)
+    settings = load_settings(settings_path)
     if wcfg is None or settings is None:
-        log.error("wrapper/settings config validation failed — aborting")
+        log.error("wrapper/settings config validation failed - aborting")
         return EXIT_CONFIG
 
     try:
@@ -111,11 +224,38 @@ def main(argv: list[str] | None = None) -> int:
         log.error("%s", e)
         return EXIT_CONFIG
 
+    try:
+        pipes = load_registered_pipes()
+    except ValueError as e:
+        log.error("run registry / pipe routing failed - aborting: %s", e)
+        return EXIT_CONFIG
+    if not pipes:
+        log.error("no pipes registered in config/run.yaml")
+        return EXIT_CONFIG
+    log.info("registered pipes: %s",
+             ", ".join(f"{p.name}[{p.source_type}]" for p in pipes))
+
     history_db = Path(settings["paths"]["history_db"])
     try:
         validate_db_path(history_db, settings)
     except ValueError as e:
         log.error("%s", e)
+        return EXIT_CONFIG
+
+    # Vault-backed logins: settings must name the pass_mgr environment;
+    # init here so every extractor inherits it (idempotent per process).
+    pm_env = (settings.get("pass_mgr") or {}).get("environment")
+    if not pm_env:
+        log.error(
+            "settings file %s must declare the vault environment, e.g.\n"
+            "  pass_mgr:\n    environment: laptop", settings_path)
+        return EXIT_CONFIG
+    try:
+        validate_secrets_layout()
+        from dpl.lib import pass_mgr
+        pass_mgr.init(pm_env)
+    except (ValueError, FileNotFoundError) as e:
+        log.error("vault unavailable - aborting: %s", e)
         return EXIT_CONFIG
 
     manifest_days = wcfg["retention"]["manifest_days"]
@@ -146,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
             (run_id, args.profile, _utc_now_iso(), None, "running"))
         conn.commit()
     except sqlite3.Error as exc:
-        log.error("history db unreachable: %s — continuing without history",
+        log.error("history db unreachable: %s - continuing without history",
                   exc)
         conn = None
         history_failed = True
@@ -161,66 +301,67 @@ def main(argv: list[str] | None = None) -> int:
         name = step["name"]
         try:
             if name == "generate_schemas":
-                from dpl.lib.generate_schemas import (
-                    generate_schemas as gen,
-                    CONFIG_FILE as gen_config,
-                    OUTPUT_FILE as gen_output,
-                )
-                rc = gen(config_path=gen_config,
-                         output_path=gen_output,
-                         force=step.get("force", True),
-                         dry_run=False)
-                if rc != 0:
-                    log.warning(
-                        "generate_schemas returned %s — continuing "
-                        "(partial introspection failures; affected tables "
-                        "will fail loudly at extraction if it matters)", rc)
+                # One call per REGISTERED pipe that has a generator;
+                # pipes without one (hand-curated masters) are skipped
+                # via the registry, not by branching here.
+                for pipe in pipes:
+                    gen_path = pipe.connector.get("generator")
+                    if not gen_path:
+                        continue
+                    gen_mod = importlib.import_module(gen_path)
+                    log.info("generate_schemas: pipe=%s", pipe.name)
+                    rc = gen_mod.generate_schemas(
+                        config_path=pipe.path,
+                        output_path=pipe.master,
+                        force=step.get("force", True),
+                        dry_run=False,
+                        settings_path=settings_path)
+                    if rc != 0:
+                        log.warning(
+                            "generate_schemas(%s) returned %s - continuing "
+                            "(partial introspection failures; affected "
+                            "tables fail loudly at extraction if it "
+                            "matters)", pipe.name, rc)
 
             elif name == "reconcile_pending":
-                # Merge all master CSVs for cross-source validation
-                master_oracle = load_schema_master(SCHEMA_MASTER_PATH_ORACLE)
-                master_ad = load_schema_master(SCHEMA_MASTER_PATH_AD, None)
-                master = {**master_oracle, **master_ad}
+                # Merge every registered pipe's master CSV that exists.
+                master: dict = {}
+                for pipe in pipes:
+                    if Path(pipe.master).exists():
+                        master.update(load_schema_master(pipe.master))
                 resolved = reconcile_pending(master)
                 log.info("reconciled pending entries: %s",
                          resolved if resolved else "none")
 
             elif name == "extract":
-                # Multi-source extract: one config per type, shared settings
-                cfgs = {}
-                schemas = {}
-                masters = {}
-                for src_type, cfg in SOURCE_TYPES.items():
+                # Every REGISTERED pipe, in run.yaml order. Failures mark
+                # the run but never stop the remaining pipes.
+                for pipe in pipes:
                     try:
-                        cfgs[src_type] = load_config(cfg["config_path"], cfg["schema"])
-                        if cfgs[src_type] is None:
-                            log.error("failed to load %s config (%s)",
-                                      src_type, cfg["config_path"])
+                        cfg = load_config(pipe.path, pipe.connector["schema"])
+                        if cfg is None:
+                            log.error("pipe %s: config failed validation "
+                                      "(%s)", pipe.name, pipe.path)
                             extract_failed = True
                             continue
-                        schemas[src_type] = cfgs[src_type]
-                        masters[src_type] = load_schema_master(cfg["master"])
-                    except Exception as exc:
-                        log.error("%s config/master load failed: %s", src_type, exc)
-                        extract_failed = True
-                        continue
 
-                # Call each extractor, collect manifests
-                for src_type, cfg in cfgs.items():
-                    try:
-                        mod = __import__(SOURCE_TYPES[src_type]["extractor"],
-                                        fromlist=["extract_all"])
-                        extractor_fn = getattr(mod, "extract_all")
-                        manifests_src, any_failed = extractor_fn(
+                        ext_mod = importlib.import_module(
+                            pipe.connector["extractor"])
+                        manifests_src, any_failed = ext_mod.extract_all(
                             cfg, settings, load_date,
                             force=step.get("force", False),
                             only_tables=only_tables,
                             run_id=run_id,
                             profile=args.profile)
+                        manifests.update(manifests_src)   # FIXED: merge -
+                        # previously collected but never merged, so the
+                        # envelope-rewrite loop below ran empty and the
+                        # wrapper-state stamp never landed in manifests.
                         if any_failed:
                             extract_failed = True
                     except Exception as exc:
-                        log.error("%s extract_all failed: %s", src_type, exc, exc_info=True)
+                        log.error("pipe %s failed: %s", pipe.name, exc,
+                                  exc_info=True)
                         extract_failed = True
 
             elif name == "update_history":
@@ -239,9 +380,9 @@ def main(argv: list[str] | None = None) -> int:
 
             else:
                 # profiles.py validates the vocabulary; unreachable
-                log.error("unknown step '%s' — skipping", name)
+                log.error("unknown step '%s' - skipping", name)
 
-        except Exception as exc:                    # noqa: BLE001 — deliberate
+        except Exception as exc:                    # noqa: BLE001 - deliberate
             log.error("step '%s' failed: %s", name, exc, exc_info=True)
             if name == "extract":
                 extract_failed = True
@@ -261,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------------
     # Append wrapper final state to each envelope (design note rev2 §7).
     # Runs AFTER exit_code is known; the residual gap (wrapper dies
-    # before this rewrite) is the documented accepted caveat — a manual
+    # before this rewrite) is the documented accepted caveat - a manual
     # `python -m wrapper.update_history` repairs the DB side.
     # ------------------------------------------------------------------
     for folder in manifests:
@@ -307,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
             update_history(settings, history_db, days=manifest_days)
         except (sqlite3.Error, OSError, ValueError,
                 json.JSONDecodeError) as exc:
-            log.error("post-run history ingest failed: %s — repair with "
+            log.error("post-run history ingest failed: %s - repair with "
                        "`python -m wrapper.update_history`", exc)
             history_failed = True
             exit_code = EXIT_HISTORY
@@ -317,6 +458,11 @@ def main(argv: list[str] | None = None) -> int:
              " (run `python -m wrapper.update_history` to repair history)"
              if exit_code == EXIT_HISTORY else "")
     return exit_code
+
+
+def _settings_path_from_env() -> str:
+    import os
+    return os.environ.get("DPL_SETTINGS", SETTINGS_PATH)
 
 
 if __name__ == "__main__":

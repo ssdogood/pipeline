@@ -5,6 +5,19 @@ Commands:
     list  <env>                   print secret names (never values)
     scan  <env> [--dry-run]        sync vault to match config files
 
+ARCHITECTURE (fernet-canonical):
+    - The FERNET vault is canonical. scan maintains it unconditionally.
+      Fernet has no external dependencies (baked into the Python
+      environment), so secret maintenance works on any machine with
+      Python + `cryptography`.
+    - The SOPS vault is an opportunistic MIRROR. It is refreshed only
+      when the sops binary and age identity are present on this machine.
+      Any missing prerequisite -> quiet skip, logged as SYNC_SKIP.
+      Sync is one-way: fernet -> sops, always. sops presence is never
+      required for the primary flow.
+    - default_method in config decides which vault the PIPELINE reads
+      at runtime; scan always treats fernet as the source of truth.
+
 POLICY (enforced by design):
     - There is NO fragment file. No human ever authors a plaintext
       secret file. Passwords enter only through the masked prompt
@@ -12,24 +25,23 @@ POLICY (enforced by design):
     - The ONLY plaintext ever written to disk is the short-lived
       internal temp file sops requires (sops v3.13.3 cannot read
       stdin). It is created at 0600 inside secrets/ (gitignored),
-      and overwritten with garbage and unlinked immediately after
-      encryption — lifetime is sub-second, same process.
-    - The candidate vault is verified by decrypting it BEFORE the old
-      vault is replaced (atomic os.replace after verification).
+      overwritten with garbage and unlinked immediately after
+      encryption - lifetime is sub-second, same process.
+    - Candidate vaults are verified before the old file is replaced
+      (atomic os.replace after verification), for BOTH methods.
     - Values are never printed or logged. Logs contain names,
       actions, timestamps, and one-way fingerprints only.
-    - The encrypted vault file always carries a human-readable
-      warning header at the top, telling readers not to edit it.
+    - Both vault files carry the machine-generated DO-NOT-EDIT header,
+      re-applied on every seal/sync.
+    - Backups (encrypted copies) keep the last 3 versions of EACH
+      vault under secrets/backups/.
     - The `secrets:` mapping in config/pass_mgr.<env>.yaml is
-      machine-managed: scan cross-checks it against the extractors'
-      credential_refs and offers to regenerate it. Comments ABOVE the
-      `secrets:` line survive; everything below it is regenerated.
-    - Backups (encrypted copies) keep the last 3 versions under
-      secrets/backups/.
+      machine-managed (see sync_secret_mapping).
 """
 
 import getpass
 import hashlib
+import json
 import logging
 import os
 import re
@@ -41,6 +53,7 @@ from datetime import datetime
 from pathlib import Path
 
 import yaml
+from cryptography.fernet import Fernet, InvalidToken
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
@@ -52,9 +65,15 @@ LOG_FILE = SECRETS_DIR / "logs" / "dpl_pass_mgr.log"
 SOPS_TIMEOUT_SECONDS = 10
 MAX_BACKUPS = 3
 
+# Must match FERNET_ENVELOPE_VERSION in src/dpl/lib/pass_mgr/_providers.py.
+# If the library bumps this for v2 rotation, this tool follows.
+FERNET_ENVELOPE_VERSION = 1
+
 # Ensure operational directories exist before logging starts.
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+NAME_RE = re.compile(r"^[A-Za-z0-9_.\\-]+$")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,32 +114,57 @@ def load_env_config(env: str) -> dict:
         known = sorted(p.name for p in CONFIG_DIR.glob("pass_mgr.*.yaml"))
         fail(f"no config for environment '{env}' (looked for {path}); "
              f"known configs: {known}")
-    return yaml.safe_load(path.read_text())
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def sops_settings(cfg: dict):
-    """Return (binary, key_file, encrypted_file) for the sops method."""
-    sops = (cfg.get("methods") or {}).get("sops")
-    if not isinstance(sops, dict):
-        fail("config has no 'sops' method section")
+def fernet_settings(cfg: dict):
+    """Canonical vault settings. The fernet key is a HARD prerequisite:
+    a missing key is a hard failure, not a skip - the canonical vault
+    cannot be maintained without it."""
+    fernet = (cfg.get("methods") or {}).get("fernet")
+    if not isinstance(fernet, dict):
+        fail("config has no 'fernet' method section - fernet is the "
+             "canonical vault and must be configured")
 
-    binary = PROJECT_ROOT / sops["binary"]
-    if not binary.is_file():
-        fail(f"sops binary missing at {binary} — see docs/pass_mgr-guide.md, "
-             f"section 'Restoring bin/'")
-
-    key_file = Path(sops["age_key_file"]).expanduser()
+    key_file = Path(fernet["key_file"]).expanduser()
     if not key_file.is_file():
-        fail(f"age identity file missing at {key_file} — run "
+        fail(f"fernet key file missing at {key_file} - run "
              f"./setup_secrets.sh <env>, then confirm the config path")
 
+    encrypted_file = PROJECT_ROOT / fernet["encrypted_file"]
+    return key_file, encrypted_file
+
+
+def optional_sops_settings(cfg: dict):
+    """MIRROR vault settings, or None when sops is not provisioned on
+    this machine. Never crashes the flow: every missing prerequisite is
+    a quiet skip, logged as SYNC_SKIP so drift is visible in the audit
+    trail."""
+    sops = (cfg.get("methods") or {}).get("sops")
+    if not isinstance(sops, dict):
+        log_action("SYNC_SKIP", "no sops method section in config - "
+                                "sops mirror not maintained")
+        return None
+
+    binary = PROJECT_ROOT / sops["binary"]
+    key_file = Path(sops["age_key_file"]).expanduser()
     encrypted_file = PROJECT_ROOT / sops["encrypted_file"]
+
+    if not binary.is_file():
+        log_action("SYNC_SKIP", f"sops binary not present at {binary} - "
+                                "sops mirror not maintained")
+        return None
+    if not key_file.is_file():
+        log_action("SYNC_SKIP", f"age identity not present at {key_file} - "
+                                "sops mirror not maintained")
+        return None
+
     return binary, key_file, encrypted_file
 
 
 def recipient_from_identity(key_file: Path) -> str:
     """Extract the public key (age1...) from an age identity file."""
-    for line in key_file.read_text().splitlines():
+    for line in key_file.read_text(encoding="utf-8").splitlines():
         lowered = line.lower()
         if lowered.startswith("#") and "public key:" in lowered:
             for token in line.replace(":", " ").split():
@@ -191,9 +235,8 @@ def discover_credential_refs() -> list:
     """Scan config/extractors/*.yaml and collect all credential_ref paths.
 
     Returns a list of tuples: [(vault_path, source_file, connection, user)]
-    Users WITHOUT a credential_ref are ignored — a connection may exist
-    with no managed password. Commenting out a credential_ref retires it:
-    the next scan flags the corresponding vault secret as stale.
+    Users WITHOUT a credential_ref are ignored - a connection may exist
+    with no managed password. Commenting out a credential_ref retires it.
     """
     refs = []
     if not EXTRACTORS_DIR.is_dir():
@@ -222,8 +265,18 @@ def discover_credential_refs() -> list:
                 if not isinstance(user_cfg, dict):
                     continue
                 cred_ref = user_cfg.get("credential_ref")
-                if cred_ref and isinstance(cred_ref, str):
-                    refs.append((cred_ref, cfg_file.name, conn_name, user_name))
+                if not isinstance(cred_ref, str) or not cred_ref.strip():
+                    continue   # users WITHOUT a credential_ref are
+                                # ignored - by design (commenting out a
+                                # credential_ref retires it)
+                if not NAME_RE.match(cred_ref):
+                    log_action("SCAN_ERROR",
+                                f"invalid credential_ref '{cred_ref}' in "
+                                f"{cfg_file.name} - allowed: letters, "
+                                f"digits, '.', '_', '-', '\\'")
+                    continue
+                refs.append((cred_ref, cfg_file.name,
+                                conn_name, user_name))
 
     log_action("SCAN", f"discovered {len(refs)} credential_ref entries "
                        f"across {len(cfg_files)} config files")
@@ -237,9 +290,8 @@ def sync_secret_mapping(env: str, required_paths: set, dry_run: bool) -> None:
     in config/pass_mgr.<env>.yaml and offer to regenerate the mapping so it
     contains EXACTLY the declared refs.
 
-    The mapping is derived data — machine-managed. Rewrite rules:
-      - everything ABOVE the `secrets:` line is preserved verbatim
-        (comments included — keep your comments there);
+    The mapping is derived data - machine-managed. Rewrite rules:
+      - everything ABOVE the `secrets:` line is preserved verbatim;
       - the `secrets:` section itself is regenerated to match the refs.
     Returns silently when the two sides already agree.
     """
@@ -247,13 +299,13 @@ def sync_secret_mapping(env: str, required_paths: set, dry_run: bool) -> None:
     if not config_path.is_file():
         fail(f"no config for environment '{env}' ({config_path})")
 
-    cfg = yaml.safe_load(config_path.read_text())
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     current = set((cfg.get("secrets") or {}).keys())
 
     missing = sorted(required_paths - current)
     stale = sorted(current - required_paths)
     if not missing and not stale:
-        return  # already canonical — say nothing
+        return  # already canonical - say nothing
 
     print(f"\n--- CONFIG CROSS-CHECK (pass_mgr.{env}.yaml) ---")
     if missing:
@@ -277,14 +329,14 @@ def sync_secret_mapping(env: str, required_paths: set, dry_run: bool) -> None:
         log_action("SYNC_MAPPING", f"declined for {env}")
         return
 
-    lines = config_path.read_text().splitlines(keepends=True)
+    lines = config_path.read_text(encoding="utf-8").splitlines(keepends=True)
     cut_index = None
     for idx, line in enumerate(lines):
         if re.match(r"^secrets:\s*(#.*)?$", line):
             cut_index = idx
             break
 
-    block = "secrets:\n" + "".join(f'  "{n}": {{}}\n'
+    block = "secrets:\n" + "".join(f'  {json.dumps(n)}: {{}}\n'
                                    for n in sorted(required_paths))
     if cut_index is None:
         new_text = "".join(lines).rstrip("\n") + "\n\n" + block
@@ -292,7 +344,7 @@ def sync_secret_mapping(env: str, required_paths: set, dry_run: bool) -> None:
         new_text = "".join(lines[:cut_index]) + block
 
     tmp = config_path.with_name(config_path.name + ".tmp")
-    tmp.write_text(new_text)
+    tmp.write_text(new_text, encoding="utf-8")
     os.replace(tmp, config_path)
 
     log_action("SYNC_MAPPING",
@@ -301,7 +353,120 @@ def sync_secret_mapping(env: str, required_paths: set, dry_run: bool) -> None:
     print("  [ok] Config mapping updated (commit this change).")
 
 
-# --------------------------------------------------------------- sops I/O ---
+# ---------------------------------------------------------- fernet I/O ------
+
+def _read_envelope_lines(path: Path) -> str:
+    """Return the single non-comment token line of an envelope file.
+    Mirrors the header-tolerance of FernetProvider.load(): '#' comment
+    lines (the DO-NOT-EDIT banner) are skipped; exactly one non-empty,
+    non-comment line must remain."""
+    token_lines = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if len(token_lines) != 1:
+        fail(f"fernet envelope {path} must contain exactly one token line, "
+             f"found {len(token_lines)}")
+    return token_lines[0]
+
+
+def _load_fernet_key(key_file: Path) -> Fernet:
+    key_text = key_file.read_text(encoding="utf-8").strip()
+    try:
+        return Fernet(key_text)
+    except (ValueError, TypeError):
+        fail(f"fernet key file {key_file} does not contain a valid key")
+
+
+def decrypt_fernet_tree(key_file: Path, vault_file: Path) -> dict:
+    """Decrypt the canonical fernet vault into a nested tree, in memory.
+    A missing vault is an empty tree (first scan will create it)."""
+    if not vault_file.is_file():
+        return {}
+    fernet = _load_fernet_key(key_file)
+    token = _read_envelope_lines(vault_file)
+    try:
+        payload = fernet.decrypt(token.encode("ascii"))
+    except InvalidToken:
+        fail(f"fernet decryption failed for {vault_file} - wrong key or "
+             f"corrupted envelope. Restore from {BACKUP_DIR} or re-seal.")
+    try:
+        envelope = json.loads(payload)
+    except json.JSONDecodeError as e:
+        fail(f"fernet envelope payload is not valid JSON: {e}")
+    if envelope.get("version") != FERNET_ENVELOPE_VERSION:
+        fail(f"fernet envelope version {envelope.get('version')!r} "
+             f"unsupported (expected {FERNET_ENVELOPE_VERSION})")
+    entries = envelope.get("entries")
+    if not isinstance(entries, dict) or not entries:
+        fail("fernet envelope has no 'entries' mapping")
+    return unflatten(entries)
+
+
+def fernet_header() -> str:
+    """The human-readable warning prepended to every fernet vault."""
+    stamped = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return (
+        "# ============================================================================\n"
+        "# AUTO-CREATED SECRET VAULT (Fernet, canonical) - DO NOT EDIT MANUALLY\n"
+        "# ============================================================================\n"
+        "# This file is machine-managed. Manage secrets ONLY via:\n"
+        "#     ./vault.sh scan <env>   (add / rotate / delete secrets)\n"
+        "#     ./vault.sh list <env>   (see which secret names exist)\n"
+        "# The token line below is the encrypted envelope (JSON payload,\n"
+        "# AES-128-CBC + HMAC-SHA256). Values cannot be recovered without\n"
+        "# the Fernet key file, which lives outside the project tree.\n"
+        f"# Last synced: {stamped}\n"
+        "# ============================================================================\n"
+    )
+
+
+def seal_fernet_and_verify(key_file: Path, target: Path, tree: dict) -> Path:
+    """Flatten the tree into the envelope format (flat dotted names),
+    encrypt, verify the candidate decrypts back to the same entries,
+    back up the old vault, THEN atomically replace it."""
+    entries = flatten(tree)
+    if not entries:
+        fail("refusing to seal an empty fernet vault")
+
+    fernet = _load_fernet_key(key_file)
+    envelope = json.dumps({"version": FERNET_ENVELOPE_VERSION,
+                           "entries": entries}).encode("utf-8")
+    token = fernet.encrypt(envelope).decode("ascii")
+
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent,
+                                    prefix=".fernet-", suffix=".tmp")
+    candidate = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(fernet_header())
+            fh.write(token + "\n")
+
+        # Round-trip verification on the CANDIDATE, before replacement.
+        check_token = _read_envelope_lines(candidate)
+        check_payload = fernet.decrypt(check_token.encode("ascii"))
+        check = json.loads(check_payload).get("entries")
+        if check != entries:
+            raise RuntimeError("fernet verification mismatch: the candidate "
+                               "does not decrypt to the expected entries")
+
+        if target.is_file():
+            create_backup(target)
+
+        os.replace(candidate, target)    # atomic on POSIX
+        log_action("WRITE", f"fernet vault updated: {target}")
+        return target
+    except SystemExit:
+        candidate.unlink(missing_ok=True)
+        raise
+    except BaseException:
+        candidate.unlink(missing_ok=True)
+        fail(f"failed while sealing fernet vault; old vault left "
+             f"untouched: {sys.exc_info()[1]}")
+
+
+# ------------------------------------------------------------- sops I/O ------
 
 def run_sops(binary: Path, args, *, env_extra=None, stdin_data=None) -> str:
     env = os.environ.copy()
@@ -317,7 +482,7 @@ def run_sops(binary: Path, args, *, env_extra=None, stdin_data=None) -> str:
             env=env,
         )
     except subprocess.TimeoutExpired:
-        fail(f"sops did not respond within {SOPS_TIMEOUT_SECONDS}s — "
+        fail(f"sops did not respond within {SOPS_TIMEOUT_SECONDS}s - "
              f"verify the binary per the guide, then retry")
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "(no output)"
@@ -326,13 +491,13 @@ def run_sops(binary: Path, args, *, env_extra=None, stdin_data=None) -> str:
 
 
 def encrypt_tree(binary: Path, recipient: str, tree: dict) -> str:
-    """Encrypt a nested secret tree, returning the ciphertext as a string.
+    """Encrypt a nested secret tree for the sops MIRROR.
 
     sops v3.13.3 cannot read plaintext from stdin ('-' is treated as a
     literal filename), so plaintext must pass through a short-lived temp
     file. Mitigations: created inside secrets/ (already gitignored),
     0600 permissions, .yaml suffix for mode sniffing, overwritten with
-    garbage and unlinked immediately after encryption — all within the
+    garbage and unlinked immediately after encryption - all within the
     same process invocation.
     """
     plaintext_yaml = yaml.safe_dump(tree, sort_keys=True, default_flow_style=False)
@@ -340,7 +505,7 @@ def encrypt_tree(binary: Path, recipient: str, tree: dict) -> str:
                                     prefix=".vault-plain-", suffix=".yaml")
     plaintext_file = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w") as fh:
+        with open(plaintext_file, "w", encoding="utf-8") as fh:
             fh.write(plaintext_yaml)
         os.chmod(plaintext_file, 0o600)
         return run_sops(binary,
@@ -355,24 +520,27 @@ def encrypt_tree(binary: Path, recipient: str, tree: dict) -> str:
             pass
 
 
-def vault_header() -> str:
-    """The human-readable warning prepended to every sealed vault file."""
+def sops_header() -> str:
+    """The human-readable warning prepended to every sops mirror vault."""
     stamped = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return (
         "# ============================================================================\n"
-        "# AUTO-CREATED SECRET VAULT — DO NOT EDIT MANUALLY\n"
+        "# AUTO-CREATED SECRET VAULT (SOPS) - DO NOT EDIT MANUALLY\n"
         "# ============================================================================\n"
-        "# This file is machine-managed. Manage secrets ONLY via:\n"
+        "# This file is machine-managed and DERIVED: every value here is a\n"
+        "# copy of the canonical Fernet vault. Manage secrets ONLY via:\n"
         "#     ./vault.sh scan <env>   (add / rotate / delete secrets)\n"
         "#     ./vault.sh list <env>   (see which secret names exist)\n"
         "# Manual edits will be overwritten by the next scan and may\n"
-        "# corrupt the vault. The contents below are ciphertext values.\n"
-        f"# Last sealed: {stamped}\n"
+        "# corrupt the vault. The contents below are ciphertext; values\n"
+        "# cannot be recovered without the age identity file.\n"
+        f"# Last synced: {stamped}\n"
         "# ============================================================================\n"
     )
 
 
-def decrypt_to_tree(binary: Path, key_file: Path, vault_file: Path) -> dict:
+def decrypt_sops_tree(binary: Path, key_file: Path, vault_file: Path) -> dict:
+    """Decrypt the sops mirror into a nested tree, in memory."""
     if not vault_file.is_file():
         return {}
     text = run_sops(
@@ -384,9 +552,66 @@ def decrypt_to_tree(binary: Path, key_file: Path, vault_file: Path) -> dict:
     return yaml.safe_load(text) or {}
 
 
-def prune_backups() -> None:
-    """Keep only the newest MAX_BACKUPS encrypted copies."""
-    backups = sorted(BACKUP_DIR.glob("secrets.sops.yaml.*"))
+def seal_sops_and_verify(binary: Path, key_file: Path, target: Path,
+                         tree: dict) -> Path:
+    """Encrypt tree for the sops mirror, verify the candidate decrypts
+    correctly, back up the old vault, THEN atomically replace it."""
+    expected_entries = flatten(tree)
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent,
+                                    prefix=".vault-", suffix=".sops.tmp")
+    candidate = Path(tmp_name)
+    try:
+        ciphertext = encrypt_tree(binary, recipient_from_identity(key_file), tree)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(sops_header())
+            fh.write(ciphertext)
+
+        reopened = run_sops(
+            binary,
+            ["--decrypt", "--input-type", "yaml", "--output-type", "yaml",
+             str(candidate)],
+            env_extra={"SOPS_AGE_KEY_FILE": str(key_file)},
+        )
+        reopened_entries = flatten(yaml.safe_load(reopened) or {})
+        if reopened_entries != expected_entries:
+            raise RuntimeError(
+                f"verification mismatch: expected {sorted(expected_entries)}, "
+                f"got {sorted(reopened_entries)}")
+
+        if target.is_file():
+            create_backup(target)
+
+        os.replace(candidate, target)
+        log_action("WRITE", f"sops mirror updated: {target}")
+        return target
+    except SystemExit:
+        candidate.unlink(missing_ok=True)
+        raise
+    except BaseException:
+        candidate.unlink(missing_ok=True)
+        fail(f"failed while sealing the sops mirror; old vault left "
+             f"untouched: {sys.exc_info()[1]}")
+
+
+def sops_mirror_needed(sops_cfg, flat_entries: dict) -> bool:
+    """True when the sops mirror is absent, unreadable, or differs from
+    the canonical entries (name OR value). An unreadable mirror is
+    refreshed wholesale - the canonical vault is always trusted."""
+    _, _, sops_vault_file = sops_cfg
+    if not sops_vault_file.is_file():
+        return True
+    try:
+        existing = flatten(decrypt_sops_tree(*sops_cfg))
+    except SystemExit:
+        return True  # unreadable / wrong key / corrupt -> re-seal fresh
+    return existing != flat_entries
+
+
+# --------------------------------------------------------------- backups -----
+
+def prune_backups(basename: str) -> None:
+    """Keep only the newest MAX_BACKUPS copies of ONE vault file."""
+    backups = sorted(BACKUP_DIR.glob(f"{basename}.*"))
     while len(backups) > MAX_BACKUPS:
         oldest = backups.pop(0)
         try:
@@ -397,66 +622,26 @@ def prune_backups() -> None:
 
 
 def create_backup(encrypted_file: Path) -> Path:
-    """Timestamped encrypted backup of the current vault, then prune."""
+    """Timestamped encrypted backup of a vault file, then prune."""
     timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-    backup_path = BACKUP_DIR / f"secrets.sops.yaml.{timestamp}"
+    backup_path = BACKUP_DIR / f"{encrypted_file.name}.{timestamp}"
     shutil.copy2(encrypted_file, backup_path)
-    prune_backups()
+    prune_backups(encrypted_file.name)
     log_action("BACKUP", f"created: {backup_path.name}")
     return backup_path
-
-
-def seal_and_verify(binary: Path, key_file: Path, target: Path,
-                    tree: dict) -> Path:
-    """Encrypt tree, verify the candidate decrypts correctly, back up
-    the old vault, THEN atomically replace it. The old vault survives
-    any failure short of the final os.replace."""
-    expected_names = set(flatten(tree))
-    fd, tmp_name = tempfile.mkstemp(dir=target.parent,
-                                    prefix=".vault-", suffix=".sops.tmp")
-    candidate = Path(tmp_name)
-    try:
-        ciphertext = encrypt_tree(binary, recipient_from_identity(key_file), tree)
-        with os.fdopen(fd, "w") as fh:
-            fh.write(vault_header())
-            fh.write(ciphertext)
-
-        reopened = run_sops(
-            binary,
-            ["--decrypt", "--input-type", "yaml", "--output-type", "yaml",
-             str(candidate)],
-            env_extra={"SOPS_AGE_KEY_FILE": str(key_file)},
-        )
-        reopened_names = set(flatten(yaml.safe_load(reopened) or {}))
-        if reopened_names != expected_names:
-            raise RuntimeError(
-                f"verification mismatch: expected {sorted(expected_names)}, "
-                f"got {sorted(reopened_names)}")
-
-        if target.is_file():
-            create_backup(target)
-
-        os.replace(candidate, target)
-        log_action("WRITE", f"vault updated: {target}")
-        return target
-    except SystemExit:
-        candidate.unlink(missing_ok=True)
-        raise
-    except BaseException:
-        candidate.unlink(missing_ok=True)
-        fail(f"failed while sealing vault; old vault left untouched: "
-             f"{sys.exc_info()[1]}")
 
 
 # -------------------------------------------------------------- commands ----
 
 def cmd_list(env: str) -> None:
     log_action("LIST", f"environment={env}")
-    binary, key_file, encrypted_file = sops_settings(load_env_config(env))
-    tree = decrypt_to_tree(binary, key_file, encrypted_file)
+    cfg = load_env_config(env)
+    key_file, encrypted_file = fernet_settings(cfg)
+    tree = decrypt_fernet_tree(key_file, encrypted_file)
     names = sorted(flatten(tree))
     if not names:
-        print(f"(vault for '{env}' is empty)")
+        print(f"(no fernet vault for '{env}' yet, or it is empty - "
+              f"run: ./vault.sh scan {env})")
         return
     for name in names:
         print(name)
@@ -464,36 +649,46 @@ def cmd_list(env: str) -> None:
 
 def cmd_scan(env: str, dry_run: bool = False) -> None:
     """Declarative sync: extractor configs are the source of truth; the
-    vault (and the config's secrets mapping) are implementations.
-    Flow: cross-check config mapping -> discover -> categorize -> prompt
-    -> confirm -> backup -> write. Nothing is written to the vault until
-    the final confirmation, so Ctrl-C during password entry is clean.
-    """
+    fernet vault (canonical) and the sops vault (mirror) are
+    implementations. Flow: cross-check config mapping -> discover ->
+    categorize -> prompt -> confirm -> backup -> write fernet -> mirror
+    to sops when provisioned. Nothing is written until the final
+    confirmation, so Ctrl-C during password entry is a clean abort."""
     log_action("SCAN_START", f"environment={env}, dry_run={dry_run}")
-    binary, key_file, encrypted_file = sops_settings(load_env_config(env))
+    cfg = load_env_config(env)
+
+    # Canonical vault - hard prerequisites, no skipping.
+    fernet_key, fernet_vault = fernet_settings(cfg)
+
+    # Mirror vault - every missing prerequisite is a quiet skip.
+    sops_cfg = optional_sops_settings(cfg)
 
     refs = discover_credential_refs()
     required_paths = set(r[0] for r in refs)
 
     if not required_paths:
-        print("\nNo credential_ref entries found in config/extractors/*.yaml")
-        print("Hint: under a user, add "
-              "'credential_ref: <conn>.<user>.password'")
-        return
+        existing_now = set(flatten(decrypt_fernet_tree(fernet_key, fernet_vault)))
+        if not existing_now:
+            print("\nNo credential_ref entries found in config/extractors/*.yaml")
+            print("Hint: under a user, add 'credential_ref: <conn>.<user>.password'")
+            return
+        print("\nNOTE: no credential_refs declared - ALL existing secrets "
+              "count as stale. The secrets: mapping in the config is left "
+              "unchanged (load_config requires a non-empty mapping).")
 
-    # Cross-check + optional regeneration of the config secrets mapping.
     sync_secret_mapping(env, required_paths, dry_run=dry_run)
 
-    existing_tree = decrypt_to_tree(binary, key_file, encrypted_file)
+    existing_tree = decrypt_fernet_tree(fernet_key, fernet_vault)
     existing_paths = set(flatten(existing_tree).keys())
     if not existing_paths:
-        log_action("SCAN", "no vault exists yet — first scan will create it")
+        log_action("SCAN", "no fernet vault exists yet - first scan "
+                           "will create it")
 
     new_paths = sorted(required_paths - existing_paths)
     existing_but_stale = sorted(existing_paths - required_paths)
     existing_and_needed = sorted(required_paths & existing_paths)
 
-    # Detect empty namespaces left by earlier deletions (cleanup candidates)
+    # Detect empty namespaces left by earlier deletions
     cleanup_probe = dict(existing_tree)
     pending_cleanup = prune_empty_namespaces(cleanup_probe)
     if pending_cleanup:
@@ -505,7 +700,11 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     print("PASS_MGR SCAN RECONCILIATION")
     print(f"{'='*60}")
     print(f"\nDiscovered {len(required_paths)} credential_ref(s) in config")
-    print(f"Vault currently holds {len(existing_paths)} secret(s)")
+    print(f"Fernet vault (canonical) holds {len(existing_paths)} secret(s)")
+    if sops_cfg:
+        print(f"SOPS mirror: provisioned - will be refreshed if it drifts")
+    else:
+        print(f"SOPS mirror: not provisioned on this machine (skipped, logged)")
 
     if new_paths:
         print(f"\n--- NEW SECRETS TO ADD ({len(new_paths)}) ---")
@@ -527,7 +726,7 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
         print(f"To proceed, run: ./vault.sh scan {env}")
         return
 
-    # Interactive collection (nothing written to the vault yet)
+    # Interactive collection (nothing written yet)
     final_tree = dict(existing_tree)
     additions = []
     updates = []
@@ -577,7 +776,7 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
                         old = flatten(existing_tree).get(path)
                         if old == pwd:
                             print("[note] New password is identical to the "
-                                  "current one — logging anyway.")
+                                  "current one - logging anyway.")
                         updates.append(path)
                         nested = unflatten({path: pwd})
                         final_tree = merge_tree(final_tree, nested)
@@ -603,12 +802,42 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     # Cleanup after applying deletions
     cleaned = prune_empty_namespaces(final_tree)
 
+    # Mirror drift check against the FINAL tree
+    flat_final = flatten(final_tree)
+    if not flat_final:
+        print(f"\n{'='*60}")
+        print(f"VAULT RETIREMENT - all {len(existing_paths)} secret(s) "
+              f"would be REMOVED")
+        print(f"{'='*60}")
+        print(f"Backup copies will be kept in {BACKUP_DIR}.")
+        resp = input("Type 'retire' to delete the vault files: ").strip().lower()
+        if resp != "retire":
+            log_action("SCAN_ABORT", "user declined vault retirement")
+            print("Aborted. Nothing was written.")
+            return
+        if fernet_vault.is_file():
+            create_backup(fernet_vault)
+            fernet_vault.unlink()
+            log_action("RETIRED", f"fernet vault removed: {fernet_vault}")
+        mirror_file = sops_cfg[2] if sops_cfg else None
+        if mirror_file and mirror_file.is_file():
+            create_backup(mirror_file)
+            mirror_file.unlink()
+            log_action("RETIRED", f"sops mirror removed: {mirror_file}")
+        print("\nVault retired. Backups retained in secrets/backups/.")
+        log_action("SCAN_COMPLETE", "vault retired - all secrets removed")
+        return
+    
+    mirror_needed = sops_mirror_needed(sops_cfg, flat_final) if sops_cfg else False
+
     # Summary and final confirmation
-    if not (additions or updates or deletions or cleaned):
+    fernet_changed = bool(additions or updates or deletions or cleaned)
+    if not fernet_changed and not mirror_needed:
         print(f"\n{'='*60}")
         print("NO CHANGES REQUIRED")
         print(f"{'='*60}")
-        print("All secrets in vault match the config file declarations.")
+        print("Fernet vault matches the config declarations, and the sops "
+              "mirror is in sync.")
         return
 
     print(f"\n{'='*60}")
@@ -619,22 +848,33 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     print(f"Deletions:  {len(deletions)}")
     print(f"Cleanup:    {len(cleaned)} empty namespace(s) removed")
     print(f"Unchanged:  {len(existing_and_needed) - len(updates)}")
+    print(f"Fernet vault:  {'will be rewritten' if fernet_changed else 'unchanged'}")
+    if sops_cfg:
+        print(f"SOPS mirror:   {'will be refreshed' if mirror_needed else 'already in sync'}")
+    else:
+        print(f"SOPS mirror:   skipped on this machine (see SYNC_SKIP in log)")
 
-    print(f"\nReady to write the reconciled vault.")
-    print(f"A backup of the current vault will be saved to {BACKUP_DIR} "
-          f"before the write.")
+    print(f"\nReady to write. A backup of each rewritten vault will be "
+          f"saved to {BACKUP_DIR} before its replacement.")
     resp = input("Proceed? (y/N) ").strip().lower()
     if resp != "y":
         log_action("SCAN_ABORT", "user declined final confirmation")
         print("Aborted. Nothing was written.")
         return
 
-    seal_and_verify(binary, key_file, encrypted_file, final_tree)
+    if fernet_changed:
+        seal_fernet_and_verify(fernet_key, fernet_vault, final_tree)
+    else:
+        log_action("SKIP_WRITE", "fernet vault unchanged - not rewritten")
+
+    if sops_cfg and mirror_needed:
+        seal_sops_and_verify(sops_cfg[0], sops_cfg[1], sops_cfg[2], final_tree)
+        log_action("SYNC_SOPS", "sops mirror refreshed from canonical vault")
 
     for path in deletions:
         log_action("DELETE", f"removed from vault: {path}")
 
-    final_names = sorted(flatten(final_tree))
+    final_names = sorted(flat_final)
     print(f"\nFinal vault contains {len(final_names)} secret(s):")
     for name in final_names:
         print(f"  {name}")
@@ -642,7 +882,8 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     log_action("SCAN_COMPLETE",
                f"added={len(additions)}, updated={len(updates)}, "
                f"deleted={len(deletions)}, cleaned={len(cleaned)}, "
-               f"final_count={len(final_names)}")
+               f"final_count={len(final_names)}, "
+               f"sops_mirror={'refreshed' if (sops_cfg and mirror_needed) else ('in_sync' if sops_cfg else 'skipped')}")
 
 
 # ------------------------------------------------------------------ main ----
@@ -651,16 +892,18 @@ USAGE = """usage: vault.sh <command> <environment> [options]
 
 commands:
   list  <env>                  print secret names (never values)
-  scan  <env> [--dry-run]      sync vault to match config/extractors/*.yaml
+  scan  <env> [--dry-run]      sync vaults to match config/extractors/*.yaml
 
 notes:
+  - The Fernet vault is canonical; the SOPS vault is an opportunistic
+    mirror (refreshed only when the sops binary + age key are present).
   - 'scan' is the ONLY way to add, rotate, or delete secrets.
     New secrets are entered via a masked prompt; no plaintext
     fragment files are ever used.
   - 'scan' also cross-checks and regenerates the secrets: mapping in
     config/pass_mgr.<env>.yaml to match the extractors' credential_refs.
   - Always run with --dry-run first to preview the reconciliation plan.
-  - A vault is created automatically on the first 'scan' if none exists.
+  - Vaults are created automatically on the first 'scan' if none exist.
 """
 
 def main(argv) -> int:

@@ -1,0 +1,21 @@
+# ==============================================================================
+# RUN REGISTRY - which pipes the wrapper executes, IN THIS ORDER.
+# ------------------------------------------------------------------------------
+# A pipe = one yaml in config/extractors/. Only names registered here run;
+# other yamls sitting in the extractor folder are IGNORED (logged as
+# "unregistered" for visibility, never executed).
+#
+#   Add a pipe:    drop config/extractors/<name>.yaml, add <name> below.
+#   Disable a pipe: delete its line (the yaml stays; nothing runs).
+#   Order:         pipes execute top to bottom in the extract step.
+#
+# Validation is loud and happens BEFORE anything runs (exit 3):
+#   - a registered name with no matching yaml file -> named error
+#   - the same name registered twice -> named error
+#   - a yaml whose connection type has no connector in lib/connectors.py
+#     -> named error
+# ==============================================================================
+
+pipes:
+  - oracle_to_stg
+  - ad_to_stg

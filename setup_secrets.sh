@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# setup_secrets.sh — create age identity and Fernet key for an environment.
+# setup_secrets.sh - create age identity and Fernet key for an environment.
 #
 # Usage:   ./setup_secrets.sh laptop   (or prod)
 #
@@ -34,7 +34,7 @@ DEFAULT_AGE="$HOME/.dpl-keys/$ENV/sops-age/age.key"
 DEFAULT_FERNET="$HOME/.dpl-keys/$ENV/fernet/key"
 
 echo ""
-echo "=== pass_mgr key setup — environment: $ENV ==="
+echo "=== pass_mgr key setup - environment: $ENV ==="
 echo ""
 echo "Default key locations:"
 echo "  Age key:    $DEFAULT_AGE"
@@ -62,15 +62,27 @@ else
 fi
 
 # --- Step 3: locate age-keygen ----------------------------------------------
+KERNEL="$(uname -s)"
+case "$KERNEL" in
+    Darwin*)
+        KGEN_PATTERN="age-keygen-*darwin*" ;;
+    Linux*)
+        KGEN_PATTERN="age-keygen-*linux*" ;;
+    MINGW*|MSYS*|CYGWIN*)
+        KGEN_PATTERN="age-keygen-*amd64.exe" ;;
+    *)
+        fail "unrecognized platform '$KERNEL' for age-keygen selection" ;;
+esac
+
 KGEN_BIN=""
-for kf in "$BIN_DIR"/age-keygen-*; do
+for kf in "$BIN_DIR"/$KGEN_PATTERN; do
     if [ -f "$kf" ]; then
         KGEN_BIN="$kf"
         break
     fi
 done
 if [ -z "$KGEN_BIN" ]; then
-    fail "No age-keygen binary found in bin/ — run ./run_offline_tests.sh first to verify binaries"
+    fail "No age-keygen binary found in bin/ - run ./run_offline_tests.sh first to verify binaries"
 fi
 
 # --- Step 4: secure directories ----------------------------------------------
@@ -82,7 +94,7 @@ chmod 700 "$(dirname "$AGE_PATH")" "$(dirname "$FERNET_PATH")"
 # --- Step 5: mint age identity (refuse overwrite) ---------------------------
 if [ -f "$AGE_PATH" ]; then
     echo ""
-    echo "Age key already exists at $AGE_PATH — skipping (protected)."
+    echo "Age key already exists at $AGE_PATH - skipping (protected)."
     echo "Public key: $(grep -o 'age1[a-z0-9]*' "$AGE_PATH" | head -1)"
 else
     echo ""
@@ -97,7 +109,7 @@ fi
 # --- Step 6: generate Fernet key (refuse overwrite) --------------------------
 if [ -f "$FERNET_PATH" ]; then
     echo ""
-    echo "Fernet key already exists at $FERNET_PATH — skipping (protected)."
+    echo "Fernet key already exists at $FERNET_PATH - skipping (protected)."
 else
     echo "Generating Fernet key..."
     # Prefer the ACTIVE environment's Python (conda etc.), so the

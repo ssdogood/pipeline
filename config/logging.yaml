@@ -1,5 +1,5 @@
 # ==============================================================================
-# CENTRALIZED LOGGING CONFIG — loaded by lib/logger.py:setup_logging()
+# CENTRALIZED LOGGING CONFIG - loaded by lib/logger.py:setup_logging()
 #
 # The built-in fallback in lib/logger.py mirrors this file. Keep both in sync.
 # Relative handler `filename` values are anchored to PROJECT_ROOT/logs/ at
@@ -8,7 +8,7 @@
 # NOTE on `defaults`: belt-and-braces only. Some Python versions do not
 # forward the formatter `defaults` key through dictConfig (observed in this
 # project's environment). The REAL guarantee that every record carries
-# run_id/table is the LoggerAdapter from get_run_logger() — all component
+# run_id/table is the LoggerAdapter from get_run_logger() - all component
 # loggers emit through it, never through a bare getLogger().
 # ==============================================================================
 version: 1

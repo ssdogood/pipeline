@@ -1,5 +1,5 @@
 """
-pass_mgr providers — SOPS (primary) and Fernet (backup).
+pass_mgr providers - SOPS (primary) and Fernet (backup).
 
 Each provider owns exactly one whole-file vault per environment and returns
 the complete name->secret mapping from load(). The dispatcher (in
@@ -44,7 +44,7 @@ from ._errors import (
 SOPS_TIMEOUT_SECONDS = 10
 
 #: Envelope schema version understood by the Fernet provider. Reserved for
-#: v2 key rotation — see design §5.2. Nothing branches on it yet.
+#: v2 key rotation - see design §5.2. Nothing branches on it yet.
 FERNET_ENVELOPE_VERSION = 1
 
 
@@ -57,7 +57,7 @@ def flatten_namespaced(mapping: Any) -> dict[str, str]:
 
     {'oracle': {'stg_pass': 'x'}} -> {'oracle.stg_pass': 'x'}
     Flat leaf entries pass through unchanged. Raises PassMgrDecryptError
-    on non-string leaves — vaults must contain only string secret values.
+    on non-string leaves - vaults must contain only string secret values.
     """
     flat: dict[str, str] = {}
 
@@ -66,7 +66,7 @@ def flatten_namespaced(mapping: Any) -> dict[str, str]:
             if not node:
                 raise PassMgrDecryptError(
                     f"pass_mgr: empty namespace '{prefix or '<root>'}' in "
-                    f"vault — nothing to retrieve."
+                    f"vault - nothing to retrieve."
                 )
             for key, value in node.items():
                 _walk(value, f"{prefix}.{key}" if prefix else str(key))
@@ -321,7 +321,7 @@ class SopsProvider(Provider):
 class FernetProvider(Provider):
     """Whole-envelope decryption of the JSON backup vault.
 
-    Same interface, same cache slot, same error taxonomy as SOPS — a thin
+    Same interface, same cache slot, same error taxonomy as SOPS - a thin
     adapter by design (§5.2), kept viable as the certified fallback if
     the security team rejects SOPS.
     """
@@ -355,22 +355,39 @@ class FernetProvider(Provider):
             )
 
         key_text = self.key_file.read_text(encoding="utf-8").strip()
-        blob = self.encrypted_file.read_bytes()
 
+        # Header-tolerant read: the envelope file may carry a '#'-prefixed
+        # DO-NOT-EDIT banner (written by the vault tooling), mirroring the
+        # sops vault's file format. Comment lines are skipped; exactly one
+        # non-empty, non-comment line must remain - the fernet token.
         try:
-            token = blob.decode("ascii").strip()
+            raw = self.encrypted_file.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
             raise PassMgrDecryptError(
                 f"pass_mgr: fernet envelope {self.encrypted_file} is not "
-                f"a valid fernet token."
+                f"valid UTF-8 text."
             ) from exc
+
+        token_lines = [
+            line.strip()
+            for line in raw.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        if len(token_lines) != 1:
+            raise PassMgrDecryptError(
+                f"pass_mgr: fernet envelope {self.encrypted_file} must "
+                f"contain exactly one token line (after skipping '#' "
+                f"comment lines); found {len(token_lines)}. The file may "
+                f"be truncated or manually edited."
+            )
+        token = token_lines[0]
 
         try:
             plaintext = Fernet(key_text).decrypt(token.encode("ascii"))
         except InvalidToken as exc:
             raise PassMgrDecryptError(
                 f"pass_mgr: fernet decryption failed for "
-                f"{self.encrypted_file} — wrong key or corrupted envelope."
+                f"{self.encrypted_file} - wrong key or corrupted envelope."
             ) from exc
         except ValueError as exc:  # malformed key
             raise PassMgrConfigError(

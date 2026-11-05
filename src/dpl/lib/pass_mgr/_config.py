@@ -1,5 +1,5 @@
 """
-pass_mgr configuration — loading and validation of per-environment config.
+pass_mgr configuration - loading and validation of per-environment config.
 
 Exactly two config files exist, both in PROJECT_ROOT/config/:
     pass_mgr.laptop.yaml
@@ -37,7 +37,7 @@ ENVIRONMENTS = ("laptop", "prod")
 PRODUCTION_ENVIRONMENT = "prod"
 
 #: Config schema version understood by this loader. Anything else is a
-#: hard error — see design doc §3, reserved for v2 key rotation.
+#: hard error - see design doc §3, reserved for v2 key rotation.
 SUPPORTED_CONFIG_VERSION = 1
 
 #: Top-level keys allowed in a pass_mgr config file. Exhaustive on purpose:
@@ -51,6 +51,12 @@ ALLOWED_SECRET_KEYS = frozenset({"method"})
 #: from the production config. Detected at load time, not at call time.
 INSECURE_METHODS = frozenset({"plain"})
 
+#: Labels whose config values are key-material paths and may therefore
+#: live OUTSIDE the project tree, expressed as ~/... paths. Membership
+#: is checked explicitly - do not infer from name suffixes (see the
+#: fernet.key_file incident: `.key_file` failed an `_key_file` suffix
+#: check and the tilde branch silently never fired).
+KEY_PATH_LABELS = frozenset({"sops.age_key_file", "fernet.key_file"})
 
 # --------------------------------------------------------------------------
 # Validated config object
@@ -65,7 +71,7 @@ class PassMgrConfig:
     default_method: str
     #: Raw per-method config sections keyed by method id, exactly as they
     #: appear in the file. Providers receive their own section and perform
-    #: their own deep validation (design doc §5) — this loader only
+    #: their own deep validation (design doc §5) - this loader only
     #: enforces cross-provider rules.
     method_sections: dict[str, dict[str, Any]]
     #: Secret name -> resolved method id, after applying default_method
@@ -165,7 +171,7 @@ def _validate(
         raise PassMgrConfigError(
             f"pass_mgr: unknown top-level key(s) in {config_path.name}: "
             f"{sorted(unknown_keys)}. Allowed keys: "
-            f"{sorted(ALLOWED_TOP_LEVEL_KEYS)}. Typo protection — fix or "
+            f"{sorted(ALLOWED_TOP_LEVEL_KEYS)}. Typo protection - fix or "
             f"remove the offending key."
         )
 
@@ -249,7 +255,7 @@ def _validate(
         raise PassMgrProductionPolicyError(
             f"pass_mgr: insecure method(s) {sorted(insecure_referenced)} "
             f"referenced in the PRODUCTION config {config_path.name}. "
-            f"This is refused at load time by design — production secrets "
+            f"This is refused at load time by design - production secrets "
             f"must use sops (or fernet as fallback)."
         )
 
@@ -286,7 +292,7 @@ def _expand_tilde_for_keys(raw_value: str, what: str) -> str:
 def resolve_relative_path(raw_value: Any, what: str, base_dir: Path) -> Path:
     """Resolve a config-supplied path.
 
-    Key-file paths (age_key_file, key_file) may use ~/... — expanded to
+    Key-file paths (age_key_file, key_file) may use ~/... - expanded to
     the user's home, but the result must stay INSIDE home. Everything
     else (binaries, vaults, manifest) must be relative and stay inside
     the project tree, as before.
@@ -296,7 +302,12 @@ def resolve_relative_path(raw_value: Any, what: str, base_dir: Path) -> Path:
             f"pass_mgr: path for '{what}' must be a non-empty string, got "
             f"{raw_value!r}."
         )
-    if what.endswith("_key_file") and raw_value.startswith("~"):
+    if raw_value.startswith("~"):
+        if what not in KEY_PATH_LABELS:
+            raise PassMgrConfigError(
+                f"pass_mgr: '~' paths are only permitted for key files, "
+                f"not for '{what}'."
+            )
         expanded = Path(raw_value).expanduser().resolve()
         home = Path.home().resolve()
         if expanded != home and home not in expanded.parents:

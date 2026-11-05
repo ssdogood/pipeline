@@ -1,5 +1,5 @@
 # src/dpl/lib/paths.py
-"""Project-root resolution. Leaf module — imports nothing from dpl."""
+"""Project-root resolution. Leaf module - imports nothing from dpl."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ def get_project_root() -> Path:
     """Locate the pipeline root (owns config/, secrets/, staging/, logs/).
 
     Order:
-      1. DPL_HOME env var — explicit, used by cron on the prod box
+      1. DPL_HOME env var - explicit, used by cron on the prod box
       2. Walk up from this file for a dir holding pyproject.toml + config/
     """
     env = os.environ.get("DPL_HOME")

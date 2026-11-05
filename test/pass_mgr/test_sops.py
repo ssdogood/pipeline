@@ -1,9 +1,9 @@
 """
-T3/T4/T9 — SOPS provider tests: round-trip, failure modes, version pin.
+T3/T4/T9 - SOPS provider tests: round-trip, failure modes, version pin.
 
 WHAT THESE TESTS PROVE
 ======================
-This is the PRIMARY provider — the one the security team is being asked
+This is the PRIMARY provider - the one the security team is being asked
 to approve. The suite demonstrates, with the REAL pinned binary executing
 as a real subprocess:
 
@@ -14,7 +14,7 @@ as a real subprocess:
       scenario), tampered ciphertext, and a hung subprocess timing out
       instead of parking a cron job forever.
   T9  Version pinning: a substituted or drifted binary is REFUSED by
-      comparing its --version output against the manifest pin — the
+      comparing its --version output against the manifest pin - the
       enforcement that makes 'verify, then trust' automatic at runtime,
       complementing the shasum check that happens at staging time.
 
@@ -22,7 +22,7 @@ REQUIRES BINARIES
 =================
 Uses the `project` fixture (binaries copied into the temp tree):
 sops pinned per sops_manifest.txt, age-keygen v1.3.2. On a machine
-without them the suite fails LOUDLY — by design, that's the green
+without them the suite fails LOUDLY - by design, that's the green
 script's job to catch.
 
 NOTHING NETWORK: sops + age are entirely local. The tests generate
@@ -34,6 +34,7 @@ Run with:  pytest test/pass_mgr/test_sops.py -v
 
 from __future__ import annotations
 
+import sys
 import stat
 from pathlib import Path
 
@@ -71,7 +72,7 @@ def build_working_sops_setup(project, entries, secrets=None):
 
 
 # ---------------------------------------------------------------------------
-# T3 — round-trip, the happy path
+# T3 - round-trip, the happy path
 # ---------------------------------------------------------------------------
 
 
@@ -108,7 +109,7 @@ class TestRoundTrip:
         assert get_secret("app.subsystem.deep_pass") == "d33p-v4lue"
 
     def test_non_string_leaf_refused(self, project):
-        # YAML coerces bare numbers to ints — a numeric password would
+        # YAML coerces bare numbers to ints - a numeric password would
         # crash a connector at bind time. Refused at the boundary.
         build_working_sops_setup(
             project,
@@ -134,14 +135,14 @@ class TestRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# T4 — failure modes: every one typed, every message actionable
+# T4 - failure modes: every one typed, every message actionable
 # ---------------------------------------------------------------------------
 
 
 class TestFailureModes:
 
     def test_missing_binary(self, project, sample_entries):
-        # Config points at a binary that isn't there — the classic
+        # Config points at a binary that isn't there - the classic
         # 'new machine, bin/ not populated' case. Named error includes
         # the EXPECTED PATH so the operator knows exactly what to copy.
         identity_file, recipient = project.add_age_identity()
@@ -197,7 +198,7 @@ class TestFailureModes:
     def test_tampered_vault_raises_decrypt_error(self, project, sample_entries):
         # Corrupt the encrypted YAML: authenticated encryption must
         # refuse, never serve garbage. (Mirrors the Fernet tamper test
-        # — symmetric taxonomy across primary and backup, by design.)
+        # - symmetric taxonomy across primary and backup, by design.)
         build_working_sops_setup(project, sample_entries)
 
         vault = project.secrets_dir / "secrets.sops.yaml"
@@ -210,15 +211,23 @@ class TestFailureModes:
         init("laptop", project_root=project.root)
         with pytest.raises(PassMgrDecryptError):
             get_secret("oracle.stg_pass")
+        
+    @pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the fake hanging binary is a Unix shebang script; Windows "
+            "cannot launch it (WinError 216). The timeout mechanism "
+            "itself (subprocess timeout -> DecryptError) is "
+            "platform-uniform stdlib behavior.",
+    )
 
     def test_subprocess_timeout_instead_of_hang(self, project, sample_entries):
         # A sops invocation that never returns must be killed by the
-        # hard timeout and surfaced as DecryptError — cron jobs must
+        # hard timeout and surfaced as DecryptError - cron jobs must
         # fail loudly, never park forever (design §5.1).
         #
         # How: substitute a fake 'binary' that is a shell script that
         # sleeps, and shrink the timeout to half a second. The version
-        # probe invokes it first — and times out there.
+        # probe invokes it first - and times out there.
         identity_file, recipient = project.add_age_identity()
         project.add_sops_vault(sample_entries, identity_file, recipient)
 
@@ -257,7 +266,7 @@ class TestFailureModes:
 
 
 # ---------------------------------------------------------------------------
-# T9 — version pinning: the runtime half of 'verify, then trust'
+# T9 - version pinning: the runtime half of 'verify, then trust'
 # ---------------------------------------------------------------------------
 
 
@@ -288,7 +297,7 @@ class TestVersionPinning:
             get_secret("oracle.stg_pass")
 
     def test_substituted_tool_refused(self, project, sample_entries):
-        # Point the sops config at age-keygen — an executable that
+        # Point the sops config at age-keygen - an executable that
         # exists but is the WRONG TOOL. It runs, prints a version, and
         # the version probe still refuses it. Belt AND braces: even a
         # present, working binary fails closed if it isn't the pinned
@@ -310,7 +319,7 @@ class TestVersionPinning:
     def test_absent_manifest_degrades_gracefully(self, project, sample_entries):
         # Manifest is optional in config (checksum verification happens
         # out-of-band via the green script). Without it, no runtime
-        # version pin — but decryption still works. Degrade, don't die.
+        # version pin - but decryption still works. Degrade, don't die.
         build_working_sops_setup(project, sample_entries)
 
         cfg_path = project.root / "config" / "pass_mgr.laptop.yaml"
@@ -326,7 +335,7 @@ class TestVersionPinning:
 
     def test_corrupt_manifest_is_hard_error(self, project, sample_entries):
         # Present but MALFORMED pin comment: a half-configured pin is
-        # worse than none — refuse rather than guess.
+        # worse than none - refuse rather than guess.
         build_working_sops_setup(project, sample_entries)
 
         manifest = project.root / "bin" / "sops_manifest.txt"

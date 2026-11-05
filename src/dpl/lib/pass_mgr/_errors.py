@@ -1,5 +1,5 @@
 """
-pass_mgr error taxonomy — typed exceptions for secret retrieval failures.
+pass_mgr error taxonomy - typed exceptions for secret retrieval failures.
 
 Each subclass is distinct enough that callers can catch specific conditions
 (e.g., "binary missing" vs "decryption failed") without parsing message text.
@@ -15,7 +15,7 @@ class PassMgrError(Exception):
 
 
 class PassMgrConfigError(PassMgrError):
-    """Invalid configuration file — syntax error, unknown key, undefined method, etc."""
+    """Invalid configuration file - syntax error, unknown key, undefined method, etc."""
     pass
 
 
@@ -45,5 +45,5 @@ class PassMgrKeyFileMissingError(PassMgrError):
 
 
 class PassMgrDecryptError(PassMgrError):
-    """Decryption failed — wrong key, corrupted ciphertext, or timeout."""
+    """Decryption failed - wrong key, corrupted ciphertext, or timeout."""
     pass

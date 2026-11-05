@@ -1,5 +1,5 @@
 """
-pass_mgr — the single authority for retrieving secrets by name.
+pass_mgr - the single authority for retrieving secrets by name.
 
 Public surface:
 
@@ -8,13 +8,13 @@ Public surface:
     value = pass_mgr.get_secret("oracle.stg_pass")
 
 Callers (connectors) pass a secret NAME and nothing else. They know no
-method, no path, no key file, no binary. Everything else — config loading,
-provider dispatch, decryption, caching — happens behind this facade.
+method, no path, no key file, no binary. Everything else - config loading,
+provider dispatch, decryption, caching - happens behind this facade.
 
 Lifecycle (design doc §6):
     init() is called once per process with an explicit environment. Vault
-    decryption is lazy — nothing is decrypted until the first get_secret()
-    call — and each referenced provider's vault is decrypted at most ONCE
+    decryption is lazy - nothing is decrypted until the first get_secret()
+    call - and each referenced provider's vault is decrypted at most ONCE
     per process, then held in a module-level cache. The 10-minute cron
     extracts therefore pay one decryption per provider per run.
 
@@ -118,7 +118,7 @@ _dispatcher: _Dispatcher | None = None
 def init(environment: str, project_root: Path | None = None) -> None:
     """Initialize pass_mgr for this process.
 
-    Loads and validates pass_mgr.<environment>.yaml — all configuration
+    Loads and validates pass_mgr.<environment>.yaml - all configuration
     errors (bad YAML, unknown keys, undefined methods, insecure methods in
     production) surface HERE, at startup, never on first fetch. The
     environment is always explicit; nothing is inferred from the host.
@@ -139,7 +139,7 @@ def init(environment: str, project_root: Path | None = None) -> None:
 def get_secret(name: str) -> str:
     """Return the plaintext secret identified by `name`.
 
-    Callers pass only a name — no method, no path, no key. Vault decryption
+    Callers pass only a name - no method, no path, no key. Vault decryption
     is performed at most once per provider per process and cached in
     memory.
 
@@ -148,7 +148,7 @@ def get_secret(name: str) -> str:
             not in the decrypted vault (two different failure layers,
             distinguished in the message).
         PassMgrConfigError / ProductionPolicyError: init() was skipped,
-            or late config discovery — normally impossible after a
+            or late config discovery - normally impossible after a
             successful init().
         PassMgrBinaryMissingError / VersionMismatchError /
             KeyFileMissingError / DecryptError: the deferred-cost failure
@@ -163,7 +163,7 @@ def get_secret(name: str) -> str:
 
 
 def reset() -> None:
-    """Drop all cached state. Test-suite use only — no caller code ever
+    """Drop all cached state. Test-suite use only - no caller code ever
     calls this in production paths. Exists because the cache is
     deliberately once-per-process and pytest wants a cold dispatcher
     per test without subprocess gymnastics."""
