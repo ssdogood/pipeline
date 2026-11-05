@@ -49,6 +49,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import secrets
 from datetime import datetime
 from pathlib import Path
 
@@ -73,6 +74,8 @@ FERNET_ENVELOPE_VERSION = 1
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
+_FINGERPRINT_KEY = secrets.token_bytes(32)
+
 NAME_RE = re.compile(r"^[A-Za-z0-9_.\\-]+$")
 
 logging.basicConfig(
@@ -85,13 +88,13 @@ logger = logging.getLogger(__name__)
 
 
 def fingerprint(secret_name: str, value: str) -> str:
-    """Short non-reversible fingerprint of a secret value, salted with its
-    name. Used ONLY in logs to prove a change occurred (and whether a
-    re-entered value is identical). Truncation is deliberate: it cannot
-    be meaningfully brute-forced for a value of unknown length/charset."""
+    """Keyed, truncated log fingerprint of a secret value, bound to its
+    name. Used ONLY in logs to prove a change occurred within this run.
+    HMAC (not a bare hash) so log readers without this process's key
+    cannot offline-test password guesses; truncation to 64 bits keeps
+    fingerprints short and gives negligible false-match probability."""
     payload = f"{secret_name}:{value}".encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:16]
-
+    return hmac.new(_FINGERPRINT_KEY, payload, hashlib.sha256).hexdigest()[:16]
 
 def fail(message: str) -> None:
     logger.error(f"VAULT ERROR: {message}")
