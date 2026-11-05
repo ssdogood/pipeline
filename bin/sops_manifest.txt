@@ -1,0 +1,10 @@
+# SOPS version: v3.13.3 (pinned)
+# Source: https://github.com/getsops/sops/releases/tag/v3.13.3
+
+b97c0d434aab577dc40310e8d22ff9e45eef4c80638ab978daae9b4681c59286  sops-v3.13.3.darwin.arm64
+a4a9a398858fe8b2ef72d9686d930bf7c5cece9be74ad83ac3b53cfdd70e6b1c  sops-v3.13.3.amd64.exe
+e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  sops-v3.13.3.linux.amd64
+
+# age-keygen version: v1.3.2 (pinned)
+# Source: https://github.com/FiloSottile/age/releases
+c16e229245123d0ad27442317461d63915416cad0294395cd19ca93feb3211ea  age-keygen-v1.3.2.darwin.arm64

@@ -2,7 +2,8 @@
 """LDAP connection layer for Active Directory extraction.
 
 Contract mirrors lib/ora_connect.py at the connection level:
-    - NTLM bind, credentials read from secrets/ (UTF-8, stripped)
+    - NTLM bind; password fetched from the pass_mgr vault via the user's
+      credential_ref (vault method per default_method in pass_mgr.<env>.yaml)
     - one shared connection per folder; lifecycle owned by the extractor
     - paged-search generator streams entries page by page (memory-bounded,
       same discipline as ora_connect.iter_batches)
@@ -13,13 +14,13 @@ Usage:
 from __future__ import annotations
 
 from contextlib import contextmanager
-from pathlib import Path
 
 from ldap3 import ALL, NTLM, SIMPLE, SUBTREE, Connection, Server
-from schema import Schema, And, Optional
+from schema import Schema, And, Optional, Forbidden
 
-from dpl.lib.common import load_config, load_settings, SECRET_DIR
+from dpl.lib.common import load_config
 from dpl.lib.logger import get_run_logger, setup_logging
+from dpl.lib import pass_mgr
 
 log = get_run_logger("dpl.ldap")
 
@@ -33,8 +34,14 @@ LDAP_CONFIG_SCHEMA = Schema({
         str: {
             "type": And(str, len, lambda t: t.lower() == "ldap"),
             "uri": And(str, len),
-            "username": And(str, len),
-            "secret": And(str, len),
+            Forbidden("username"): object,   # legacy keys refused - the
+            Forbidden("secret"): object,     # users-map is the contract now
+            "users": {
+                str: {  # NTLM login string 'DOMAIN\user' - the map key
+                    "credential_ref": And(str, len),
+                    Optional(str): object
+                }
+            },
             Optional("auth", default="ntlm"): And(str, len),
             Optional("page_size", default=500): And(int, lambda n: n > 0),
             "folder": And(str, len),
@@ -57,13 +64,6 @@ LDAP_CONFIG_SCHEMA = Schema({
     Optional(str): object
 })
 
-def _read_secret(secret_file: str) -> str:
-    """Read one secret (UTF-8, whitespace-stripped). Raise loudly if absent."""
-    path = SECRET_DIR / secret_file
-    if not path.is_file():
-        raise FileNotFoundError(f"secret file not found: {path}")
-    return path.read_text(encoding="utf-8").strip()
-
 
 @contextmanager
 def connect(cfg: dict, conn_name: str):
@@ -74,10 +74,18 @@ def connect(cfg: dict, conn_name: str):
     """
     conn_cfg = cfg["connections"][conn_name]
     uri = conn_cfg["uri"]
-    username = conn_cfg["username"]
     auth_name = conn_cfg.get("auth", "ntlm").lower()
 
-    password = _read_secret(conn_cfg["secret"])
+    users = conn_cfg.get("users") or {}
+    if not users:
+        raise ValueError(
+            f"Connection '{conn_name}' declares no users: section. Add a "
+            f"user (NTLM login, 'DOMAIN\\user') with a credential_ref "
+            f"pointing into the vault."
+        )
+    # one connection = one login: first declared user binds
+    username, user_cfg = next(iter(users.items()))
+    password = pass_mgr.get_secret(user_cfg["credential_ref"])
     log.info("connecting to %s as %s (auth=%s)", uri, username, auth_name)
 
     server = Server(uri, get_info=ALL, connect_timeout=10)
@@ -103,7 +111,7 @@ def iter_paged(conn: Connection, search_base: str, search_filter: str,
                attributes: list[str], page_size: int | None = None):
     """Yield entry attribute dicts from a paged subtree search.
 
-    Generator — one page at a time, so memory stays bounded regardless of
+    Generator - one page at a time, so memory stays bounded regardless of
     result-set size. Entry attribute values are lists for multi-valued
     attributes and scalars for single-valued ones (caller normalizes).
     """
@@ -124,15 +132,6 @@ def iter_paged(conn: Connection, search_base: str, search_filter: str,
 
 # ---------------------------------------------------------------- smoke --
 
-def _smoke_missing_secret():
-    try:
-        _read_secret("__nope__.txt")
-    except FileNotFoundError as e:
-        print(f"[PASS] missing secret raises clean error ({e})")
-        return
-    raise AssertionError("missing secret did not raise")
-
-
 def _smoke_connect(cfg: dict):
     name = next(iter(cfg["connections"]))
     with connect(cfg, name) as conn:
@@ -148,7 +147,7 @@ def _smoke_first_entry(cfg: dict):
                         ["objectGUID", "sAMAccountName"])
         first = next(iter(it), None)
         if first is None:
-            print("[WARN] no entries returned — check filter/search base")
+            print("[WARN] no entries returned - check filter/search base")
         else:
             print(f"[PASS] first entry keys: {sorted(first.keys())}")
 
@@ -160,7 +159,6 @@ def main() -> int:
         print("[FAIL] config could not be loaded")
         return 3
 
-    _smoke_missing_secret()
     _smoke_connect(cfg)
     _smoke_first_entry(cfg)
     print("all ldap_connect smoke tests passed")

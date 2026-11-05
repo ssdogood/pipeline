@@ -1,5 +1,5 @@
 # ==============================================================================
-# WRAPPER CONFIG — orchestration policy (not paths, not tuning; those live in
+# WRAPPER CONFIG - orchestration policy (not paths, not tuning; those live in
 # settings.<env>.yaml). Validated by wrapper/profiles.WRAPPER_SCHEMA.
 # ==============================================================================
 

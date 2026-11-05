@@ -3,7 +3,9 @@
 Oracle connection and query helpers (python-oracledb thin mode).
 
 Config:     config/extractors/oracle_to_stg.yaml (connections, tables)
-Secrets:    secrets/<file from config>
+Secrets:    pass_mgr vaults - per-user credential_ref; the vault method is
+             chosen by default_method in pass_mgr.<env>.yaml. Plaintext
+             password files are NOT supported (removed by design).
 Settings:   config/settings.*.yaml (batch_rows etc.)
 """
 
@@ -15,9 +17,10 @@ import oracledb
 import polars as pl
 import re
 
-from schema import Schema, And, Optional
+from schema import Schema, And, Optional, Forbidden
 
-from dpl.lib.common import load_config, load_settings, SECRET_DIR
+from dpl.lib.common import load_config, load_settings
+from dpl.lib import pass_mgr
 from dpl.lib.logger import get_run_logger, setup_logging
 
 log = get_run_logger("dpl.ora")
@@ -32,14 +35,21 @@ ORACLE_CONFIG_SCHEMA = Schema({
     "connections": {
         str: {  # Dynamic key: Matches 'ora_db', 'postgres_prod', etc.
              "type": And(str, len, lambda t: t.lower() == "oracle"),
-            "username": And(str, len),
-            "secret": And(str, len),
+            Forbidden("username"): object,   # legacy keys are refused, not
+            Forbidden("secret"): object,     # ignored - passwords live in
+                                             # the pass_mgr vaults only
+            "users": {
+                str: {  # username - the users-map key (AD 'DOMAIN\user' OK)
+                    "credential_ref": And(str, len),
+                    Optional(str): object,   # e.g. role: read-only
+                }
+            },
             "host": And(str, len),
             "port": int,
             "service": And(str, len),
             "folder": And(str, len),  # required folder name per connection
             Optional(str): object  # Future-proof: allows adding new keys like 'timeout: 30' later
-            # NOTE: "folder_validated" is NOT declared here — it is runtime
+            # NOTE: "folder_validated" is NOT declared here - it is runtime
             # state set top-level by validate_config_folders(), never config.
         }
     },
@@ -82,22 +92,24 @@ def connect(cfg: dict, connection_name: str):
             f"Use the correct *_connect module for this connection."
         )
     
-    secret_file = SECRET_DIR / c["secret"]
-    if not secret_file.exists():
-        raise FileNotFoundError(
-            f"Secret file not found: {secret_file} "
-            f"(configured for connection '{connection_name}')"
+    users = c.get("users") or {}
+    if not users:
+        raise ValueError(
+            f"Connection '{connection_name}' declares no users: section. "
+            f"Add at least one user with a 'credential_ref' pointing into "
+            f"the vault (e.g. {connection_name}.<user>.password)."
         )
-    
-    password = secret_file.read_text(encoding="utf-8").strip()
-    if not password:
-        raise ValueError(f"Secret file is empty: {secret_file}")
-    
+    # One connection = one login: the first declared user connects.
+    # The username is the users-map key; the password comes from the
+    # pass_mgr vault (never from a file in secrets/).
+    user_name, user_cfg = next(iter(users.items()))
+    password = pass_mgr.get_secret(user_cfg["credential_ref"])
+
     dsn = oracledb.makedsn(c["host"], c["port"], service_name=c["service"])
 
     log.info("connecting to %s (%s:%s/%s)", connection_name, c["host"], c["port"], c["service"])
 
-    conn = oracledb.connect(user=c["username"],password=password, dsn=dsn)
+    conn = oracledb.connect(user=user_name, password=password, dsn=dsn)
     try:
         yield conn
     finally:
@@ -124,20 +136,20 @@ def iter_batches(conn, query: str, batch_size: int = DEFAULT_BATCH_SIZE,
      """Run query, yield one DataFrame per batch constructed with DECLARED dtypes.
 
      `declared` comes from the schema master (schema_master_*.csv,
-     resolved via resolve_dtype). Polars NEVER infers types from data —
+     resolved via resolve_dtype). Polars NEVER infers types from data -
      inference mis-types NULL-leading columns and crashes mid-batch.
 
      Column names AND order must match the cursor exactly; any drift
      between master CSV and the live query fails loudly. This check is
-     unconditional — not governed by `strict`.
+     unconditional - not governed by `strict`.
 
      `strict=True` (default; settings key polars.strict_cast): a value that
      does not fit its declared dtype raises. `strict=False` coerces
-     silently — emergency valve only.
+     silently - emergency valve only.
      """
      if declared is None:
          raise ValueError(
-             "iter_batches: a declared schema is REQUIRED — Polars type "
+             "iter_batches: a declared schema is REQUIRED - Polars type "
              "inference from data is disabled by design. Regenerate with: "
              "python -m lib.generate_schemas --force")
      cur = conn.cursor()
@@ -211,7 +223,7 @@ def _smoke_declared_for(cfg: dict, table_name: str) -> dict | None:
     """Resolve declared schema for one table from schema_master_oracle_to_stg.csv.
 
     Returns None (with a SKIP notice) when the master or the table is
-    absent — the caller skips, pointing the user at generate_schemas.
+    absent - the caller skips, pointing the user at generate_schemas.
     """
     from dpl.lib.common import load_schema_master
     try:
@@ -226,7 +238,7 @@ def _smoke_declared_for(cfg: dict, table_name: str) -> dict | None:
     folder = cfg["connections"][t["connection"]]["folder"]
     entry = master.get(f"{folder}.{t['name']}".lower())
     if entry is None:
-        print(f"[SKIP] table '{t['name']}' not in schema master — run "
+        print(f"[SKIP] table '{t['name']}' not in schema master - run "
               "python -m lib.generate_schemas --force")
         return None
     return {col: resolve_dtype(dt) for col, dt in entry["columns"].items()}
@@ -241,15 +253,26 @@ def _smoke_load_config() -> dict:
     )
     return cfg
 
-def _smoke_schema_rejects_retired_keys():
-    """Retired config keys fail loudly (drift, not silent ignore)."""
+def _smoke_schema_rejects_retired_and_legacy_keys():
+    """Legacy secret/username keys and retired dedup keys fail loudly."""
     import tempfile
     from pathlib import Path
 
+    # %s #1: connection-level injections (legacy keys go THERE - injecting
+    # them inline after credential_ref makes invalid YAML and the test
+    # would pass for the wrong reason).
+    # %s #2: table-level injections (retired dedup keys).
     base = (
         "connections:\n"
-        "  ora_db:\n    {type: oracle, username: u, secret: s, host: h,\n"
-        "     port: 1521, service: svc, folder: etl}\n"
+        "  ora_db:\n"
+        "    type: oracle\n"
+        "    host: h\n"
+        "    port: 1521\n"
+        "    service: svc\n"
+        "    folder: etl%s\n"
+        "    users:\n"
+        "      user_name:\n"
+        "        credential_ref: ora_db.user_name.password\n"
         "transforms: {}\n"
         "tables:\n"
         "  - {connection: ora_db, schema: STG, name: T,\n"
@@ -258,20 +281,27 @@ def _smoke_schema_rejects_retired_keys():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         f_ok = tmp / "cfg_ok.yaml"
-        f_ok.write_text(base % "")
+        f_ok.write_text(base % ("", ""))
         cfg = load_config(str(f_ok), ORACLE_CONFIG_SCHEMA)
-        assert cfg is not None, "clean config rejected"
+        assert cfg is not None, "clean credential_ref config rejected"
 
-        for extra in [", dedup_columns: all", ", dedup_columns: 42",
-                      ", dedup_columns: [a, b]"]:
+        # legacy keys at connection level -> schema refuses -> None
+        for extra in ["\n    secret: pw.txt", "\n    username: u"]:
+            f_legacy = tmp / "cfg_legacy.yaml"
+            f_legacy.write_text(base % (extra, ""))
+            got = load_config(str(f_legacy), ORACLE_CONFIG_SCHEMA)
+            assert got is None, f"legacy key accepted: {extra!r}"
+
+        # retired dedup keys still raise (post-schema check)
+        for extra in [", dedup_columns: all", ", dedup_columns: 42"]:
             f_bad = tmp / "cfg_bad.yaml"
-            f_bad.write_text(base % extra)
+            f_bad.write_text(base % ("", extra))
             try:
                 load_config(str(f_bad), ORACLE_CONFIG_SCHEMA)
                 raise AssertionError(f"retired key accepted: {extra!r}")
             except ValueError as e:
                 assert "retired config key" in str(e), e
-    print("[PASS] config schema: retired/unknown table keys rejected")
+    print("[PASS] config schema: legacy secret/username refused; retired keys rejected")
 
 def _smoke_load_settings() -> dict:
     settings = load_settings(SETTINGS_FILE)
@@ -291,7 +321,7 @@ def _smoke_connect(cfg: dict):
 def _smoke_first_table_streamed(cfg: dict, settings: dict, table_name: str = None):
     """
     Stream the first configured table (or a named one) via the DECLARED
-    schema path — same code path the extractor uses.
+    schema path - same code path the extractor uses.
     """
     t = next((t for t in cfg["tables"] if t["name"] == table_name), cfg["tables"][0])
     declared = _smoke_declared_for(cfg, t["name"])
@@ -349,7 +379,7 @@ if __name__ == "__main__":
     cfg = _smoke_load_config()
     settings = _smoke_load_settings()
     print(f"[INFO] strict_cast={settings.get('polars', {}).get('strict_cast', True)}")
-    _smoke_schema_rejects_retired_keys()
+    _smoke_schema_rejects_retired_and_legacy_keys()
     _smoke_connect(cfg)
     _smoke_first_table_streamed(cfg, settings)
     _smoke_read_query(cfg, settings)

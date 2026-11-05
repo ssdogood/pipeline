@@ -1,27 +1,29 @@
 # Active Directory extraction config (slice A).
 # Single connection: the KNIME scripts show serv.subd.maind.com serves BOTH
 # naming contexts (DC=subd,... and DC=atm,...) with the same credentials.
-# The ATM tree differs only at the table level (search_base) — the code
+# The ATM tree differs only at the table level (search_base) - the code
 # handles any number of connections; add ad_atm later if topology changes.
 
 connections:
   ad_atm:
     type: ldap
     uri: 'ldaps://serv.subd.maind.com:636'
-    username: 'subd\support'
-    secret: active_dir_subd.sec          # secrets/active_dir_subd.sec (UTF-8, one line)
     auth: ntlm
     page_size: 500
     folder: ad-atm
+    users:
+      subd\support:
+        credential_ref: ad_atm.subd\support.password
 
   ad_main:
     type: ldap
     uri: 'ldaps://serv.subd.maind.com:636'
-    username: 'subd\support'
-    secret: active_dir_subd.sec          # secrets/active_dir_subd.sec (UTF-8, one line)
     auth: ntlm
     page_size: 500
     folder: ad-main
+    users:
+      subd\support:
+        credential_ref: ad_main.subd\support.password
 
 tables:
   - name: atm-computers

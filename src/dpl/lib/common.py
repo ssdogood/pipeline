@@ -1,5 +1,5 @@
 # dpl/lib/common.py
-"""Shared utilities: config loading, secrets, manifest writing, path helpers.
+"""Shared utilities: config loading, vault-backed credentials, manifests, paths.
 
 Run smoke tests:  python -m dpl.lib.common   (from project root)
 """
@@ -58,13 +58,19 @@ SETTINGS_SCHEMA = Schema({
         Optional("strict_cast", default=True): bool,
         Optional(str): object
     },
-
+    # Which pass_mgr.<environment>.yaml the vault layer reads at runtime.
+    # Optional in the schema (minimal test fixtures stay loadable) but the
+    # extractors REQUIRE it - missing key = clean refusal at startup.
+    Optional("pass_mgr"): {
+        "environment": And(str, len),
+        Optional(str): object
+    },
     "paths": {                          # mandatory per settings.yaml docs
         "landing_root": And(str, len),
         "scratch_root": And(str, len),
         # runs_root: manifest archive root. Optional; the derived default
         # (<landing_root>/_runs) is applied by normalize_settings() AFTER
-        # validation — it needs landing_root, which the schema doesn't
+        # validation - it needs landing_root, which the schema doesn't
         # see at validate time. A misspelled sibling key is NOT this key:
         # it falls into Optional(str) and is ignored (known limitation,
         # see settings.yaml DESIGN RULES note 3).
@@ -95,7 +101,7 @@ def normalize_settings(settings: dict) -> dict | None:
     """Post-validation fix-ups. Currently: derive runs_root default.
 
     runs_root omitted -> <landing_root>/_runs (sibling of the landing
-    date-dirs, inside the staging root — the prune-safety contract in
+    date-dirs, inside the staging root - the prune-safety contract in
     _prune_date_dirs depends on this location staying non-date-named).
     """
     if settings is None:
@@ -123,7 +129,7 @@ def parse_dedup_spec(spec: Any) -> dict:
 
     Rules:
       - Column names are NOT validated here (they can only be checked against
-        the actual result set at write time — that's the writer's job).
+        the actual result set at write time - that's the writer's job).
       - Exclude mode is all-or-nothing: EVERY entry must start with '-'.
         Mixing positive and negative entries raises ValueError.
       - Scalar keywords are case-insensitive and normalize to lowercase.
@@ -132,7 +138,7 @@ def parse_dedup_spec(spec: Any) -> dict:
 
     Returns a dict with:
         mode: "none" | "all" | "include" | "exclude"
-        columns: normalized (lowercased, '-' stripped) list — empty for
+        columns: normalized (lowercased, '-' stripped) list - empty for
                  "none"/"all"
     """
     if spec is None:
@@ -201,7 +207,7 @@ def parse_sort_spec(cell: str) -> list[tuple[str, str]]:
       - Columns are lowercased; trailing sign stripped
       - Malformed tokens raise ValueError: '--', '+-', bare '-', empty
       - Note: '-' on a sort token is TRAILING (desc); a LEADING '-' on a
-        dedup token means exclusion — never mix the conventions.
+        dedup token means exclusion - never mix the conventions.
     """
     if not cell or not cell.strip():
         return []
@@ -250,7 +256,7 @@ def _read_registry_csv(path: str | Path, expected_header: list[str],
     - '#' as the FIRST non-blank character of a line marks a comment (D3.2)
     - blank lines ignored
     - header must match expected_header exactly (case-insensitive)
-    - wrong-width rows raise with line number — no silent truncation
+    - wrong-width rows raise with line number - no silent truncation
     """
     p = Path(path)
     if not p.exists():
@@ -328,7 +334,7 @@ def load_schema_master(auto_path: str | Path,
 
     auto_path is required. ad_path optional (absent -> no AD tables).
     STRICT RULE: a table key may exist in ONE file only. Duplication
-    raises — it means two owners for one table.
+    raises - it means two owners for one table.
 
     Returns: { "<folder>.<table>" -> {"columns": {...},
                "descriptions": {...}, "flags": {...},
@@ -358,7 +364,7 @@ def load_schema_master(auto_path: str | Path,
                 if key in master:
                     raise ValueError(
                         f"table '{key}' exists in BOTH {auto_path} and "
-                        f"{ad_path} — remove it from one of them")
+                        f"{ad_path} - remove it from one of them")
                 _insert_master_row(master, ad_path, lineno, folder, conn,
                                    schema, table, seq, column, dtype,
                                    description, flags)
@@ -409,7 +415,7 @@ def load_table_rules(path: str | Path) -> dict | None:
 
 def _reject_retired_keys(cfg: dict) -> None:
     """Config keys that moved elsewhere (e.g. dedup -> table_rules_oracle_to_stg.csv)
-    must fail loudly if they reappear — silent ignore is drift."""
+    must fail loudly if they reappear - silent ignore is drift."""
     offenders = [
         (i, k) for i, t in enumerate(cfg.get("tables", []))
         for k in RETIRED_TABLE_KEYS if k in t
@@ -418,13 +424,13 @@ def _reject_retired_keys(cfg: dict) -> None:
         detail = ", ".join(f"tables[{i}].{k}" for i, k in offenders)
         raise ValueError(
             f"retired config key(s) present: {detail}. "
-            f"These now live in config/extractors/table_rules_oracle_to_stg.csv — remove them "
+            f"These now live in config/extractors/table_rules_oracle_to_stg.csv - remove them "
             f"from config yaml.")
 
 def validate_rules_references(schema_master: dict, rules: dict | None) -> None:
     """Every rules column (dedup keys, sort columns) must exist in the master.
 
-    Strict fail (D4) — typo'd rules stop the run BEFORE any connection opens.
+    Strict fail (D4) - typo'd rules stop the run BEFORE any connection opens.
     A rules entry for a table absent from the master also raises: that pair
     is unresolvable, not merely stale.
     """
@@ -457,7 +463,7 @@ def validate_master_vs_config(cfg: dict, schema_master: dict,
                               source_type: str) -> None:
     """Master-CSV table-level fields must match config.yaml. Strict fail.
 
-    Only checks tables whose connection type is `source_type` — the master
+    Only checks tables whose connection type is `source_type` - the master
     CSV is per-extractor (each extractor validates its own subset).
     A config-side rename (connection/schema) without master regeneration
     is drift the pipeline must refuse to paper over.
@@ -471,7 +477,7 @@ def validate_master_vs_config(cfg: dict, schema_master: dict,
         entry = schema_master.get(key)
         if entry is None:
             problems.append(f"configured table '{key}' absent from master CSV "
-                           f"— run: python -m lib.generate_schemas --force")
+                           f"- run: python -m lib.generate_schemas --force")
             continue
         if entry["connection"].lower() != t["connection"].lower():
             problems.append(f"{key}: connection is '{t['connection']}' in "
@@ -514,7 +520,7 @@ def reconcile_pending(schema_master: dict,
                        path: str | Path | None = None) -> list[str]:
     """Drop ledger entries whose column now exists in the master CSV.
 
-    Returns the resolved keys — the 'you finished something' report.
+    Returns the resolved keys - the 'you finished something' report.
     Call after every master regeneration.
     """
     pending = read_pending(path)
@@ -538,6 +544,13 @@ def validate_config_folders(cfg: dict) -> None:
     Raises ValueError on first violation so the pipeline doesn't proceed with
     broken config. Mutates cfg['folder_validated'] = True on success.
     """
+    # A failed load upstream delivers cfg=None here; refuse cleanly
+    # instead of crashing with a TypeError (wrapper incident 2026-11-05).
+    if not isinstance(cfg, dict) or not isinstance(cfg.get("connections"), dict):
+        raise ValueError(
+            "config is missing or invalid (load_config failed upstream) - "
+            "fix the config error reported in the log before running")
+
     folders_seen: dict[str, str] = {}  # folder -> connection_name
 
     for conn_name, conn_cfg in cfg["connections"].items():
@@ -556,6 +569,41 @@ def validate_config_folders(cfg: dict) -> None:
         folders_seen[folder] = conn_name
 
     cfg["folder_validated"] = True
+
+# secrets/ may hold ONLY the vault files and the machine-managed dirs.
+# Anything else is treated as a suspected plaintext password file and
+# stops the run before any connection is opened (2026-11-05 policy).
+ALLOWED_SECRET_FILES = frozenset({"secrets.fernet.bin", "secrets.sops.yaml"})
+ALLOWED_SECRET_DIRS = frozenset({"backups", "logs"})
+
+def validate_secrets_layout() -> None:
+    """Refuse to run when secrets/ contains unexpected entries.
+
+    Passwords live ONLY in the vaults. Hidden files (macOS .DS_Store,
+    the tool's transient .tmp files) are ignored; everything else that
+    is not the two vault files or backups//logs/ raises, naming the
+    offenders. Raises ValueError; called by the extractors at startup.
+    """
+    if not SECRET_DIR.is_dir():
+        raise ValueError(f"secrets directory not found: {SECRET_DIR}")
+    offenders = []
+    for entry in sorted(SECRET_DIR.iterdir()):
+        if entry.name.startswith("."):
+            continue
+        if entry.is_dir():
+            if entry.name not in ALLOWED_SECRET_DIRS:
+                offenders.append(entry.name + "/")
+        elif entry.name not in ALLOWED_SECRET_FILES:
+            offenders.append(entry.name)
+    if offenders:
+        raise ValueError(
+            f"secrets/ contains unexpected entries: {offenders}. Only the "
+            f"vault files (secrets.fernet.bin, secrets.sops.yaml) and the "
+            f"machine-managed dirs (backups/, logs/) may exist there. "
+            f"Passwords now live in the vault - add or rotate them with: "
+            f"./vault.sh scan <env>. Delete legacy plaintext password "
+            f"files by hand once their secrets are vaulted."
+        )
 
 def table_collision_check(cfg: dict) -> None:
     """Detect tables with same (folder, table_name) → silent overwrite risk.
@@ -601,14 +649,14 @@ def load_config(path: str, schema: Schema) -> dict | None:
         log.error("validation error in %s: %s", path, e)
         return None
 
-    _reject_retired_keys(cfg)     # NEW — raises ValueError
+    _reject_retired_keys(cfg)     # NEW - raises ValueError
     return cfg
 
 
 def load_settings(path: str) -> dict:
     """Load the global writer/runtime settings from the given YAML file.
 
-    Mandatory path argument — no guessing or defaults. Applies the
+    Mandatory path argument - no guessing or defaults. Applies the
     runs_root derived default after schema validation.
     """
     settings = load_config(path, SETTINGS_SCHEMA)
@@ -636,7 +684,7 @@ def _prune_date_dirs(root: Path, days: int, what: str) -> None:
     NON-date subdirectories are DELIBERATELY EXEMPT: runs/ and history/
     (manifest archive, SQLite) live under the staging root alongside the
     landing date-dirs. Their survival depends on failing the date-name
-    check below — locked by _smoke_prune_protects_non_date_dirs. Never
+    check below - locked by _smoke_prune_protects_non_date_dirs. Never
     relax this to 'delete everything older than cutoff'.
     """
     cutoff = (date.today() - timedelta(days=days)).isoformat()
@@ -656,7 +704,7 @@ def prune_old_runs(root: Path, days: int) -> None:
     """Remove manifest-archive date-dirs older than `days`.
 
     Wrapper housekeeping calls this with wrapper.yaml's
-    retention.manifest_days (default 90) — also the update_history
+    retention.manifest_days (default 90) - also the update_history
     backfill window: files outside it don't exist, so the filesystem
     bounds the scan.
     """
@@ -747,9 +795,9 @@ def _smoke_validate_folders_unique(tmp: Path):
     """Unique folder check passes for distinct folders."""
     cfg = {
         "connections": {
-            "ora_db": {"folder": "oracle", "type": "oracle", "username": "", "secret": "",
+            "ora_db": {"folder": "oracle", "type": "oracle",
                        "host": "", "port": 1523, "service": ""},
-            "pg_stg": {"folder": "postgres", "type": "postgres", "username": "", "secret": "",
+            "pg_stg": {"folder": "postgres", "type": "postgres",
                        "host": "", "port": 5432, "service": ""},
         }
     }
@@ -761,9 +809,9 @@ def _smoke_validate_folders_duplicate_raises(tmp: Path):
     """Duplicate folders raise ValueError."""
     cfg = {
         "connections": {
-            "ora_db": {"folder": "oracle", "type": "oracle", "username": "", "secret": "",
+            "ora_db": {"folder": "oracle", "type": "oracle",
                        "host": "", "port": 1523, "service": ""},
-            "pg_stg": {"folder": "oracle", "type": "postgres", "username": "", "secret": "",
+            "pg_stg": {"folder": "oracle", "type": "postgres",
                        "host": "", "port": 5432, "service": ""},
         }
     }
@@ -789,9 +837,9 @@ def _smoke_table_collision_detection(tmp: Path):
     """Same table name in same folder → ValueError."""
     cfg = {
         "connections": {
-            "ora_db": {"folder": "oracle", "type": "oracle", "username": "", "secret": "",
+            "ora_db": {"folder": "oracle", "type": "oracle",
                        "host": "", "port": 1523, "service": ""},
-            "pg_stg": {"folder": "oracle", "type": "postgres", "username": "", "secret": "",
+            "pg_stg": {"folder": "oracle", "type": "postgres",
                        "host": "", "port": 5432, "service": ""},
         },
         "transforms": {},

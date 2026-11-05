@@ -151,7 +151,7 @@ def get_run_logger(name: str = ROOT_LOGGER_NAME,
 
     Use for the extractor's per-table loop (and anywhere a dynamic scope
     changes mid-run). Create a FRESH adapter per table when tables are
-    processed in parallel — the adapter instance is what carries context.
+    processed in parallel - the adapter instance is what carries context.
     """
     logger = logging.getLogger(name)
     return logging.LoggerAdapter(logger, {"run_id": run_id, "table": table})

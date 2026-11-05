@@ -4,7 +4,7 @@
 # This file is shared by ALL source configs (config.yaml etc.) and by every
 # extractor (oracle now; postgres etc. later). It is the single home for
 # machine/environment-specific tuning. The per-connection identities, secrets
-# and table lists live in config.yaml — NEVER here.
+# and table lists live in config.yaml - NEVER here.
 #
 # DESIGN RULES for this file:
 #   1. Environment-specific (Windows laptop vs Linux server): copy this file
@@ -15,21 +15,31 @@
 #      mandatory key or a malformed value fails the run loudly before any
 #      connection is opened.
 #   3. Unknown keys are tolerated (future-proofing), but misspelled versions
-#      of KNOWN keys are silently ignored — if a setting appears not to take
+#      of KNOWN keys are silently ignored - if a setting appears not to take
 #      effect, check spelling here first.
 # ==============================================================================
+
+# ------------------------------------------------------------------------------
+# PASS_MGR (vault-backed credentials)
+#
+#   environment : which pass_mgr.<environment>.yaml the vault layer reads
+#                 at runtime (its default_method picks fernet or sops).
+#                 Passwords are NEVER read from files in secrets/ anymore.
+# ------------------------------------------------------------------------------
+pass_mgr:
+  environment: laptop
 
 # ------------------------------------------------------------------------------
 # POLARS / FETCH BATCHING
 #
 # Controls how many rows flow through the pipeline per chunk:
 #   - Oracle fetch: sets oracledb arraysize AND prefetchrows (round-trip
-#     reduction — the single biggest throughput lever for extraction)
+#     reduction - the single biggest throughput lever for extraction)
 #   - Polars: rows per interim DataFrame handed to DuckDB staging
 #
 # Memory implications:
 #   Polars has NO true memory cap. batch_rows is the practical control:
-#   50k rows x ~10 columns is tens of MB per batch in flight — comfortably
+#   50k rows x ~10 columns is tens of MB per batch in flight - comfortably
 #   within a 4GB Polars budget. Larger values = faster fetch, more RAM;
 #   halve it if you see memory pressure on wide tables.
 #
@@ -38,7 +48,7 @@
 polars:
   batch_rows: 50000
 
-  # strict_cast: true (default) — a value that does not fit its declared
+  # strict_cast: true (default) - a value that does not fit its declared
   # dtype (from schema_master_*.csv) fails that table LOUDLY. Flip to
   # false only as an emergency valve: Polars then silently coerces
   # (e.g. decimal truncation on a widened NUMBER column). Any run using
@@ -47,7 +57,7 @@ polars:
 
 
 # ------------------------------------------------------------------------------
-# FILESYSTEM PATHS (REQUIRED — the only mandatory section besides duckdb.memory_limit)
+# FILESYSTEM PATHS (REQUIRED - the only mandatory section besides duckdb.memory_limit)
 #
 #   landing_root : final published data. Layout created under it:
 #                     <landing_root>/<YYYY-MM-DD>/<connection.folder>/<table>/
@@ -57,13 +67,13 @@ polars:
 #                 configured at the wrapper level, not here).
 #
 #   scratch_root : transient working area. Two jobs depend on it:
-#                     1. DuckDB spill (temp files beyond memory_limit —
+#                     1. DuckDB spill (temp files beyond memory_limit -
 #                        this is what bounds RAM for arbitrarily large tables)
 #                     2. Staging of Parquet parts before the atomic move
 #                        into landing
 #
 #   IMPORTANT: scratch_root MUST be on the SAME filesystem/volume as
-#   landing_root — the atomic publish (move/rename) only works within one
+#   landing_root - the atomic publish (move/rename) only works within one
 #   filesystem. If they are on different volumes, publication degrades to
 #   copy-then-delete and loses its atomicity guarantee.
 #
@@ -80,7 +90,7 @@ paths:
   # folder per run here: <runs_root>/<date>/<folder>/_manifest_<run_id>.json
   # (layout mirrors landing data). Omitted -> derived as <landing_root>/_runs.
   # Retention pruning only removes date-named directories, so _runs/ (and
-  # _history/) survive alongside the landing date-dirs — protected by a
+  # _history/) survive alongside the landing date-dirs - protected by a
   # smoke test in lib/common.py.
   runs_root: /Users/mbp/Workspace/Developer/pipeline/data/staging/_runs
 
@@ -91,7 +101,7 @@ paths:
 # DUCKDB SESSION (per-table, in-memory, spills to scratch)
 #
 #   memory_limit : REQUIRED. Hard cap on DuckDB's buffer usage per table
-#                  write. Beyond it, DuckDB pages to scratch_root — graceful
+#                  write. Beyond it, DuckDB pages to scratch_root - graceful
 #                  degradation, not a crash. Budget guidance from a 32GB
 #                  laptop: leave ~50% for the OS and other processes;
 #                  ~10GB DuckDB + ~4GB Polars/batches fits comfortably.
@@ -132,7 +142,7 @@ duckdb:
 #                           DuckDB spill) after a successful publish, for
 #                           post-mortem debugging. Stale tmp_* directories
 #                           are swept by clean_scratch on subsequent runs.
-#                           Leave false in production — scratch is not
+#                           Leave false in production - scratch is not
 #                           retention storage.
 # ------------------------------------------------------------------------------
 writer:

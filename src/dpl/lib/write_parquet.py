@@ -7,7 +7,7 @@ Pipeline per table:
        a monotonically increasing arrival-order integer.
     2. Cleanse: uppercase + whitespace collapse on VARCHAR columns only;
        optional per-table dedup via QUALIFY row_number() ordered by
-       _stage_seq (earliest arrival wins — deterministic)
+       _stage_seq (earliest arrival wins - deterministic)
     3. Optional sort: ORDER BY the rules' sort_spec, applied OUTERMOST in
        every write query (single part and each LIMIT/OFFSET slice), with
        an implicit _stage_seq ASC tiebreak (stable sort)
@@ -23,7 +23,7 @@ Dedup modes (parsed by lib.common.parse_dedup_spec):
     exclude -> dedup on every column EXCEPT those listed ('-col' entries)
 
 Sort spec (parsed by lib.common.parse_sort_spec):
-    [(column, 'asc'|'desc'), ...] — position = precedence. Ties are broken
+    [(column, 'asc'|'desc'), ...] - position = precedence. Ties are broken
     by arrival order (_stage_seq): sorts are stable.
 
 Guarantees:
@@ -34,7 +34,7 @@ Guarantees:
     - `_stage_seq` never appears in published parquet
     - Multi-part tables read back globally sorted when sort is active
 
-Logging: lib/logger.py — "dpl.writer" under the central dpl tree.
+Logging: lib/logger.py - "dpl.writer" under the central dpl tree.
 
 Run smoke tests:  python -m lib.write_parquet   (from project root)
 """
@@ -92,7 +92,7 @@ def _resolve_dedup_columns(columns: list[tuple[str, str]],
     """Turn a parsed dedup spec into the final partition column list.
 
     Returns None when mode is 'none'. Validates that every referenced
-    column (directly listed or excluded) exists in the result set —
+    column (directly listed or excluded) exists in the result set -
     unknown names fail loudly in BOTH modes, since a typo'd exclusion is
     just as dangerous as a typo'd inclusion (it silently widens or
     mis-targets the dedup key).
@@ -136,7 +136,7 @@ def _resolve_dedup_columns(columns: list[tuple[str, str]],
     keep = [c for c in available if c not in set(spec_cols)]
     if not keep:
         raise ValueError(
-            "dedup_columns excludes every column of the result set — "
+            "dedup_columns excludes every column of the result set - "
             "there would be no dedup key left."
         )
     return keep
@@ -156,13 +156,13 @@ def _order_by_clause(sort_spec: list[tuple[str, str]],
                      columns: list[tuple[str, str]]) -> str:
     """Build the ORDER BY clause for a table's sort spec.
 
-    Returns '' when there is no sort (no ORDER BY at all — untouched
+    Returns '' when there is no sort (no ORDER BY at all - untouched
     tables keep their unsorted behavior). With a sort, the user keys are
     rendered in spec order (ASC/DESC from the spec) followed by an
     implicit '"_stage_seq" ASC' tiebreak: equal keys keep arrival order,
     making the sort stable and part contents reproducible.
 
-    `columns` is the result set of the SELECT being ordered — used to
+    `columns` is the result set of the SELECT being ordered - used to
     validate that the tiebreak column is available.
     """
     if not sort_spec:
@@ -186,10 +186,10 @@ def _build_cleanse_sql(con, cfg: dict, parsed: dict) -> str:
       1. transforms (uppercase / collapse_whitespace on VARCHAR columns
          only) over ALL staged columns, _stage_seq included
       2. dedup: QUALIFY row_number() over the resolved key columns
-         ORDER BY _stage_seq — earliest arrival wins, deterministically.
+         ORDER BY _stage_seq - earliest arrival wins, deterministically.
 
     _stage_seq is KEPT in the output of this SQL (the caller's _clean
-    table carries it) — it is needed as the sort tiebreak. It is dropped
+    table carries it) - it is needed as the sort tiebreak. It is dropped
     from published parquet by the write-time projection in close().
     """
     transforms = cfg.get("transforms", {})
@@ -253,7 +253,7 @@ def _write_parts(con, settings: dict, from_sql: str, order_by: str,
     measured bytes-per-row of a first full write (two-pass split).
 
     `order_by` (possibly '') is applied at the OUTERMOST level of every
-    data query — the single-part COPY and each LIMIT/OFFSET slice. An
+    data query - the single-part COPY and each LIMIT/OFFSET slice. An
     ORDER BY buried in a subquery is not contractual; putting it here,
     beside the LIMIT, is what makes part contents deterministically
     ordered and seams between parts correct.
@@ -273,7 +273,7 @@ def _write_parts(con, settings: dict, from_sql: str, order_by: str,
     # --- split: measure, then rewrite as parts (target 90% of max_bytes) ---
     single.unlink()
 
-    # count on the unordered base — cheaper, ordering is irrelevant here
+    # count on the unordered base - cheaper, ordering is irrelevant here
     total_rows = con.execute(f"SELECT count(*) FROM ({from_sql})").fetchone()[0]
     bytes_per_row = size / max(total_rows, 1)
     rows_per_part = max(1, int(max_bytes * 0.9 / bytes_per_row))
@@ -318,7 +318,7 @@ class ParquetWriter:
         self.table = table.lower()
         self.load_date = load_date
 
-        # Fail fast on malformed dedup specs — BEFORE any connection or I/O
+        # Fail fast on malformed dedup specs - BEFORE any connection or I/O
         if isinstance(dedup_columns, dict) and "mode" in dedup_columns:
             self.parsed = dedup_columns
         else:
@@ -328,7 +328,7 @@ class ParquetWriter:
         # Parsed sort spec from table_rules: [(column, 'asc'|'desc'), ...].
         # Structure already validated by the loader; column EXISTENCE is
         # checked here against the actual result set (this layer alone
-        # sees it — same rule as dedup columns).
+        # sees it - same rule as dedup columns).
         self.sort_spec = list(sort_spec or [])
         self.sort_active = bool(self.sort_spec)
 
@@ -420,7 +420,7 @@ class ParquetWriter:
                 self.stats["duplicates_removed"] = (
                     self._rows_read - self.stats["rows_written"])
                 # snapshot the RESOLVED partition set against the published
-                # schema (visible only — never _stage_seq)
+                # schema (visible only - never _stage_seq)
                 self.stats["dedup_columns"] = _resolve_dedup_columns(
                     visible, self.parsed)
 
@@ -495,7 +495,7 @@ def write_table(cfg: dict, settings: dict, source: str, table: str,
                 sort_spec: list[tuple[str, str]] | None = None) -> dict:
     """One-shot facade over ParquetWriter: stage, cleanse, publish. -> stats.
 
-    Thin glue ONLY — all logic lives in ParquetWriter. `batches` is drained
+    Thin glue ONLY - all logic lives in ParquetWriter. `batches` is drained
     fully; pass a fresh generator per call (a retry is simply a new call).
     """
     with ParquetWriter(

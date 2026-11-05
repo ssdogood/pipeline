@@ -1,5 +1,5 @@
 # dpl/extractors/oracle_to_stg.py
-"""Oracle ETL extractor — glue between ora_connect, writer, and manifests.
+"""Oracle ETL extractor - glue between ora_connect, writer, and manifests.
 
 Usage:
     python -m dpl.extractors.oracle_to_stg                    # run all, skip if exists
@@ -21,7 +21,7 @@ Declared schema (M3/M5):
     dtypes instead of inferring them from the data (which mis-types all-null 
     columns and blows up later in the writer).
 
-Logging: dpl/lib/logger.py — "dpl.oracle_to_stg" under the central dpl tree.
+Logging: dpl/lib/logger.py - "dpl.oracle_to_stg" under the central dpl tree.
 Every log line in the per-table scope carries run_id= and table= context
 (injected via get_run_logger), so one table's story across retries and
 interleaved output can be isolated with grep.
@@ -39,6 +39,7 @@ from typing import Any
 
 import polars as pl
 
+from dpl.lib import pass_mgr
 from dpl.lib.common import (
     load_config,
     load_settings,
@@ -47,6 +48,7 @@ from dpl.lib.common import (
     make_run_id,
     write_manifest,
     validate_config_folders,
+    validate_secrets_layout,
     table_collision_check,
     load_schema_master,
     validate_master_vs_config,
@@ -64,14 +66,14 @@ log = get_run_logger("dpl.oracle_to_stg")
 CONFIG_FILE = "config/extractors/oracle_to_stg.yaml"
 SETTINGS_FILE = "config/settings.laptop.yaml"
 
-# Registry files — auto is generator-owned, ad is hand-maintained.
+# Registry files - auto is generator-owned, ad is hand-maintained.
 # They are merged at load time; a table key may appear in only one of them.
 MASTER_AUTO = "config/extractors/schema_master_oracle_to_stg.csv"
 RULES_CSV = "config/extractors/table_rules_oracle_to_stg.csv"
 
 
 # Which connection *type* this extractor handles. Selection is by type,
-# never by connection name — names are user-chosen and arbitrary.
+# never by connection name - names are user-chosen and arbitrary.
 SOURCE_TYPE = "oracle"
 
 RETRYABLE_ERRORS = (
@@ -149,7 +151,7 @@ def _declared_schema_for(schema_master: dict | None, folder: str,
 
     Returns None when no master was supplied (legacy/inference path).
     Raises ValueError when the table is absent from the master or a dtype
-    string is unrecognized — the caller records it as a table failure.
+    string is unrecognized - the caller records it as a table failure.
     """
     if schema_master is None:
         return None
@@ -158,7 +160,7 @@ def _declared_schema_for(schema_master: dict | None, folder: str,
     entry = schema_master.get(key)
     if entry is None:
         raise ValueError(
-            f"table '{key}' not in schema master — run: "
+            f"table '{key}' not in schema master - run: "
             f"python -m lib.generate_schemas --force"
         )
     # dict preserves the CSV row order == source column order == cursor order
@@ -169,7 +171,7 @@ def _rules_for(rules: dict | None, folder: str,
     """Fetch the rules entry for one table; empty entry when absent.
 
     A table with no row in table_rules.csv simply runs with no dedup and
-    no sort (silent degradation, by design — validated up front by
+    no sort (silent degradation, by design - validated up front by
     validate_rules_references so a typo'd table name never reaches here).
     """
     if rules is None:
@@ -264,7 +266,7 @@ def extract_table(
                 # None means the call chain lost it (regression guard)
                 raise RuntimeError(
                     f"internal error: writer returned no stats for "
-                    f"{folder}.{table_name} — close() was not called?")
+                    f"{folder}.{table_name} - close() was not called?")
             tlog.info("completed (%d rows, %.1fs%s)", wstats.get("rows_read", 0),
                       time.time() - start,
                       ", sorted" if wstats.get("sort_columns") else "")
@@ -301,7 +303,7 @@ def extract_all(
 
     - Startup guards run BEFORE any connection is opened: duplicate/unsafe
       folders, table collisions, malformed dedup specs, and master-vs-config
-      drift all raise. These abort the whole run — fail fast, before any
+      drift all raise. These abort the whole run - fail fast, before any
       work is done (D4.1 tier 1).
     - The master CSV is loaded ONCE here and threaded down to every table.
     - Tables are selected by connection TYPE (SOURCE_TYPE), never by
@@ -322,8 +324,23 @@ def extract_all(
     runs_root = settings["paths"]["runs_root"]
 
     # --- guards: fail loudly before opening anything ---
+    # --- guards: fail loudly before opening anything ---
     validate_config_folders(cfg)
     table_collision_check(cfg)
+
+    # secrets/ holds vault files only - refuse before any connection.
+    validate_secrets_layout()
+
+    # Vault init: settings names the pass_mgr environment; init is
+    # idempotent, so the wrapper calling oracle then ldap is fine.
+    pm_env = (settings.get("pass_mgr") or {}).get("environment")
+    if not pm_env:
+        raise ValueError(
+            "settings file must declare the vault environment, e.g.:\n"
+            "  pass_mgr:\n"
+            "    environment: laptop\n"
+            "add it to config/settings.laptop.yaml")
+    pass_mgr.init(pm_env)
 
     # --- master CSV: load once, cross-check against config, then it rules ---
     schema_master = load_schema_master(MASTER_AUTO)
@@ -363,7 +380,7 @@ def extract_all(
             results.append(stats)
 
             if stats["status"] in FAILURE_STATUSES:
-                rlog.warning("[%s %d/%d] %s.%s failed — continuing with next table",
+                rlog.warning("[%s %d/%d] %s.%s failed - continuing with next table",
                              folder, i, len(folder_tables), t["connection"], t["name"])
 
         folder_failed = any(t["status"] in FAILURE_STATUSES for t in results)
@@ -387,9 +404,9 @@ def extract_all(
         }
         manifests[folder] = envelope
 
-        # THE manifest write — extractor-owned, into the archive.
+        # THE manifest write - extractor-owned, into the archive.
         # runs_root/<date>/<folder>/_manifest_<run_id>.json; write_manifest
-        # mkdirs. Note: one file per folder per run — a second run never
+        # mkdirs. Note: one file per folder per run - a second run never
         # overwrites (different run_id in the name).
         manifest_dir = runs_dir(runs_root, load_date, folder)
         write_manifest(manifest_dir, run_id, envelope)
@@ -460,7 +477,7 @@ def main(run_id: str = "-") -> int:
     )
 
     if any_failed:
-        log.warning("Some tables failed — see logs for details")
+        log.warning("Some tables failed - see logs for details")
         return 1
 
     return 0

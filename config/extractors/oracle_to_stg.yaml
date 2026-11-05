@@ -2,7 +2,7 @@
 # PER-SOURCE CONFIGURATION
 # ------------------------------------------------------------------------------
 # Connections, global text transforms, and the tables to extract.
-# NO paths here — landing/scratch roots live in settings.yaml.
+# NO paths here - landing/scratch roots live in settings.yaml.
 #
 # SECRETS: the `secret` value is a filename inside the secrets/ directory
 # containing the password (one line, whitespace-stripped at read time).
@@ -29,12 +29,14 @@
 connections:
   ora_db:
     type: oracle
-    username: user_name
-    secret: ora.db.sec 
     host: serv.subd.maind.com
     port: 1523
     service: prd
     folder: etl
+    users:
+      user_name:
+        credential_ref: ora_db.user_name.password
+        role: read-only
 
 
 # ------------------------------------------------------------------------------
@@ -48,7 +50,7 @@ connections:
 #                                 collapse internal runs (spaces, tabs, etc.)
 #                                 to a single space
 #
-# NOTE: dedup is NOT configured here — it is per-table via 
+# NOTE: dedup is NOT configured here - it is per-table via 
 # `table_rules_oracle_to_stg`.
 # ------------------------------------------------------------------------------
 transforms:
@@ -68,7 +70,7 @@ transforms:
 #                    is typical; joins must alias duplicate column names.
 #
 #   Output location: landing/<date>/<folder>/<name.lower()>/<name>-NNNN.parquet
-#   Table names within the same folder must be unique — the startup check
+#   Table names within the same folder must be unique - the startup check
 #   fails loudly otherwise.
 # ------------------------------------------------------------------------------
 tables:
