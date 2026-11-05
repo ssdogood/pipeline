@@ -1,10 +1,10 @@
-# schema_master_ad_to_stg.csv — curated master for AD extraction.
+# schema_master_ad_to_stg.csv - curated master for AD extraction.
 # Generated from existing workflow field lists (2026-10-30). Deliberately
 # editable: add/remove columns here and the next extraction follows.
 # Column order = LDAP attribute request order. Columns flagged mv=child
 # are requested from LDAP but routed to child tables (not in parent parquet).
 # objectClass intentionally not extracted. objectGUID appended where the
-# existing lists lacked it (groups, atm) — it is the immutable parent key.
+# existing lists lacked it (groups, atm) - it is the immutable parent key.
 # House convention: table_name + column_name lowercase; dtypes Utf8.
 folder,connection_name,schema,table_name,column_seq,column_name,dtype,description,policy_flags
 ad-atm,ad_atm,atm,atm-computers,1,canonicalname,Utf8,,

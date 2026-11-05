@@ -1,5 +1,5 @@
 # wrapper/update_history.py
-"""SQLite history for run manifests — the ONLY database-touching module.
+"""SQLite history for run manifests - the ONLY database-touching module.
 
 Two call paths:
   1. Standalone recovery:  python -m wrapper.update_history [--db ...]
@@ -9,7 +9,7 @@ Model (design note rev2 §6):
   - files are the record of record; this DB is the queryable index
   - ingest is idempotent: (run_id, folder, table_name) is the identity;
     INSERT OR REPLACE means re-ingest is always safe
-  - the scan window equals manifest retention (default 90 days) — files
+  - the scan window equals manifest retention (default 90 days) - files
     outside the window don't exist, so the filesystem bounds the scan
 
 DB is created with DDL on first open (staging/_history/ auto-mkdir).
@@ -95,9 +95,9 @@ def discover_manifests(runs_root: str | Path, days: int = 90
                        ) -> list[tuple[str, str, Path]]:
     """Walk <runs_root>/<YYYY-MM-DD>/<folder>/_manifest_*.json.
 
-    Returns [(run_id, folder, path)] — only date-named dirs inside the
+    Returns [(run_id, folder, path)] - only date-named dirs inside the
     window. Identity comes from the manifest's run_id (not the path
-    date — a run crossing midnight keeps its original run_id).
+    date - a run crossing midnight keeps its original run_id).
     """
     cutoff = (date.today() - timedelta(days=days)).isoformat()
     found: list[tuple[str, str, Path]] = []

@@ -1,3 +1,8 @@
+.gitignore
+# Executables
+bin/sops-v*
+bin/age-keygen-v*
+
 # Secrets
 secrets/*
 
@@ -34,6 +39,3 @@ data_pipe_line_project*
 *.egg-info/
 build/
 dist/
-
-# Staging (runtime output)
-staging/

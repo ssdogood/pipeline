@@ -1,5 +1,5 @@
 # dpl/lib/generate_schemas.py
-"""Bootstrap schema generator — introspect configured queries, emit master CSV.
+"""Bootstrap schema generator - introspect configured queries, emit master CSV.
 
 Usage (from project root):
     python -m dpl.lib.generate_schemas                    # dry-run, show diff
@@ -8,8 +8,8 @@ Usage (from project root):
     python -m dpl.lib.generate_schemas --force --dry-run  # show diff only
 
 Exit codes:
-    0 — success (new or updated master.csv written, or --dry-run)
-    1 — some tables failed introspection (partial CSV emitted), or --force denied
+    0 - success (new or updated master.csv written, or --dry-run)
+    1 - some tables failed introspection (partial CSV emitted), or --force denied
 """
 
 from __future__ import annotations
@@ -24,9 +24,13 @@ from pathlib import Path
 
 from dpl.lib.common import (
     load_config,
+    load_settings,
+    validate_secrets_layout,
     SCHEMA_MASTER_COLUMNS,
     _read_registry_csv,
 )
+
+from dpl.lib import pass_mgr
 
 from dpl.lib.ora_connect import connect, ORACLE_CONFIG_SCHEMA
 from dpl.lib.logger import setup_logging, get_run_logger
@@ -35,6 +39,7 @@ log = get_run_logger("dpl.schema")
 
 
 CONFIG_FILE = "config/extractors/oracle_to_stg.yaml"
+SETTINGS_FILE = "config/settings.laptop.yaml"
 OUTPUT_FILE = "config/extractors/schema_master_oracle_to_stg.csv"
 SOURCE_TYPE = "oracle"
 BACKUP_KEEP = 30
@@ -88,7 +93,7 @@ def oracle_dtype_to_comma_free(cursor_description_row: tuple,
             return "Binary"
         else:
             log.warning(
-                "Unknown Oracle type '%s' for column '%s' — defaulting to Utf8. "
+                "Unknown Oracle type '%s' for column '%s' - defaulting to Utf8. "
                 "Please add a policy flag if special handling is needed.",
                 type_name, name
             )
@@ -118,7 +123,7 @@ def oracle_dtype_to_comma_free(cursor_description_row: tuple,
         return "Binary"
     else:
         log.warning(
-            "Unrecognized type_code %d for column '%s' — defaulting to Utf8.",
+            "Unrecognized type_code %d for column '%s' - defaulting to Utf8.",
             type_code, name
         )
         return "Utf8"
@@ -136,7 +141,7 @@ def introspect_table(cfg: dict, table_cfg: dict, connection_name: str) -> list[d
     query = table_cfg["query"]
     table_key = f"{folder}.{table_name}"
 
-    # Build the introspection query — wrap in SELECT * FROM (...) WHERE 1=0
+    # Build the introspection query - wrap in SELECT * FROM (...) WHERE 1=0
     # to get metadata without fetching data
     introspection_query = f"SELECT * FROM ({query}) WHERE 1=0"
 
@@ -242,7 +247,8 @@ def diff_master(old: dict[str, dict], new: dict[str, dict]) -> dict[str, list[st
 
 
 def generate_schemas(config_path: str, output_path: str,
-                     force: bool, dry_run: bool) -> int:
+                     force: bool, dry_run: bool,
+                     settings_path: str = SETTINGS_FILE) -> int:
     """Main generation routine.
 
     Returns: 0 success, 1 partial failure (some tables skipped).
@@ -256,6 +262,21 @@ def generate_schemas(config_path: str, output_path: str,
     # Validate config structure (folder_uniqueness already checked by schema)
     from dpl.lib.common import validate_config_folders
     validate_config_folders(cfg)
+
+    # Vault-backed logins: settings name the pass_mgr environment; init
+    # before connect() (introspection opens real connections).
+    settings = load_settings(settings_path)
+    if settings is None:
+        log.critical("settings load failed: %s", settings_path)
+        return 1
+    pm_env = (settings.get("pass_mgr") or {}).get("environment")
+    if not pm_env:
+        log.critical(
+            "settings file %s must declare the vault environment, e.g.:\n"
+            "  pass_mgr:\n    environment: laptop", settings_path)
+        return 1
+    validate_secrets_layout()
+    pass_mgr.init(pm_env)
 
     # Gather all tables of our SOURCE_TYPE
     tables = [
@@ -278,13 +299,13 @@ def generate_schemas(config_path: str, output_path: str,
             all_rows.extend(result)
 
     if failed_tables:
-        log.warning("%d table(s) failed introspection — they are omitted:",
+        log.warning("%d table(s) failed introspection - they are omitted:",
                     len(failed_tables))
         for ft in failed_tables:
             log.warning("  - %s", ft)
 
     if not all_rows:
-        log.critical("No tables succeeded — nothing to write.")
+        log.critical("No tables succeeded - nothing to write.")
         return 1
 
     # Build new master for diffing
@@ -319,7 +340,7 @@ def generate_schemas(config_path: str, output_path: str,
             log.warning("   ... and %d more", len(diff["shifted"]) - 5)
 
     if existing and not diff["added"] and not diff["removed"] and not diff["changed"]:
-        log.info("No changes — master CSV already current.")
+        log.info("No changes - master CSV already current.")
         if dry_run:
             return 0
         # Without --force, refuse to overwrite identical file
@@ -342,7 +363,7 @@ def generate_schemas(config_path: str, output_path: str,
 
     # Dry-run mode
     if dry_run:
-        log.info("--- DRY-RUN MODE — no file written ---")
+        log.info("--- DRY-RUN MODE - no file written ---")
         log.info("Rows to be written: %d", len(all_rows))
         return 0
 
@@ -368,7 +389,7 @@ def generate_schemas(config_path: str, output_path: str,
         writer.writeheader()
         writer.writerows(all_rows)
 
-    if existing and (diff["added"] or diff["removed"] or diff["changed"]):                               # content differs — that's why we're here
+    if existing and (diff["added"] or diff["removed"] or diff["changed"]):                               # content differs - that's why we're here
         backup = backup_and_rotate(out_path)
         log.info("previous master backed up to %s", backup)
 
@@ -385,7 +406,7 @@ def _timestamp_name(base: str = "schema_master") -> str:
 def backup_and_rotate(out_path: Path, keep: int = BACKUP_KEEP) -> Path | None:
     """Copy current master to backups/ with timestamp; prune old copies.
 
-    Assumes out_path exists and differs from what will replace it — caller
+    Assumes out_path exists and differs from what will replace it - caller
     only invokes this on a real content change. Returns backup path or None.
     """
     if not out_path.exists():
@@ -394,7 +415,7 @@ def backup_and_rotate(out_path: Path, keep: int = BACKUP_KEEP) -> Path | None:
     backup_dir = out_path.parent / "backups"
     backup_dir.mkdir(exist_ok=True)
     backup = backup_dir / _timestamp_name(out_path.stem)
-    shutil.copy2(out_path, backup)          # copy2 preserves mtime — sortable
+    shutil.copy2(out_path, backup)          # copy2 preserves mtime - sortable
 
     # prune: keep newest `keep` by name (timestamp prefix sorts lexicographically)
     backups = sorted(backup_dir.glob(f"{out_path.stem}_*.csv"))
@@ -424,6 +445,10 @@ def main() -> int:
         help="show diff without writing"
     )
     parser.add_argument(
+        "--settings", default=SETTINGS_FILE,
+        help=f"path to settings yaml (default: {SETTINGS_FILE})"
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true",
         help="verbose logging"
     )
@@ -438,7 +463,8 @@ def main() -> int:
     log.info("starting schema generator (dry_run=%s, force=%s)",
              args.dry_run, args.force)
 
-    return generate_schemas(args.config, args.out, args.force, args.dry_run)
+    return generate_schemas(args.config, args.out, args.force, args.dry_run,
+                            settings_path=args.settings)
 
 
 if __name__ == "__main__":

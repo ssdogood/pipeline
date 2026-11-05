@@ -1,5 +1,5 @@
 # dpl/extractors/ad_to_stg.py
-"""Active Directory extractor — glue between ldap_connect, writer, and manifests.
+"""Active Directory extractor - glue between ldap_connect, writer, and manifests.
 
 Usage:
      python -m dpl.extractors.ad_to_stg                    # run all, skip if exists
@@ -22,17 +22,17 @@ MV child tables:
      from LDAP but NOT written to the parent parquet. Each becomes its own
      child table '<parent>_<attr>' with columns (objectguid, value), one
      row per multi-value element. Parent and children are fed from the SAME
-     paged search — one LDAP pass, both always consistent.
+     paged search - one LDAP pass, both always consistent.
 
 AD-specific conventions (differ from Oracle deliberately):
      - values are CASE-PRESERVED (SMTP prefixes, DNs, display names);
-       transforms are empty — the writer never uppercases AD data.
+       transforms are empty - the writer never uppercases AD data.
      - column names are lowercase; LDAP returns attribute keys in server
        casing (sAMAccountName, objectGUID), mapped case-insensitively.
      - LDAP omits empty attributes from entries entirely; absent
        attributes are filled with None so the declared schema holds.
 
-Logging: dpl/lib/logger.py — "dpl.ad_to_stg". Every per-table line carries run_id= and table= context, so one table's story can be isolated with grep.
+Logging: dpl/lib/logger.py - "dpl.ad_to_stg". Every per-table line carries run_id= and table= context, so one table's story can be isolated with grep.
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ from typing import Any
 
 import polars as pl
 
+from dpl.lib import pass_mgr
 from dpl.lib.common import (
      load_config,
      load_settings,
@@ -56,6 +57,7 @@ from dpl.lib.common import (
      make_run_id,
      write_manifest,
      validate_config_folders,
+     validate_secrets_layout,
      table_collision_check,
      load_schema_master,
      validate_master_vs_config,
@@ -76,10 +78,10 @@ SETTINGS_FILE = "config/settings.laptop.yaml"
 MASTER_AUTO = "config/extractors/schema_master_ad_to_stg.csv"
 RULES_CSV = "config/extractors/table_rules_ad_to_stg.csv"
 
-# Which connection *type* this extractor handles — selection is by type, # never by connection name (same rule as oracle_to_stg).
+# Which connection *type* this extractor handles - selection is by type, # never by connection name (same rule as oracle_to_stg).
 SOURCE_TYPE = "ldap"
 
-# Entries buffered in plain dicts before one DataFrame is built and # appended — keeps DuckDB insert count sane while staying memory-bounded # (buffers flush long before page accumulation matters).
+# Entries buffered in plain dicts before one DataFrame is built and # appended - keeps DuckDB insert count sane while staying memory-bounded # (buffers flush long before page accumulation matters).
 ENTRY_FLUSH = 500
 
 RETRYABLE_ERRORS = (
@@ -95,7 +97,7 @@ RETRYABLE_ERRORS = (
      "bind",
 )
 
-# Child-table frame schema: (join key, value) — always these two columns.
+# Child-table frame schema: (join key, value) - always these two columns.
 CHILD_SCHEMA: dict[str, pl.DataType] = {"objectguid": pl.Utf8, "value": pl.Utf8}
 
 _PL_DTYPES = {
@@ -220,7 +222,7 @@ def _declared_schema_for(schema_master: dict, folder: str,
                           table_name: str) -> tuple[dict[str, pl.DataType], list[str]]:
      """Resolve the master's dtypes + MV columns for one table.
 
-     Returns (declared_dtypes, mv_child_columns) — the latter drawn from
+     Returns (declared_dtypes, mv_child_columns) - the latter drawn from
      policy_flags, NOT dtype.
      Raises ValueError when the table is absent from the master.
      """
@@ -228,7 +230,7 @@ def _declared_schema_for(schema_master: dict, folder: str,
      entry = schema_master.get(key)
      if entry is None:
          raise ValueError(
-             f"table '{key}' not in schema master — edit "
+             f"table '{key}' not in schema master - edit "
              f"{MASTER_AUTO} and add the table"
          )
      declared = {col: _resolve_dtype(dt) for col, dt in entry["columns"].items()}
@@ -457,6 +459,16 @@ def extract_all(
      # --- guards: fail loudly before opening anything ---
      validate_config_folders(cfg)
      table_collision_check(cfg)
+     validate_secrets_layout()
+
+     # Vault init: settings name the pass_mgr environment; idempotent, so
+     # sharing a process with the Oracle extractor is fine.
+     pm_env = (settings.get("pass_mgr") or {}).get("environment")
+     if not pm_env:
+         raise ValueError(
+             "settings file must declare the vault environment, e.g.:\n"
+             "  pass_mgr:\n    environment: laptop")
+     pass_mgr.init(pm_env)
 
      # --- master CSV: load once, cross-check against config, then it rules ---
      schema_master = load_schema_master(MASTER_AUTO)
@@ -497,7 +509,7 @@ t["name"])
              results.append(stats)
 
              if stats["status"] in FAILURE_STATUSES:
-                 rlog.warning("[%s %d/%d] %s.%s failed — continuing with next table",
+                 rlog.warning("[%s %d/%d] %s.%s failed - continuing with next table",
                               folder, i, len(folder_tables), t["connection"], t["name"])
 
          folder_failed = any(t["status"] in FAILURE_STATUSES for t in
@@ -592,7 +604,7 @@ def main(run_id: str = "-") -> int:
      )
 
      if any_failed:
-         log.warning("Some tables failed — see logs for details")
+         log.warning("Some tables failed - see logs for details")
          return 1
 
      return 0
