@@ -24,7 +24,7 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-from dpl.lib.common import load_settings, get_run_logger
+from dpl.lib.common import get_run_logger, load_settings
 
 log = get_run_logger("dpl.history")
 

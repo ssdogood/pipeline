@@ -6,7 +6,7 @@ goes INTO the extractor, not here (thin-wrapper rule, design note §5).
 """
 from __future__ import annotations
 
-from schema import Schema, And, Optional
+from schema import And, Optional, Schema
 
 STEP_NAMES = frozenset(
     ["generate_schemas", "reconcile_pending", "extract",
@@ -38,8 +38,9 @@ WRAPPER_SCHEMA = Schema({
 def load_wrapper_config(path: str) -> dict | None:
     """Load + validate wrapper.yaml. Returns None (logged) on failure."""
     import yaml
-    from dpl.lib.common import get_run_logger
     from schema import SchemaError
+
+    from dpl.lib.common import get_run_logger
     log = get_run_logger("dpl.wrapper")
     try:
         with open(path, "r") as fh:

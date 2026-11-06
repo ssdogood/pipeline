@@ -46,6 +46,16 @@ where = ["src"]
 [tool.setuptools.package-data]
 dpl = ["*.yaml", "*.csv"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: touches live systems (Oracle/AD) with real vault credentials; run deliberately via 'pytest -m integration'",
+]
+addopts = "-m 'not integration'"
+filterwarnings = [
+    "ignore::DeprecationWarning:ldap3.*",
+]
+
 [tool.pyrefly]
 conda-environment = "dpl"
 python-interpreter-path = "/opt/homebrew/Caskroom/miniconda/base/envs/dpl/bin/python"

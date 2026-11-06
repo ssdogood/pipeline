@@ -41,25 +41,29 @@ import polars as pl
 
 from dpl.lib import pass_mgr
 from dpl.lib.common import (
-    load_config,
-    load_settings,
+    FAILURE_STATUSES,
     landing_dir,
-    runs_dir,
-    make_run_id,
-    write_manifest,
-    validate_config_folders,
-    validate_secrets_layout,
-    table_collision_check,
+    load_config,
     load_schema_master,
-    validate_master_vs_config,
+    load_settings,
     load_table_rules,
-    validate_rules_references, 
-    FAILURE_STATUSES
+    make_run_id,
+    runs_dir,
+    table_collision_check,
+    validate_config_folders,
+    validate_master_vs_config,
+    validate_rules_references,
+    validate_secrets_layout,
+    write_manifest,
 )
-
-from dpl.lib.ora_connect import connect, iter_batches, resolve_dtype, ORACLE_CONFIG_SCHEMA
+from dpl.lib.logger import get_run_logger, setup_logging
+from dpl.lib.ora_connect import (
+    ORACLE_CONFIG_SCHEMA,
+    connect,
+    iter_batches,
+    resolve_dtype,
+)
 from dpl.lib.write_parquet import ParquetWriter
-from dpl.lib.logger import setup_logging, get_run_logger
 
 log = get_run_logger("dpl.oracle_to_stg")
 
@@ -239,20 +243,19 @@ def extract_table(
 
     def _run_attempt() -> dict:
         """One full attempt: fresh connection, fresh writer, fresh counters."""
-        with connect(cfg, conn_name) as conn:
-            with ParquetWriter(
-                settings,
-                source=folder,
-                table=table_name.lower(),
-                load_date=load_date,
-                transforms=cfg.get("transforms", {}),
-                dedup_columns=dedup_parsed,
-                sort_spec=sort_spec,
-            ) as w:
-                for df in iter_batches(conn, query, batch_size=batch_rows,
-                                       declared=declared, strict=strict_cast):
-                    w.append(df)
-                return w.close()
+        with connect(cfg, conn_name) as conn, ParquetWriter(
+            settings,
+            source=folder,
+            table=table_name.lower(),
+            load_date=load_date,
+            transforms=cfg.get("transforms", {}),
+            dedup_columns=dedup_parsed,
+            sort_spec=sort_spec,
+        ) as w:
+            for df in iter_batches(conn, query, batch_size=batch_rows,
+                                   declared=declared, strict=strict_cast):
+                w.append(df)
+            return w.close()
 
 
     error = None

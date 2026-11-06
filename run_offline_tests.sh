@@ -7,7 +7,7 @@
 #
 #   Step 1: verify every binary this platform needs, per bin/sops_manifest.txt
 #           (checksum verification - 'verify, then trust')
-#   Step 2: run the full offline test suite (zero network: pytest test/)
+#   Step 2: run the full offline test suite (zero network: pytest tests/)
 #
 # Exits nonzero on ANY failure, with a message naming what to fix.
 # Works on macOS, RHEL, and Windows Git-Bash - platform auto-detected.
@@ -106,7 +106,7 @@ echo ""
 cd "$SCRIPT_DIR"
 
 echo "[3/3] Running offline test suite:"
-pytest test/ -v
+pytest tests/ -v
 STATUS=$?
 
 if [ $STATUS -ne 0 ]; then

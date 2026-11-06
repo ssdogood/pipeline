@@ -29,31 +29,30 @@ NOTHING NETWORK: sops + age are entirely local. The tests generate
 their own keys per-test inside tmp_path; no key is ever reused across
 tests, and no test reads the developer's real secrets/.
 
-Run with:  pytest test/pass_mgr/test_sops.py -v
+Run with:  pytest tests/unit/test_pass_mgr_sops.py -v
 """
 
 from __future__ import annotations
 
-import sys
 import stat
+import sys
 from pathlib import Path
 
 import pytest
 
-import pass_mgr._providers
-from pass_mgr import (
+from dpl.lib.pass_mgr import (
     PassMgrBinaryMissingError,
     PassMgrConfigError,
     PassMgrDecryptError,
     PassMgrKeyFileMissingError,
     PassMgrSecretNotFoundError,
     PassMgrVersionMismatchError,
+    _providers,
     get_secret,
     init,
 )
-from pass_mgr._config import load_config
-from pass_mgr._providers import SopsProvider
-
+from dpl.lib.pass_mgr._config import load_config
+from dpl.lib.pass_mgr._providers import SopsProvider
 
 # ---------------------------------------------------------------------------
 # Shared setup: one canonical, fully-working SOPS world per test
@@ -173,7 +172,7 @@ class TestFailureModes:
     def test_missing_vault_file(self, project, sample_entries):
         # Config + key present, vault file absent (never created, or
         # lost in transport).
-        identity_file, _ = project.add_age_identity()
+        _identity_file, _ = project.add_age_identity()
         project.write_config_default()
         # no vault created; key exists so probes pass until the vault
 
@@ -241,7 +240,7 @@ class TestFailureModes:
 
         monkeypatch_holder = pytest.MonkeyPatch()
         monkeypatch_holder.setattr(
-            pass_mgr._providers, "SOPS_TIMEOUT_SECONDS", 0.5
+            _providers, "SOPS_TIMEOUT_SECONDS", 0.5
         )
         try:
             init("laptop", project_root=project.root)

@@ -43,14 +43,14 @@ from pathlib import Path
 import yaml
 
 from dpl.lib.common import (
+    get_run_logger,
     load_config,
-    load_settings,
     load_schema_master,
-    reconcile_pending,
+    load_settings,
+    make_run_id,
     prune_old_landing,
     prune_old_runs,
-    make_run_id,
-    get_run_logger,
+    reconcile_pending,
     runs_dir,
     validate_secrets_layout,
 )
@@ -382,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
                 # profiles.py validates the vocabulary; unreachable
                 log.error("unknown step '%s' - skipping", name)
 
-        except Exception as exc:                    # noqa: BLE001 - deliberate
+        except Exception as exc:
             log.error("step '%s' failed: %s", name, exc, exc_info=True)
             if name == "extract":
                 extract_failed = True

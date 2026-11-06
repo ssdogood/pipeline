@@ -24,8 +24,8 @@ Naming conventions (derived by run.py, never configured per pipe):
 """
 from __future__ import annotations
 
-from dpl.lib.ora_connect import ORACLE_CONFIG_SCHEMA
 from dpl.lib.ldap_connect import LDAP_CONFIG_SCHEMA
+from dpl.lib.ora_connect import ORACLE_CONFIG_SCHEMA
 
 CONNECTORS: dict[str, dict] = {
     "oracle": {

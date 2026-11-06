@@ -26,31 +26,27 @@ secrets/secrets.fernet.bin  a Fernet-encrypted JSON envelope:
 One key decrypts the WHOLE envelope once per process; names are looked
 up in the cached dict. 'version' is reserved for v2 key rotation.
 
-Run with:  pytest test/pass_mgr/test_fernet.py -v
+Run with:  pytest tests/unit/test_pass_mgr_fernet.py -v
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-import json
-
-from cryptography.fernet import Fernet
+from typing import ClassVar
 
 import pytest
+from cryptography.fernet import Fernet
 
-from pass_mgr import (
+from dpl.lib.pass_mgr import (
     PassMgrConfigError,
     PassMgrDecryptError,
     PassMgrKeyFileMissingError,
     PassMgrSecretNotFoundError,
     get_secret,
     init,
-    reset,
 )
-from pass_mgr._providers import FernetProvider, FERNET_ENVELOPE_VERSION
-from pass_mgr._errors import PassMgrDecryptError
-
+from dpl.lib.pass_mgr._providers import FERNET_ENVELOPE_VERSION, FernetProvider
 
 # ---------------------------------------------------------------------------
 # Helpers - build the fernet-only config shape on a binary-free tree
@@ -116,7 +112,7 @@ class TestRoundTrip:
         # Instantiating the provider directly (bypassing the dispatcher)
         # must yield the same full map - this is the cold-cache path
         # tests rely on, and proves the provider is self-sufficient.
-        from pass_mgr._config import load_config
+        from dpl.lib.pass_mgr._config import load_config
 
         project_nobin.add_fernet_envelope(flat_sample_entries)
         write_fernet_config(project_nobin)
@@ -366,7 +362,7 @@ class TestProviderConstruction:
     def test_missing_required_config_key(self, project_nobin, flat_sample_entries):
         # A fernet section without 'key_file' must fail AT CONSTRUCTION
         # with a named error - fail fast, at startup, not at fetch.
-        from pass_mgr._config import load_config
+        from dpl.lib.pass_mgr._config import load_config
 
         project_nobin.add_fernet_envelope(flat_sample_entries)
         project_nobin.write_config(
@@ -395,7 +391,7 @@ class TestEnvelopeHeaderTolerance:
     line. Written by the vault tooling, read by the library - both
     directions proven here."""
 
-    ENTRIES = {"ora_db.user_name.password": "pw-one",
+    ENTRIES: ClassVar[dict] = {"ora_db.user_name.password": "pw-one",
                "ad_atm.subd_support.password": "pw-two"}
 
     def _build(self, tmp_path, lines_before, lines_after,
@@ -441,7 +437,7 @@ class TestEnvelopeHeaderTolerance:
         assert provider.load() == self.ENTRIES
 
     def test_two_token_lines_rejected(self, tmp_path):
-        provider = self._build(tmp_path, [], [])
+        self._build(tmp_path, [], [])
         # rebuild with the token duplicated
         key = Fernet.generate_key()
         # simpler: reuse _build twice? No - construct directly:

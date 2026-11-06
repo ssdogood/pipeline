@@ -72,9 +72,9 @@ pipeline
 │   └── wrapper.yaml
 ├── data
 │   ├── lakehouse.db                                        # DuckLake catalog (attaches to the layers)
-│   ├── agg                                                 # bronze: ingested as-is
+│   ├── agg                                                 # gold: aggregates/marts
 │   ├── cur                                                 # silver: typed, deduped, conformed
-│   ├── raw                                                 # gold: aggregates/marts
+│   ├── raw                                                 # bronze: ingested as-is
 │   ├── scratch                                             # transient writer files, cleaned per run
 │   └── staging                                             # landing zone: <date>/<folder>/ parquet extracts
 │       ├── _history                                        # history is maintained in SQLite database
@@ -137,7 +137,7 @@ python -m dpl.lib.common
 
 Unit tests:
 ```bash
-pytest test/
+pytest tests/
 ```
 
 ### Known Constraints

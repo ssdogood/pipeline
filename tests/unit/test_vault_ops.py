@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Smoke tests for the vault operations tool (scripts/vault_ops.py).
 
 These test the OPERATOR TOOL, not the library - the library has its
@@ -11,18 +10,18 @@ suite already covers the crypto round-trip. These tests cover the
 logic that burned us live: argument parsing, categorization, tree
 merging, pruning, and the config cross-check.
 
-Run:   pytest test/vault_ops/ -v
+Run:   pytest tests/unit/test_vault_ops.py -v
 """
+# tests/unit/<this file> -> parents[2] is the project root
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 import yaml
-import json
-
-import pytest
 from cryptography.fernet import Fernet
 
 # Import vault_ops from the scripts directory (it is NOT a package).
@@ -349,7 +348,7 @@ class TestSopsMirrorSkipping:
 
     def test_skip_when_binary_missing(self, monkeypatch, tmp_path, capsys):
         root = install_project(monkeypatch, tmp_path)
-        binary, key, vault = fake_sops_cfg(root, binary_exists=False)
+        _binary, key, _vault = fake_sops_cfg(root, binary_exists=False)
         cfg = {"methods": {"sops": {
             "binary": "secrets/sops",               # resolved via PROJECT_ROOT
             "age_key_file": str(key),               # resolved via expanduser
@@ -366,7 +365,7 @@ class TestSopsMirrorSkipping:
 
     def test_provisioned_when_all_present(self, monkeypatch, tmp_path, capsys):
         root = install_project(monkeypatch, tmp_path)
-        binary, key, vault = fake_sops_cfg(root, vault_exists=True)
+        _binary, key, _vault = fake_sops_cfg(root, vault_exists=True)
         cfg = {"methods": {"sops": {
             "binary": "secrets/sops",
             "age_key_file": str(key),
@@ -386,7 +385,7 @@ class TestCanonicalFernetPrerequisites:
         assert "no 'fernet' method section" in capsys.readouterr().err
 
     def test_missing_fernet_key_is_fatal(self, monkeypatch, tmp_path, capsys):
-        root = install_project(monkeypatch, tmp_path)
+        install_project(monkeypatch, tmp_path)
         cfg = {"methods": {"fernet": {
             "key_file": "secrets/fernet.key",       # never written
             "encrypted_file": "secrets/secrets.fernet.bin",
@@ -399,7 +398,7 @@ class TestCanonicalFernetPrerequisites:
 class TestMirrorDriftDetection:
     """Guarantees 4 & 5: drift -> refresh; in sync -> leave alone."""
 
-    ENTRIES = {"oracle.scott.password": "pw-one"}
+    ENTRIES: ClassVar[dict] = {"oracle.scott.password": "pw-one"}
 
     def test_absent_mirror_needs_refresh(self, monkeypatch, tmp_path):
         root = install_project(monkeypatch, tmp_path)

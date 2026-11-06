@@ -11,14 +11,9 @@ Phase 0 "offline, hermetic" guarantee):
     crypto - the tests must prove exactly what ships.
   * The pass_mgr module-level cache is reset around EVERY test (autouse
     fixture) so tests are independent and order-insensitive.
-
-IMPORT WIRING (read this before touching sys.path lines):
-  Requires two empty marker files, which stop the test folder named
-  'pass_mgr' from shadowing the real module:
-      test/__init__.py
-      test/pass_mgr/__init__.py
-  With those present, pytest imports test modules as 'test.pass_mgr.*'
-  and never puts test/ itself on the search path.
+  * Imports use the installed package (dpl is installed in editable
+    mode), so tests import via dpl.lib.pass_mgr - no sys.path tricks,
+    no shadowing markers needed.
 
 TWO PROJECT FIXTURES (choose deliberately):
   * `project`     - temp tree WITH the pinned binaries copied in. Use for
@@ -50,12 +45,8 @@ import yaml
 # The module lives at src/dpl/lib/pass_mgr/. For the module name to be
 # 'pass_mgr', the directory DIRECTLY CONTAINING it must be on sys.path.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-LIB_DIR = PROJECT_ROOT / "src" / "dpl" / "lib"
-if str(LIB_DIR) not in sys.path:
-    sys.path.insert(0, str(LIB_DIR))
 
-import pass_mgr  # noqa: E402
-from pass_mgr import reset as _reset_pass_mgr  # noqa: E402
+from dpl.lib.pass_mgr import reset as _reset_pass_mgr
 
 # Binaries live in the real bin/, with their exact upstream release names.
 BIN_DIR = PROJECT_ROOT / "bin"
@@ -323,7 +314,7 @@ class TempProject:
         (self.secrets_dir / "fernet.key").write_bytes(key)
         envelope = {
             "version": 1,
-            "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "created_utc": datetime.datetime.now(datetime.UTC).isoformat(),
             "entries": entries,
         }
         token = Fernet(key).encrypt(json.dumps(envelope).encode("utf-8"))

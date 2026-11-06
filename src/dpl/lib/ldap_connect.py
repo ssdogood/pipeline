@@ -8,19 +8,16 @@ Contract mirrors lib/ora_connect.py at the connection level:
     - paged-search generator streams entries page by page (memory-bounded,
       same discipline as ora_connect.iter_batches)
 
-Usage:
-    python -m dpl.lib.ldap_connect          # connection smoke tests
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
 
 from ldap3 import ALL, NTLM, SIMPLE, SUBTREE, Connection, Server
-from schema import Schema, And, Optional, Forbidden
+from schema import And, Forbidden, Optional, Schema
 
-from dpl.lib.common import load_config
-from dpl.lib.logger import get_run_logger, setup_logging
 from dpl.lib import pass_mgr
+from dpl.lib.logger import get_run_logger
 
 log = get_run_logger("dpl.ldap")
 
@@ -128,42 +125,3 @@ def iter_paged(conn: Connection, search_base: str, search_filter: str,
         if entry.get("type") != "searchResEntry":
             continue  # skip searchResRef referrals
         yield entry["attributes"]
-
-
-# ---------------------------------------------------------------- smoke --
-
-def _smoke_connect(cfg: dict):
-    name = next(iter(cfg["connections"]))
-    with connect(cfg, name) as conn:
-        whoami = conn.extend.standard.who_am_i()
-        assert conn.bound
-        print(f"[PASS] bind to {name}: {whoami}")
-
-
-def _smoke_first_entry(cfg: dict):
-    t = cfg["tables"][0]
-    with connect(cfg, t["connection"]) as conn:
-        it = iter_paged(conn, t["search_base"], t["filter"],
-                        ["objectGUID", "sAMAccountName"])
-        first = next(iter(it), None)
-        if first is None:
-            print("[WARN] no entries returned - check filter/search base")
-        else:
-            print(f"[PASS] first entry keys: {sorted(first.keys())}")
-
-
-def main() -> int:
-    setup_logging()
-    cfg = load_config(CONFIG_FILE, LDAP_CONFIG_SCHEMA)
-    if cfg is None:
-        print("[FAIL] config could not be loaded")
-        return 3
-
-    _smoke_connect(cfg)
-    _smoke_first_entry(cfg)
-    print("all ldap_connect smoke tests passed")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
