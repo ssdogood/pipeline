@@ -5,17 +5,17 @@ channels:
   - https://repo.anaconda.com/pkgs/main
   - https://repo.anaconda.com/pkgs/r
 dependencies:
-  - setuptools[version='>=68.0']
-  - pip[version='>=24.0']
-  - pyarrow
-  - pandas
-  - psycopg2-binary
-  - schema
   - python=3.11
+  - setuptools>=68.0
+  - pip>=24.0
+  - cryptography        # Fernet - DEFAULT secret engine (verified by import scan 2026-11-06)
   - duckdb
-  - pyyaml
-  - pytest
   - polars
   - oracledb
   - ldap3
-  - ipykernel
+  - schema
+  - pyyaml
+  - psycopg2-binary    # roadmap: PostgreSQL ingestion - not yet imported, kept deliberately
+  - pytest              # test-only. Kept ON PURPOSE: this ONE env serves both
+                        # production and the companion test kit's certification,
+                        # so cert conditions always equal prod conditions.
