@@ -50,6 +50,7 @@ import subprocess
 import sys
 import tempfile
 import secrets
+import hmac
 from datetime import datetime
 from pathlib import Path
 
