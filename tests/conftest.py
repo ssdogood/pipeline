@@ -18,8 +18,9 @@ Phase 0 "offline, hermetic" guarantee):
 TWO PROJECT FIXTURES (choose deliberately):
   * `project`     - temp tree WITH the pinned binaries copied in. Use for
                     SOPS/provider tests that exercise the real binary.
-                    Fails loudly if bin/ is empty (by design: a machine
-                    without verified binaries must not pass as green).
+                    Tri-state: all pinned binaries -> full run; 
+                    none -> SKIP (Fernet-only machine, honestly reduced 
+                    coverage); partial -> loud fail (broken download).
   * `project_nobin` - temp tree WITHOUT binaries. Use for tests that
                     need no external tools (config, Fernet) so those
                     suites stay green on any machine, at any stage of
@@ -91,6 +92,21 @@ def find_binary(tool: str, bin_dir: Path = BIN_DIR) -> Path:
         )
     return platform_matches[0]
 
+def present_tools(bin_dir: Path = BIN_DIR) -> set[str]:
+    """Which of the pinned tools are actually present for THIS platform.
+
+    The tri-state sensor used by the `project` fixture: full set, empty
+    set, or partial. Never raises for absence - that judgement belongs
+    to the caller.
+    """
+    found: set[str] = set()
+    for tool in BINARY_HINTS:
+        try:
+            find_binary(tool, bin_dir)
+            found.add(tool)
+        except FileNotFoundError:
+            continue
+    return found
 
 # ---------------------------------------------------------------------------
 # Autouse hygiene: cold pass_mgr for every test
@@ -342,11 +358,34 @@ class TempProject:
 def project(tmp_path: Path) -> TempProject:
     """A disposable pipeline tree WITH pinned binaries copied in.
 
-    Use for tests that exercise the real sops binary. Fails loudly when
-    bin/ is empty - a machine without verified binaries must not look
-    green.
+    Tri-state doctrine (2026-11 amendment), mirroring the green scripts:
+
+      * ALL pinned binaries present  -> run the binary-dependent suites
+        at full strength, exactly as before.
+      * NONE present                 -> SKIP (pytest.skip), not fail:
+        a Fernet-only machine certifies GREEN (FERNET-ONLY) honestly -
+        reduced coverage, visibly listed as skips, never hidden.
+      * PARTIAL (e.g. sops without   -> FAIL LOUDLY. A half-provisioned
+        age-keygen)                     bin/ is almost always a broken
+                                       download, and must never pass -
+                                       or skip - silently.
     """
-    return TempProject(tmp_path)
+    present = present_tools()
+    missing = set(BINARY_HINTS) - present
+    if not missing:
+        return TempProject(tmp_path)
+    if not present:
+        pytest.skip(
+            "SOPS/Age binaries not present - FERNET-ONLY machine. "
+            "Binary-dependent suites skipped; download the pinned "
+            "binaries per bin/sops_manifest.txt to run them."
+        )
+    pytest.fail(
+        f"Partial bin/ provisioning - refusing to run: present "
+        f"{sorted(present)}, missing {sorted(missing)}. A half-populated "
+        f"bin/ is a broken download, not a Fernet-only deployment. "
+        f"Restore or remove BOTH binaries (see bin/sops_manifest.txt)."
+    )
 
 
 @pytest.fixture

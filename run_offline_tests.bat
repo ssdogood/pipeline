@@ -26,6 +26,7 @@ set "BIN_DIR=%SCRIPT_DIR%\bin"
 set "MANIFEST=%BIN_DIR%\sops_manifest.txt"
 set /a VERIFIED=0
 set /a BAD=0
+set /a SKIPPED=0
 
 echo === pass_mgr green script - machine certification (Windows) ===
 echo.
@@ -51,9 +52,13 @@ for /f "usebackq eol=# tokens=1,* delims= " %%a in (`findstr /i /c:"amd64.exe" "
     call :verify_one
 )
 
-if %VERIFIED% EQU 0 goto no_entries
 if %BAD% GTR 0 goto checksum_failed
-echo       all Windows binaries verified OK
+if %VERIFIED% EQU 0 if %SKIPPED% EQU 0 goto no_entries
+if %VERIFIED% GTR 0 (
+    echo       all present Windows binaries verified OK
+) else (
+    echo       no SOPS/Age binaries present - FERNET-ONLY mode
+)
 echo.
 
 rem -------------------------------------------------------------------
@@ -101,6 +106,21 @@ rem -------------------------------------------------------------------
 rem  Certified
 rem -------------------------------------------------------------------
 
+if %VERIFIED% GTR 0 goto green_full
+echo.
+echo ==================================================
+echo  GREEN - tree certified (FERNET-ONLY):
+echo    no SOPS/Age binaries present; the binary-
+echo    dependent tests are SKIPPED (listed in the
+echo    summary above - coverage is reduced, not
+echo    hidden). Fernet vault, config, common, and
+echo    writer suites fully passing.
+echo  Download SOPS/Age per bin\sops_manifest.txt
+echo  to certify at full strength.
+echo ==================================================
+exit /b 0
+
+:green_full
 echo.
 echo ==================================================
 echo  GREEN - this machine's tree is certified:
@@ -117,8 +137,8 @@ rem -------------------------------------------------------------------
 :verify_one
 if "!FNAME!"=="" goto :eof
 if not exist "%BIN_DIR%\!FNAME!" (
-    echo       MISSING : !FNAME!
-    set /a BAD+=1
+    echo       SKIPPED : !FNAME! - not present, optional
+    set /a SKIPPED+=1
     goto :eof
 )
 set "HAVE="
