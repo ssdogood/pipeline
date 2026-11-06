@@ -115,7 +115,7 @@ def _default_config() -> dict:
 def setup_logging(config_path: Path | None = None) -> None:
     """Configure the dpl logger tree. Call once at process start.
 
-    Safe to call again (e.g. by a module's standalone smoke-test entry):
+    Safe to call again (e.g. when a module re-initializes logging):
     dictConfig replaces the configuration rather than duplicating handlers.
     """
     LOG_DIR.mkdir(parents=True, exist_ok=True)

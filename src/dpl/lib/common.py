@@ -1,7 +1,6 @@
 # dpl/lib/common.py
-"""Shared utilities: config loading, vault-backed credentials, manifests, paths.
-
-Run smoke tests:  python -m dpl.lib.common   (from project root)
+"""
+Shared utilities: config loading, vault-backed credentials, manifests, paths.
 """
 
 from __future__ import annotations
