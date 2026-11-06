@@ -161,6 +161,21 @@ class TempProject:
         manifest_src = self.source_bin_dir / "sops_manifest.txt"
         if manifest_src.is_file():
             shutil.copy2(manifest_src, bin_dir / "sops_manifest.txt")
+        # Gatekeeper warm-up (macOS): executing a binary freshly copied
+        # to a new location can trigger a security assessment on first
+        # run. Normally instant, but under suite load it has exceeded
+        # production's 10s sops probe timeout twice (2026-11-06, SIGKILL
+        # at timeout in full-suite runs). Pre-pay that assessment HERE,
+        # during fixture setup where 60s of slack exists, so the
+        # constrained test path always hits an already-assessed binary.
+        # No-op on Linux; check=False - we care about the scan, not the
+        # exit status.
+        subprocess.run(
+            [str(self._bin_copied["sops"]), "--version"],
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
 
     def binary_path(self, tool: str) -> str:
         """Relative (config-style) path to the copied binary."""
