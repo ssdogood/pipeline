@@ -7,6 +7,8 @@ Doctrine (locked in design, 2026-11):
     the release tree. Everything not explicitly listed is excluded.
     The dry-run makes every exclusion visible, because a filter you
     cannot see is a filter you cannot trust.
+  * NO hidden file ships at any depth (belt: the classifier denies
+    them; braces: the staging verifier re-checks every staged file).
   * bin/ ships its MANIFEST ONLY. Executables are never bundled;
     the deployer downloads the pinned tools per the manifest URLs.
   * Tests never ship. tests/ is deliberately absent from every
@@ -14,11 +16,15 @@ Doctrine (locked in design, 2026-11):
   * Empty runtime directories (logs/, secrets/, ...) are FABRICATED
     in the staging tree at build time - they are not taken from the
     repo, because empty dirs cannot be committed to git anyway.
+    Their marker is a fabricated .gitkeep - the ONLY hidden file
+    that may exist in a staged tree.
 
 Phase plan for this file:
   Phase 1: CLI, version stamp from pyproject.toml, allowlist engine,
-           --dry-run inventory. (THIS PHASE - nothing is written.)
-  Phase 2: staging tree construction + .gitkeep scaffolding.
+           --dry-run inventory. (DONE - commit f6284fd)
+  Phase 2: staging tree construction + .gitkeep scaffolding +
+           independent re-verification of the staged tree.
+           (THIS PHASE - builds a staging tree, no archives yet.)
   Phase 3: tar.gz + zip + SHA256SUMS into dist/.
   Phase 4: clean-room self-certification.
 """
@@ -26,8 +32,11 @@ Phase plan for this file:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import shutil
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -63,13 +72,18 @@ SRC_PACKAGE_PREFIX = ("src", "dpl")
 BIN_MANIFEST_PATH = "bin/sops_manifest.txt"
 
 #: Runtime directories fabricated EMPTY in the staging tree at build
-#: time (Phase 2). Declared here so the dry-run can report them.
+#: time. Declared here so the dry-run can report them and the stager
+#: can create them.
 RUNTIME_SCAFFOLD_DIRS = (
     "logs",
     "secrets",
     "secrets/backups",
     "secrets/logs",
 )
+
+#: Marker file placed in each fabricated runtime dir. The ONLY hidden
+#: file allowed to exist in a staged tree.
+GITKEEP_NAME = ".gitkeep"
 
 #: Top-level repo entries the dry-run walker prunes entirely: build
 #: artifacts and tool caches that would flood the listing with noise
@@ -207,6 +221,91 @@ def validate_source_tree(project_root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Staging (Phase 2)
+# ---------------------------------------------------------------------------
+
+def build_staging(project_root: Path, staging_root: Path) -> list[Path]:
+    """Materialize the allowlisted files into staging_root.
+
+    Copies every classified-included file preserving its repo-relative
+    path (shutil.copy2 also preserves the executable bit - run_*.sh and
+    vault.sh must arrive runnable). Then fabricates the runtime
+    scaffold dirs, each holding one .gitkeep.
+
+    Returns the list of repo-relative paths copied (for the report).
+    """
+    shipped_rel: list[Path] = []
+    for rel, included, _reason in walk_classified(project_root):
+        if not included:
+            continue
+        src = project_root / rel
+        dst = staging_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        shipped_rel.append(rel)
+
+    for scaffold in RUNTIME_SCAFFOLD_DIRS:
+        d = staging_root / scaffold
+        d.mkdir(parents=True, exist_ok=True)
+        (d / GITKEEP_NAME).write_text(
+            "Empty by design - fabricated at build time.\n", encoding="utf-8"
+        )
+    return shipped_rel
+
+
+def verify_staging(staging_root: Path) -> None:
+    """Independently re-check the STAGED tree against doctrine.
+
+    This is a second, independent gate: the classifier decided what to
+    copy, but this walks what was ACTUALLY COPIED. Copy-bugs (wrong
+    source base, path handling mistakes) cannot slip through the same
+    code path that caused them.
+
+    Rules enforced here:
+      * every staged file must satisfy classify() at its rel path,
+        OR be a fabricated .gitkeep inside a scaffold dir;
+      * bin/ contains the manifest and NOTHING else;
+      * no hidden files anywhere except the scaffold .gitkeeps;
+      * at least one file was staged (never certify an empty tree).
+    """
+    staged_count = 0
+    violations: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(staging_root):
+        rel_dir = Path(dirpath).relative_to(staging_root)
+        at_root = not rel_dir.parts
+        if at_root:
+            dirnames[:] = sorted(dirnames)
+        for fname in sorted(filenames):
+            rel = rel_dir / fname if not at_root else Path(fname)
+            posix = rel.as_posix()
+            staged_count += 1
+            if rel.name == GITKEEP_NAME:
+                parent = rel.parent.as_posix()
+                if parent in RUNTIME_SCAFFOLD_DIRS:
+                    continue  # legitimate fabricated marker
+                violations.append(f"stray {GITKEEP_NAME} outside scaffold: {posix}")
+                continue
+            ok, _reason = classify(rel)
+            if not ok:
+                violations.append(f"default-deny file present in staging: {posix}")
+    if staged_count == 0:
+        sys.exit("FATAL: staging tree is empty - refusing to certify nothing.")
+    if violations:
+        sys.exit(
+            "FATAL: staged tree violates release doctrine:\n  "
+            + "\n  ".join(sorted(violations))
+        )
+
+
+def sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ---------------------------------------------------------------------------
 # Dry-run report
 # ---------------------------------------------------------------------------
 
@@ -251,6 +350,46 @@ def dry_run(project_root: Path, verbose: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stage-mode report (Phase 2)
+# ---------------------------------------------------------------------------
+
+def stage_mode(project_root: Path, verbose: bool) -> int:
+    name, version = read_project_meta(project_root)
+    staging_root = Path(
+        tempfile.mkdtemp(prefix=f"dpl-release-{version}-stage-")
+    )
+    shipped_rel = build_staging(project_root, staging_root)
+    verify_staging(staging_root)
+
+    total_bytes = sum(
+        (staging_root / rel).stat().st_size for rel in shipped_rel
+    )
+    print(f"dpl release bundle - STAGED (no archives yet)")
+    print(f"  project : {name}")
+    print(f"  version : {version}  (stamped from pyproject.toml)")
+    print(f"  staging : {staging_root}")
+    print(f"  files   : {len(shipped_rel)} shipped + "
+          f"{len(RUNTIME_SCAFFOLD_DIRS)} fabricated dirs (with .gitkeep)")
+    print(f"  payload : {total_bytes:,} bytes")
+    print(f"  verify  : staged tree re-checked against doctrine - OK")
+    if verbose:
+        print()
+        print("Staged files:")
+        for rel in shipped_rel:
+            print(f"      {rel.as_posix()}")
+        print()
+        print("Fabricated:")
+        for d in RUNTIME_SCAFFOLD_DIRS:
+            print(f"      {d}/{GITKEEP_NAME}")
+    print()
+    print("Inspect it yourself, e.g.:")
+    print(f"  find {staging_root} -type f | sort")
+    print()
+    print("Phase 3 will wrap this tree into tar.gz + zip + SHA256SUMS.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -259,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="build_release.py",
         description=(
             "Build the dpl release bundle (tar.gz + zip + SHA256SUMS). "
-            "Phase 1: allowlist inspection only."
+            "Phase 2: staging tree construction."
         ),
     )
     parser.add_argument(
@@ -268,20 +407,31 @@ def main(argv: list[str] | None = None) -> int:
         help="print what a build would stage and exclude, then exit",
     )
     parser.add_argument(
+        "--stage",
+        action="store_true",
+        help="build and verify the staging tree (no archives yet)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
-        help="with --dry-run: list every file, not just per-rule counts",
+        help="list every file, not just per-rule counts",
     )
     args = parser.parse_args(argv)
 
     validate_source_tree(PROJECT_ROOT)
 
-    if not args.dry_run:
-        print("Nothing implemented beyond --dry-run yet (Phase 1).")
-        return 2
-    dry_run(PROJECT_ROOT, args.verbose)
-    return 0
+    if args.dry_run:
+        dry_run(PROJECT_ROOT, args.verbose)
+        return 0
+    if args.stage:
+        return stage_mode(PROJECT_ROOT, args.verbose)
+    parser.print_help()
+    print(
+        "\nNothing else implemented yet (Phase 3 archives, Phase 4 "
+        "clean-room self-certification)."
+    )
+    return 2
 
 
 if __name__ == "__main__":
