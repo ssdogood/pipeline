@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from cryptography.fernet import Fernet
@@ -390,7 +391,7 @@ class TestEnvelopeHeaderTolerance:
     line. Written by the vault tooling, read by the library - both
     directions proven here."""
 
-    ENTRIES = {"ora_db.user_name.password": "pw-one",
+    ENTRIES: ClassVar[dict] = {"ora_db.user_name.password": "pw-one",
                "ad_atm.subd_support.password": "pw-two"}
 
     def _build(self, tmp_path, lines_before, lines_after,
@@ -436,7 +437,7 @@ class TestEnvelopeHeaderTolerance:
         assert provider.load() == self.ENTRIES
 
     def test_two_token_lines_rejected(self, tmp_path):
-        provider = self._build(tmp_path, [], [])
+        self._build(tmp_path, [], [])
         # rebuild with the token duplicated
         key = Fernet.generate_key()
         # simpler: reuse _build twice? No - construct directly:

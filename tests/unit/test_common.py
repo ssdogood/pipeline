@@ -22,6 +22,7 @@ from datetime import date, timedelta
 
 import pytest
 import yaml
+from schema import SchemaError
 
 from dpl.lib.common import (
     SETTINGS_SCHEMA,
@@ -227,7 +228,7 @@ def test_validate_folder_safe_segments(tmp_path):
     unsafe = ["../evil", "/absolute", "http://bad", "contains/slash"]
     for folder in unsafe:
         cfg = {"connections": {"c": {"folder": folder}}}
-        with pytest.raises(Exception):
+        with pytest.raises(SchemaError):
             validate_config_folders(cfg)
 
 

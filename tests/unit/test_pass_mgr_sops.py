@@ -172,7 +172,7 @@ class TestFailureModes:
     def test_missing_vault_file(self, project, sample_entries):
         # Config + key present, vault file absent (never created, or
         # lost in transport).
-        identity_file, _ = project.add_age_identity()
+        _identity_file, _ = project.add_age_identity()
         project.write_config_default()
         # no vault created; key exists so probes pass until the vault
 
