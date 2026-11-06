@@ -40,8 +40,8 @@ from pathlib import Path
 
 import pytest
 
-import pass_mgr._providers
-from pass_mgr import (
+from dpl.lib.pass_mgr import _providers
+from dpl.lib.pass_mgr import (
     PassMgrBinaryMissingError,
     PassMgrConfigError,
     PassMgrDecryptError,
@@ -51,8 +51,8 @@ from pass_mgr import (
     get_secret,
     init,
 )
-from pass_mgr._config import load_config
-from pass_mgr._providers import SopsProvider
+from dpl.lib.pass_mgr._config import load_config
+from dpl.lib.pass_mgr._providers import SopsProvider
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +241,7 @@ class TestFailureModes:
 
         monkeypatch_holder = pytest.MonkeyPatch()
         monkeypatch_holder.setattr(
-            pass_mgr._providers, "SOPS_TIMEOUT_SECONDS", 0.5
+            _providers, "SOPS_TIMEOUT_SECONDS", 0.5
         )
         try:
             init("laptop", project_root=project.root)

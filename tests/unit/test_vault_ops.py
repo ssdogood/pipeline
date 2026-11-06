@@ -13,6 +13,7 @@ merging, pruning, and the config cross-check.
 
 Run:   pytest tests/unit/test_vault_ops.py -v
 """
+# tests/unit/<this file> -> parents[2] is the project root
 
 import importlib.util
 import sys

@@ -28,9 +28,8 @@ from pathlib import Path
 
 import pytest
 
-import pass_mgr
-import pass_mgr._providers as providers_module
-from pass_mgr import (
+import dpl.lib.pass_mgr._providers as providers_module
+from dpl.lib.pass_mgr import (
     PassMgrConfigError,
     PassMgrSecretNotFoundError,
     get_secret,

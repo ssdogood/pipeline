@@ -33,13 +33,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import json
-
 from cryptography.fernet import Fernet
 
 import pytest
 
-from pass_mgr import (
+from dpl.lib.pass_mgr import (
     PassMgrConfigError,
     PassMgrDecryptError,
     PassMgrKeyFileMissingError,
@@ -48,8 +46,7 @@ from pass_mgr import (
     init,
     reset,
 )
-from pass_mgr._providers import FernetProvider, FERNET_ENVELOPE_VERSION
-from pass_mgr._errors import PassMgrDecryptError
+from dpl.lib.pass_mgr._providers import FernetProvider, FERNET_ENVELOPE_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +113,7 @@ class TestRoundTrip:
         # Instantiating the provider directly (bypassing the dispatcher)
         # must yield the same full map - this is the cold-cache path
         # tests rely on, and proves the provider is self-sufficient.
-        from pass_mgr._config import load_config
+        from dpl.lib.pass_mgr._config import load_config
 
         project_nobin.add_fernet_envelope(flat_sample_entries)
         write_fernet_config(project_nobin)
@@ -366,7 +363,7 @@ class TestProviderConstruction:
     def test_missing_required_config_key(self, project_nobin, flat_sample_entries):
         # A fernet section without 'key_file' must fail AT CONSTRUCTION
         # with a named error - fail fast, at startup, not at fetch.
-        from pass_mgr._config import load_config
+        from dpl.lib.pass_mgr._config import load_config
 
         project_nobin.add_fernet_envelope(flat_sample_entries)
         project_nobin.write_config(

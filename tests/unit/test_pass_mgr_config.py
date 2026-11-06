@@ -41,11 +41,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from pass_mgr import (
+from dpl.lib.pass_mgr import (
     PassMgrConfigError,
     PassMgrProductionPolicyError,
 )
-from pass_mgr._config import load_config, resolve_relative_path
+from dpl.lib.pass_mgr._config import load_config, resolve_relative_path
 
 # ---------------------------------------------------------------------------
 # Local helpers - deliberately NOT the TempProject fixture (see docstring)
