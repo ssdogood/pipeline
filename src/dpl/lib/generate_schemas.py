@@ -17,23 +17,21 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import shutil
 import sys
 import time
-import shutil
 from pathlib import Path
 
+from dpl.lib import pass_mgr
 from dpl.lib.common import (
+    SCHEMA_MASTER_COLUMNS,
+    _read_registry_csv,
     load_config,
     load_settings,
     validate_secrets_layout,
-    SCHEMA_MASTER_COLUMNS,
-    _read_registry_csv,
 )
-
-from dpl.lib import pass_mgr
-
-from dpl.lib.ora_connect import connect, ORACLE_CONFIG_SCHEMA
-from dpl.lib.logger import setup_logging, get_run_logger
+from dpl.lib.logger import get_run_logger, setup_logging
+from dpl.lib.ora_connect import ORACLE_CONFIG_SCHEMA, connect
 
 log = get_run_logger("dpl.schema")
 

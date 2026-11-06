@@ -52,6 +52,9 @@ markers = [
     "integration: touches live systems (Oracle/AD) with real vault credentials; run deliberately via 'pytest -m integration'",
 ]
 addopts = "-m 'not integration'"
+filterwarnings = [
+    "ignore::DeprecationWarning:ldap3.*",
+]
 
 [tool.pyrefly]
 conda-environment = "dpl"

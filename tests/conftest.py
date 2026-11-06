@@ -46,7 +46,7 @@ import yaml
 # 'pass_mgr', the directory DIRECTLY CONTAINING it must be on sys.path.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-from dpl.lib.pass_mgr import reset as _reset_pass_mgr  # noqa: E402
+from dpl.lib.pass_mgr import reset as _reset_pass_mgr
 
 # Binaries live in the real bin/, with their exact upstream release names.
 BIN_DIR = PROJECT_ROOT / "bin"
@@ -314,7 +314,7 @@ class TempProject:
         (self.secrets_dir / "fernet.key").write_bytes(key)
         envelope = {
             "version": 1,
-            "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "created_utc": datetime.datetime.now(datetime.UTC).isoformat(),
             "entries": entries,
         }
         token = Fernet(key).encrypt(json.dumps(envelope).encode("utf-8"))

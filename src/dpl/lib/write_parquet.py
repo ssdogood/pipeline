@@ -42,15 +42,15 @@ from __future__ import annotations
 import shutil
 import time
 import uuid
-from datetime import date, datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Iterable
 
 import duckdb
 import polars as pl
 
 from dpl.lib.common import landing_dir, parse_dedup_spec
-from dpl.lib.logger import setup_logging, get_run_logger
+from dpl.lib.logger import get_run_logger
 
 log = get_run_logger("dpl.writer")
 
@@ -62,7 +62,7 @@ def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def _duckdb_session(settings: dict, scratch_root: Path) -> duckdb.DuckDBPyConnection:
     """Fresh in-memory DuckDB session, configured verbatim from settings.yaml."""
@@ -459,7 +459,7 @@ class ParquetWriter:
             self._release(keep=self._keep_scratch)
 
     # ---------------------------------------------------------- context manager
-    def __enter__(self) -> "ParquetWriter":
+    def __enter__(self) -> ParquetWriter:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:

@@ -24,8 +24,6 @@ Run with:  pytest tests/unit/test_pass_mgr_dispatcher.py -v
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 import dpl.lib.pass_mgr._providers as providers_module
@@ -36,7 +34,6 @@ from dpl.lib.pass_mgr import (
     init,
     reset,
 )
-
 
 # ---------------------------------------------------------------------------
 # Shared world: a MIXED deployment - sops primary, fernet override

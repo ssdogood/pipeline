@@ -50,25 +50,24 @@ import polars as pl
 
 from dpl.lib import pass_mgr
 from dpl.lib.common import (
-     load_config,
-     load_settings,
-     landing_dir,
-     runs_dir,
-     make_run_id,
-     write_manifest,
-     validate_config_folders,
-     validate_secrets_layout,
-     table_collision_check,
-     load_schema_master,
-     validate_master_vs_config,
-     load_table_rules,
-     validate_rules_references,
      FAILURE_STATUSES,
+     landing_dir,
+     load_config,
+     load_schema_master,
+     load_settings,
+     load_table_rules,
+     make_run_id,
+     runs_dir,
+     table_collision_check,
+     validate_config_folders,
+     validate_master_vs_config,
+     validate_rules_references,
+     validate_secrets_layout,
+     write_manifest,
 )
-
-from dpl.lib.ldap_connect import connect, iter_paged, LDAP_CONFIG_SCHEMA 
-from dpl.lib.write_parquet import ParquetWriter 
-from dpl.lib.logger import setup_logging, get_run_logger
+from dpl.lib.ldap_connect import LDAP_CONFIG_SCHEMA, connect, iter_paged
+from dpl.lib.logger import get_run_logger, setup_logging
+from dpl.lib.write_parquet import ParquetWriter
 
 log = get_run_logger("dpl.ad_to_stg")
 
@@ -316,85 +315,84 @@ list(child_names.values()))
 
      def _run_attempt() -> dict:
          """One full attempt: fresh connection, fresh writers, fresh buffers."""
-         with connect(cfg, conn_name) as conn:
-             with ExitStack() as stack:
-                 pw = stack.enter_context(ParquetWriter(
+         with connect(cfg, conn_name) as conn, ExitStack() as stack:
+             pw = stack.enter_context(ParquetWriter(
+                 settings,
+                 source=folder,
+                 table=table_name.lower(),
+                 load_date=load_date,
+                 transforms={},          # AD: case-preserved, no cleanse
+                 dedup_columns=dedup_parsed,
+                 sort_spec=sort_spec,
+             ))
+             # child writers: own rules row, own dedup/sort
+             cws: dict[str, Any] = {}
+             for mv, cname in child_names.items():
+                 crule = _rules_for(rules, folder, cname)
+                 cws[mv] = stack.enter_context(ParquetWriter(
                      settings,
                      source=folder,
-                     table=table_name.lower(),
+                     table=cname,
                      load_date=load_date,
-                     transforms={},          # AD: case-preserved, no cleanse
-                     dedup_columns=dedup_parsed,
-                     sort_spec=sort_spec,
+                     transforms={},
+                     dedup_columns=crule.get("dedup"),
+                     sort_spec=crule.get("sort_spec") or [],
                  ))
-                 # child writers: own rules row, own dedup/sort
-                 cws: dict[str, Any] = {}
-                 for mv, cname in child_names.items():
-                     crule = _rules_for(rules, folder, cname)
-                     cws[mv] = stack.enter_context(ParquetWriter(
-                         settings,
-                         source=folder,
-                         table=cname,
-                         load_date=load_date,
-                         transforms={},
-                         dedup_columns=crule.get("dedup"),
-                         sort_spec=crule.get("sort_spec") or [],
-                     ))
 
-                 parent_buf: list[dict[str, Any]] = []
-                 child_bufs: dict[str, list[dict[str, Any]]] = \
+             parent_buf: list[dict[str, Any]] = []
+             child_bufs: dict[str, list[dict[str, Any]]] = \
                      {mv: [] for mv in mv_columns}
 
-                 def _flush() -> None:
-                     if parent_buf:
-                         pw.append(pl.from_dicts(parent_buf,
-                                                 schema={c: declared[c]
-                                                         for c in
+             def _flush() -> None:
+                 if parent_buf:
+                     pw.append(pl.from_dicts(parent_buf,
+                                             schema={c: declared[c]
+                                                     for c in
 parent_cols}))
-                         parent_buf.clear()
-                     for mv, buf in child_bufs.items():
-                         if buf:
-                             cws[mv].append(pl.from_dicts(buf,
+                     parent_buf.clear()
+                 for mv, buf in child_bufs.items():
+                     if buf:
+                         cws[mv].append(pl.from_dicts(buf,
 schema=CHILD_SCHEMA))
-                             buf.clear()
+                         buf.clear()
 
-                 for entry in iter_paged(conn, search_base, search_filter,
-                                         ldap_attributes,
+             for entry in iter_paged(conn, search_base, search_filter,
+                                     ldap_attributes,
 page_size=page_size):
-                     # case-insensitive: server casing -> master lowercase
-                     low = {k.lower(): v for k, v in (entry or {}).items()}
-                     guid = _cell(low.get("objectguid"))
+                 # case-insensitive: server casing -> master lowercase
+                 low = {k.lower(): v for k, v in (entry or {}).items()}
+                 guid = _cell(low.get("objectguid"))
 
-                     parent_buf.append(
-                         {c: _cell(low.get(c)) for c in parent_cols}
-                     )
-                     for mv in mv_columns:
-                         vals = low.get(mv)
-                         if vals is None or guid is None:
-                             continue
-                         if not isinstance(vals, (list, tuple)):
-                             vals = [vals]
-                         for v in vals:
-                             if v is not None:
-                                 child_bufs[mv].append(
-                                     {"objectguid": guid, "value": str(v)}
-                                 )
-                     if len(parent_buf) >= ENTRY_FLUSH:
-                         _flush()
+                 parent_buf.append(
+                     {c: _cell(low.get(c)) for c in parent_cols}
+                 )
+                 for mv in mv_columns:
+                     vals = low.get(mv)
+                     if vals is None or guid is None:
+                         continue
+                     if not isinstance(vals, (list, tuple)):
+                         vals = [vals]
+                     for v in vals:
+                         if v is not None:
+                             child_bufs[mv].append(
+                                 {"objectguid": guid, "value": str(v)}
+                             )
+                 if len(parent_buf) >= ENTRY_FLUSH:
+                     _flush()
 
-                 _flush()
+             _flush()
 
-                 parent_stats = pw.close()
-                 child_stats = {child_names[mv]:
+             parent_stats = pw.close()
+             child_stats = {child_names[mv]:
 cws[mv].close().get("rows_written", 0)
-                                for mv in mv_columns}
+                            for mv in mv_columns}
 
-                 return {
-                     "rows_read": parent_stats.get("rows_read", 0),
-                     "rows_written": parent_stats.get("rows_written", 0),
-                     "output_path": parent_stats.get("output_dir"),
-                     "children": child_stats,
-                 }
+             return {
+                 "rows_read": parent_stats.get("rows_read", 0),
+                 "rows_written": parent_stats.get("rows_written", 0),
+                 "output_path": parent_stats.get("output_dir"),
+                 "children": child_stats,
+             }
 
      error = None
      for attempt in range(2):          # initial try + at most one retry

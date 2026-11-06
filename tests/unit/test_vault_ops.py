@@ -16,14 +16,12 @@ Run:   pytest tests/unit/test_vault_ops.py -v
 # tests/unit/<this file> -> parents[2] is the project root
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
 import pytest
 import yaml
-import json
-
-import pytest
 from cryptography.fernet import Fernet
 
 # Import vault_ops from the scripts directory (it is NOT a package).

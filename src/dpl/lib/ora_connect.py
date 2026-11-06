@@ -11,17 +11,15 @@ Settings:   config/settings.*.yaml (batch_rows etc.)
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 
 import oracledb
 import polars as pl
-import re
+from schema import And, Forbidden, Optional, Schema
 
-from schema import Schema, And, Optional, Forbidden
-
-from dpl.lib.common import load_config, load_settings
 from dpl.lib import pass_mgr
-from dpl.lib.logger import get_run_logger, setup_logging
+from dpl.lib.logger import get_run_logger
 
 log = get_run_logger("dpl.ora")
 

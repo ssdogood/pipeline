@@ -27,7 +27,6 @@ from dpl.lib.common import load_config
 from dpl.lib.ldap_connect import LDAP_CONFIG_SCHEMA, connect, iter_paged
 from dpl.lib.logger import setup_logging
 
-
 CONFIG_FILE = "config/extractors/ad_to_stg.yaml"
 
 

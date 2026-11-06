@@ -14,11 +14,10 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 from ldap3 import ALL, NTLM, SIMPLE, SUBTREE, Connection, Server
-from schema import Schema, And, Optional, Forbidden
+from schema import And, Forbidden, Optional, Schema
 
-from dpl.lib.common import load_config
-from dpl.lib.logger import get_run_logger, setup_logging
 from dpl.lib import pass_mgr
+from dpl.lib.logger import get_run_logger
 
 log = get_run_logger("dpl.ldap")
 

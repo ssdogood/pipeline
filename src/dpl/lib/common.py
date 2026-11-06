@@ -6,20 +6,18 @@ Run smoke tests:  python -m dpl.lib.common   (from project root)
 
 from __future__ import annotations
 
-import os
+import csv
 import json
 import shutil
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from schema import Schema, SchemaError, And, Optional
-
 import yaml
-import csv
+from schema import And, Optional, Schema, SchemaError
 
+from dpl.lib.logger import get_run_logger
 from dpl.lib.paths import get_project_root
-from dpl.lib.logger import setup_logging, get_run_logger
 
 log = get_run_logger()
 

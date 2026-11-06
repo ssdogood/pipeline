@@ -34,13 +34,12 @@ Run with:  pytest tests/unit/test_pass_mgr_sops.py -v
 
 from __future__ import annotations
 
-import sys
 import stat
+import sys
 from pathlib import Path
 
 import pytest
 
-from dpl.lib.pass_mgr import _providers
 from dpl.lib.pass_mgr import (
     PassMgrBinaryMissingError,
     PassMgrConfigError,
@@ -48,12 +47,12 @@ from dpl.lib.pass_mgr import (
     PassMgrKeyFileMissingError,
     PassMgrSecretNotFoundError,
     PassMgrVersionMismatchError,
+    _providers,
     get_secret,
     init,
 )
 from dpl.lib.pass_mgr._config import load_config
 from dpl.lib.pass_mgr._providers import SopsProvider
-
 
 # ---------------------------------------------------------------------------
 # Shared setup: one canonical, fully-working SOPS world per test

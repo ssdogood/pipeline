@@ -28,11 +28,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ._config import load_config, PassMgrConfig
+from ._config import PassMgrConfig, load_config
 from ._errors import (
+    PassMgrBinaryMissingError,
     PassMgrConfigError,
     PassMgrDecryptError,
-    PassMgrBinaryMissingError,
     PassMgrKeyFileMissingError,
     PassMgrProductionPolicyError,
     PassMgrSecretNotFoundError,
@@ -56,8 +56,7 @@ __all__ = [
     "PassMgrVersionMismatchError",
 ]
 # PassMgrError is re-exported too; keep the linters happy:
-from ._errors import PassMgrError  # noqa: E402
-
+from ._errors import PassMgrError
 
 # ---------------------------------------------------------------------------
 # Module-level dispatcher state

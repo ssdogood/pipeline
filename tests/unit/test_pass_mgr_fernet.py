@@ -33,9 +33,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from cryptography.fernet import Fernet
 
 import pytest
+from cryptography.fernet import Fernet
 
 from dpl.lib.pass_mgr import (
     PassMgrConfigError,
@@ -44,10 +44,8 @@ from dpl.lib.pass_mgr import (
     PassMgrSecretNotFoundError,
     get_secret,
     init,
-    reset,
 )
-from dpl.lib.pass_mgr._providers import FernetProvider, FERNET_ENVELOPE_VERSION
-
+from dpl.lib.pass_mgr._providers import FERNET_ENVELOPE_VERSION, FernetProvider
 
 # ---------------------------------------------------------------------------
 # Helpers - build the fernet-only config shape on a binary-free tree

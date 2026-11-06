@@ -22,15 +22,15 @@ Run with:  pytest tests/integration/test_ora_connect.py -m integration -v
 
 from __future__ import annotations
 
-import pytest
 import polars as pl
+import pytest
 
 from dpl.lib.common import load_config, load_schema_master, load_settings
 from dpl.lib.logger import setup_logging
 from dpl.lib.ora_connect import (
     CONFIG_FILE,
-    SETTINGS_FILE,
     ORACLE_CONFIG_SCHEMA,
+    SETTINGS_FILE,
     _batch_rows,
     connect,
     iter_batches,
@@ -144,7 +144,6 @@ def test_read_query_one_shot(ora_cfg, ora_settings):
 @pytest.mark.integration
 def test_non_select_query_rejected(ora_cfg):
     """A PL/SQL block is refused: only result-bearing queries stream."""
-    with connect(ora_cfg, "ora_db") as conn:
-        with pytest.raises(ValueError):
-            next(iter_batches(conn, "BEGIN NULL; END;",
-                              declared={"dummy": pl.Int64}))
+    with connect(ora_cfg, "ora_db") as conn, pytest.raises(ValueError):
+        next(iter_batches(conn, "BEGIN NULL; END;",
+                          declared={"dummy": pl.Int64}))
