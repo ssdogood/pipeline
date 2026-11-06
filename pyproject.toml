@@ -48,6 +48,10 @@ dpl = ["*.yaml", "*.csv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: touches live systems (Oracle/AD) with real vault credentials; run deliberately via 'pytest -m integration'",
+]
+addopts = "-m 'not integration'"
 
 [tool.pyrefly]
 conda-environment = "dpl"
