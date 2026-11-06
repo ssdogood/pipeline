@@ -3,15 +3,12 @@ default_method: fernet
 
 methods:
   fernet:
-    key_file: ~/.dpl-keys/laptop/fernet/key
+    key_file: 
     encrypted_file: secrets/secrets.fernet.bin
   sops:
-    binary: bin/sops-v3.13.3.darwin.arm64
+    binary: bin/
     manifest: bin/sops_manifest.txt
-    age_key_file: ~/.dpl-keys/laptop/sops-age/age.key
+    age_key_file: 
     encrypted_file: secrets/secrets.sops.yaml
 
 secrets:
-  "ad_atm.subd\\support.password": {}
-  "ad_main.subd\\support.password": {}
-  "ora_db.user_name.password": {}

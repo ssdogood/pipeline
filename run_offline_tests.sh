@@ -69,14 +69,24 @@ echo ""
 
 # --------------------------------------------------------------------------
 # Step 1: checksum-verify the pinned binaries for THIS platform
+#
+#         Tri-state, per binary:  verified / MISMATCH / absent.
+#           verified  -> counted, certification continues
+#           MISMATCH  -> RED, always. A present binary failing its
+#                        checksum is tampering or corruption - never
+#                        a "skip".
+#           absent    -> SKIPPED. Fernet is the default engine; SOPS
+#                        and age are optional extras downloaded per the
+#                        manifest by whoever wants them. Their absence
+#                        is a legal FERNET-ONLY deployment.
 # --------------------------------------------------------------------------
 
 if [ ! -f "$MANIFEST" ]; then
     fail "bin/sops_manifest.txt not found - the manifest is committed in git; your tree is incomplete."
 fi
 
-# Build a platform-filtered manifest in a temp file rather than process
-# substitution: temp files behave identically on all three shells.
+# Platform-filtered manifest in a temp file (identical behavior on
+# all three shells).
 CHECKFILE="$(mktemp)"
 grep -E "$PLATFORM_PATTERN" "$MANIFEST" > "$CHECKFILE"
 
@@ -86,14 +96,38 @@ if [ ! -s "$CHECKFILE" ]; then
 fi
 
 echo "[2/3] Verifying pinned binaries against sops_manifest.txt:"
-( cd "$BIN_DIR" && shasum -a 256 -c "$CHECKFILE" )
-STATUS=$?
-rm -f "$CHECKFILE"
 
-if [ $STATUS -ne 0 ]; then
-    fail "checksum verification failed. Copy the pinned binaries (exact upstream names) per the manifest, then re-run."
+# Sort manifest lines into PRESENT (verify now) and ABSENT (skip).
+PRESENTFILE="$(mktemp)"
+ABSENT=0
+while read -r sum name; do
+    [ -z "$name" ] && continue
+    if [ -f "$BIN_DIR/$name" ]; then
+        printf '%s  %s\n' "$sum" "$name" >> "$PRESENTFILE"
+    else
+        echo "      SKIPPED : $name (not present - optional)"
+        ABSENT=$((ABSENT + 1))
+    fi
+done < "$CHECKFILE"
+
+VERIFIED_ANY=0
+if [ -s "$PRESENTFILE" ]; then
+    ( cd "$BIN_DIR" && shasum -a 256 -c "$PRESENTFILE" )
+    STATUS=$?
+    if [ $STATUS -ne 0 ]; then
+        rm -f "$CHECKFILE" "$PRESENTFILE"
+        fail "checksum verification failed. A PRESENT binary did not match the manifest - replace it from the official release (URLs in the manifest), then re-run."
+    fi
+    VERIFIED_ANY=1
+    echo "      all present binaries for this platform verified OK"
+else
+    echo "      no SOPS/Age binaries present - FERNET-ONLY mode"
 fi
-echo "      all binaries for this platform verified OK"
+
+if [ $ABSENT -gt 0 ] && [ $VERIFIED_ANY -eq 1 ]; then
+    echo "      (note: $ABSENT optional binary/binaries absent and skipped)"
+fi
+rm -f "$CHECKFILE" "$PRESENTFILE"
 echo ""
 
 # --------------------------------------------------------------------------
@@ -114,13 +148,27 @@ if [ $STATUS -ne 0 ]; then
 fi
 
 # --------------------------------------------------------------------------
-# Certified
+# Certified - banner declares WHICH mode, so nobody ever mistakes a
+# Fernet-only tree for a fully provisioned one.
 # --------------------------------------------------------------------------
 echo ""
-echo "=================================================="
-echo " GREEN - this machine's tree is certified:"
-echo "   binaries checksum-verified, full offline"
-echo "   suite passing, zero network used."
-echo " Trust this copy for extraction work."
-echo "=================================================="
+if [ $VERIFIED_ANY -eq 1 ]; then
+    echo "=================================================="
+    echo " GREEN - this machine's tree is certified:"
+    echo "   binaries checksum-verified, full offline"
+    echo "   suite passing, zero network used."
+    echo " Trust this copy for extraction work."
+    echo "=================================================="
+else
+    echo "=================================================="
+    echo " GREEN - tree certified (FERNET-ONLY):"
+    echo "   no SOPS/Age binaries present; the binary-"
+    echo "   dependent tests are SKIPPED (listed in the"
+    echo "   summary above - coverage is reduced, not"
+    echo "   hidden). Fernet vault, config, common, and"
+    echo "   writer suites fully passing."
+    echo " Download SOPS/Age per bin/sops_manifest.txt"
+    echo " to certify at full strength."
+    echo "=================================================="
+fi
 exit 0

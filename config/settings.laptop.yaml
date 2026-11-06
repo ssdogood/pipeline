@@ -83,8 +83,8 @@ polars:
 #   Linux/server values shown; laptop: D:/data/landing and D:/data/scratch.
 # ------------------------------------------------------------------------------
 paths:
-  landing_root: /Users/mbp/Workspace/Developer/pipeline/data/staging
-  scratch_root: /Users/mbp/Workspace/Developer/pipeline/data/scratch
+  landing_root: data/staging
+  scratch_root: data/scratch
 
   # NEW: manifest archive root. The extractor writes one manifest per
   # folder per run here: <runs_root>/<date>/<folder>/_manifest_<run_id>.json
@@ -92,11 +92,11 @@ paths:
   # Retention pruning only removes date-named directories, so _runs/ (and
   # _history/) survive alongside the landing date-dirs - protected by a
   # smoke test in lib/common.py.
-  runs_root: /Users/mbp/Workspace/Developer/pipeline/data/staging/_runs
+  runs_root: data/staging/_runs
 
   # SQLite history DB. Path rules: must NOT sit inside a landing data
   # directory (date-named dir under landing_root). Default shown.
-  history_db: /Users/mbp/Workspace/Developer/pipeline/data/staging/_history/dpl_history.db
+  history_db: data/staging/_history/dpl_history.db
 # ------------------------------------------------------------------------------
 # DUCKDB SESSION (per-table, in-memory, spills to scratch)
 #
