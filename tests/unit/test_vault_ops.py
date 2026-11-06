@@ -11,7 +11,7 @@ suite already covers the crypto round-trip. These tests cover the
 logic that burned us live: argument parsing, categorization, tree
 merging, pruning, and the config cross-check.
 
-Run:   pytest test/vault_ops/ -v
+Run:   pytest tests/unit/test_vault_ops.py -v
 """
 
 import importlib.util

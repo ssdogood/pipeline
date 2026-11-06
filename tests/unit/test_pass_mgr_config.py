@@ -31,7 +31,7 @@ mistakes are caught, which is backwards from how beginners expect
 tests to work; here, failure IS success. This style is called
 "testing the negative path" and it is the backbone of robust software.
 
-Run with:  pytest test/pass_mgr/test_config.py -v
+Run with:  pytest tests/unit/test_pass_mgr_config.py -v
 """
 
 from __future__ import annotations

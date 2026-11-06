@@ -26,7 +26,7 @@ secrets/secrets.fernet.bin  a Fernet-encrypted JSON envelope:
 One key decrypts the WHOLE envelope once per process; names are looked
 up in the cached dict. 'version' is reserved for v2 key rotation.
 
-Run with:  pytest test/pass_mgr/test_fernet.py -v
+Run with:  pytest tests/unit/test_pass_mgr_fernet.py -v
 """
 
 from __future__ import annotations

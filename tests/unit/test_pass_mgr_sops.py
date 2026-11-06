@@ -29,7 +29,7 @@ NOTHING NETWORK: sops + age are entirely local. The tests generate
 their own keys per-test inside tmp_path; no key is ever reused across
 tests, and no test reads the developer's real secrets/.
 
-Run with:  pytest test/pass_mgr/test_sops.py -v
+Run with:  pytest tests/unit/test_pass_mgr_sops.py -v
 """
 
 from __future__ import annotations

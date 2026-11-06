@@ -9,7 +9,7 @@ rem
 rem  Does the same job as the Unix green script:
 rem    Step 1: checksum-verify the pinned WINDOWS binaries in bin\
 rem            against bin\sops_manifest.txt  ("verify, then trust")
-rem    Step 2: run the full offline test suite (pytest test\) using a
+rem    Step 2: run the full offline test suite (pytest tests\) using a
 rem            Python that has PyYAML (the conda 'dpl' env, if active)
 rem
 rem  Usage:    run_offline_tests.bat        (from a cmd.exe prompt in
@@ -94,7 +94,7 @@ if not defined PY goto no_python
 
 cd /d "%SCRIPT_DIR%"
 echo [3/3] Running offline test suite:
-"%PY%" %PYARGS% -m pytest test\ -v
+"%PY%" %PYARGS% -m pytest tests\ -v
 if errorlevel 1 goto tests_red
 
 rem -------------------------------------------------------------------

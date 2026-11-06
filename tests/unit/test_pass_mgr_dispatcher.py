@@ -19,7 +19,7 @@ pieces the other suites proved individually:
       init() lifecycle rules (before-init, environment switching)
       behave as documented.
 
-Run with:  pytest test/pass_mgr/test_dispatcher.py -v
+Run with:  pytest tests/unit/test_pass_mgr_dispatcher.py -v
 """
 
 from __future__ import annotations

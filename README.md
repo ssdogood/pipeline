@@ -137,7 +137,7 @@ python -m dpl.lib.common
 
 Unit tests:
 ```bash
-pytest test/
+pytest tests/
 ```
 
 ### Known Constraints

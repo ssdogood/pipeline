@@ -46,6 +46,9 @@ where = ["src"]
 [tool.setuptools.package-data]
 dpl = ["*.yaml", "*.csv"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.pyrefly]
 conda-environment = "dpl"
 python-interpreter-path = "/opt/homebrew/Caskroom/miniconda/base/envs/dpl/bin/python"
