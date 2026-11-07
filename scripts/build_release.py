@@ -158,9 +158,12 @@ Compare every "OK". If any line fails, do not use the files.
 
 SETUP - BUILD THE PYTHON ENVIRONMENT (once per machine)
 -------------------------------------------------------
-Prerequisite for BOTH certification and day-to-day running: the
-pipeline needs a conda environment built from the definition
-shipped here (environment.yml).
+Prerequisite for BOTH certification and day-to-day running.
+
+Division of labour: environment.yml provides the Python
+INTERPRETER; the package's own dependency list (pyproject.toml)
+provides every PACKAGE. Nothing is declared in two places, so
+nothing can drift between machines.
 
 ALL commands in this section are run from INSIDE the unpacked
 dpl-{version}/ folder - so first:
@@ -170,16 +173,23 @@ dpl-{version}/ folder - so first:
 a. Install Miniconda if conda is not already on the machine
    (free download: docs.conda.io).
 
-b. Build the environment from the shipped definition, then
-   activate it:
+b. Build and activate the environment:
 
        conda env create -f environment.yml
        conda activate dpl
 
-c. Register the pipeline package into that environment
-   (non-editable - exactly right for a deployed copy):
+c. Install the pipeline and ALL its dependencies in one command.
+   Use the [test] flavour unless this machine will never certify
+   (it adds pytest, required by the certification below):
 
-       pip install .
+       pip install ".[test]"
+
+   NOTE - OLDER CPUs: if polars aborts with
+   "Windows fatal exception 0xc000001d" or warns "Missing
+   required CPU features", the processor is pre-AVX2. Fix once:
+
+       pip uninstall -y polars
+       pip install polars-lts-cpu
 
 d. Point the pipeline at its root. This is NOT needed for the
    certification below (the test suite finds the tree it runs in),
@@ -189,8 +199,7 @@ d. Point the pipeline at its root. This is NOT needed for the
 
        export DPL_HOME=/path/to/your/production/dpl-{version}
 
-   Make it permanent by adding both lines to your ~/.zshrc or
-   ~/.bashrc:
+   Make it permanent by adding both lines to your shell profile:
        conda activate dpl
        export DPL_HOME=/path/to/your/production/dpl-{version}
 
