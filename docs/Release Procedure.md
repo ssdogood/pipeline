@@ -77,7 +77,7 @@ SHA256 hashes are identical to the first run. Byte-identical rebuilds
 are your tamper-evidence anchor: anyone can rebuild the same tree later
 and compare.
 
-## 4. Publish `dist/`
+## 4. Publish
 
 The complete release is exactly five files in `dist/`:
 
@@ -91,17 +91,10 @@ The complete release is exactly five files in `dist/`:
 
 Publish them together, never separately — a kit without its bundle
 certifies nothing, a bundle without a downloadable kit cannot be
-certified by receivers. Publish the SHA256SUMS contents (e.g. in the
-release announcement) so receivers can verify without trusting the
-download channel. `dist/` is git-ignored by design: releases are
-artifacts, not source.
-
-Tag the release:
-
-```
-git tag -a v<version> -m "Release <version>"
-git push origin main --tags
-```
+certified by receivers. The receipt travels two formal routes: uploaded
+as the fifth release asset, and committed to the `release-checksums/`
+ledger in the tagged tree (step 6 below). `dist/` is git-ignored by
+design: releases are artifacts, not source.
 
 ## 5. Receiver flow (what you tell whoever deploys)
 
@@ -111,7 +104,76 @@ in short: verify SHA256SUMS → build the conda env from the shipped
 directory → expect GREEN (FERNET-ONLY) → delete the certification room
 → deploy a fresh unpack, pointing `DPL_HOME` at it.
 
-## 6. Failure cheat-sheet
+## 6. Release Ceremony (tag, publish, verify)
+
+Order matters. The checksums ledger is committed **before** the tag, so
+the tagged tree carries its own receipt, and `release-checksums/` is
+default-denied in the bundle.
+
+**6.1 Ledger, commit, tag, push** (point of no return: after the push,
+the tag is public and never moves):
+
+```
+mkdir -p release-checksums
+cp dist/SHA256SUMS release-checksums/SHA256SUMS-v<version>
+git add -A                       # working tree must contain ONLY intended changes
+git status --short               # verify the stage list BEFORE committing
+git commit -m "Release v<version>: <summary>"
+git tag -a v<version> -m "Release <version>: <one-liner>"
+git push origin main --follow-tags
+```
+
+Push output must echo the tag name. Use `--follow-tags` (annotated tags
+reachable from pushed commits), never `--tags` (which pushes every tag
+in the repo).
+
+**6.2 Release notes — ALWAYS a file, never inline.** Long `--notes`
+text on a command line invites shell trouble (v0.1.0 lesson: zsh
+globbed `.[test]` inside the notes and refused the whole command).
+Write notes with a quoted heredoc so brackets are taken literally:
+
+```
+cat > /tmp/release-notes-v<version>.md <<'EOF'
+# dpl <version>
+
+## In this release
+...
+EOF
+```
+
+Notes structure: In this release / Installing / Certifying /
+Known issues / Roadmap. Describe what a user sees, not what you did —
+"refactored build helpers" is a commit message, not a release note.
+
+**6.3 Publish** (uploads the five dist/ files; prints the release URL):
+
+```
+gh release create v<version> dist/* \
+    --title "dpl <version>" \
+    --notes-file /tmp/release-notes-v<version>.md
+```
+
+**6.4 Receiver's-chair verification** — download as a receiver and
+prove delivery. Run this OUTSIDE the repo, so `--repo` is required
+(v0.1.0 lesson: `gh` locates the project via `.git`, which a scratch
+directory lacks):
+
+```
+mkdir -p /tmp/relcheck && cd /tmp/relcheck
+gh release download v<version> --repo ssdogood/pipeline --clobber
+shasum -a 256 -c SHA256SUMS                                       # expect 4 OK
+diff SHA256SUMS <repo>/release-checksums/SHA256SUMS-v<version>     # expect silence
+tar -xzf dpl-<version>.tar.gz && head -8 dpl-<version>/environment.yml
+rm -rf /tmp/relcheck
+```
+
+(The shasum check lists only the four archives — `SHA256SUMS` does not
+list itself — hence four `OK` lines, not five.)
+
+**6.5 Log the ceremony** — add a row to the Ceremony Log (below),
+commit, push.
+
+## 7. Failure cheat-sheet
 
 | Symptom | Meaning |
 |---|---|
@@ -120,11 +182,23 @@ directory → expect GREEN (FERNET-ONLY) → delete the certification room
 | PREFLIGHT FAIL | `dpl` imported from outside the unpacked tree (editable-install shadowing) — investigate `PYTHONPATH`/site-packages |
 | Determinism check differs | Tree changed between builds, or an unlisted nondeterministic source — re-run from a clean tree |
 | shasum -c fails for a receiver | Corrupted transfer, or the published sums do not match the published archive |
+| `zsh: no matches found` at publish | Glob characters (e.g. `[...]`) in notes text — use `--notes-file` (6.2) |
+| `fatal: not a git repository` at download | Ran `gh` outside the repo without `--repo` (6.4) |
 
-## 7. After the release
+## 8. After the release
 
-Confirm the tag and the pushed artifacts match the local SHA256SUMS.
-Then return to the working branch and continue development — `pyproject.toml`
-on main now carries the released version, which is correct: the working
-tree is always "the release that will be", and the build script stamps
-whatever it reads.
+Confirm the tag and the pushed artifacts match the local SHA256SUMS
+(done in 6.4). Then return to the working branch and continue
+development — `pyproject.toml` on main now carries the released
+version, which is correct: the working tree is always "the release that
+will be", and the build script stamps whatever it reads.
+
+**Once published, the tag never moves.** Any post-publication fix
+becomes `v<next>`, never a retag.
+
+## Ceremony Log
+
+| Version | Date | Result | Notes |
+|---|---|---|---|
+| v0.1.0 | 2026-11-07 | GREEN (FERNET-ONLY), 136 passed / 25 skipped; 4 OK, diff silent | First release. Lessons folded into §6: zsh glob on inline notes → `--notes-file`; `gh` outside repo → `--repo`. |
+| | | | |
