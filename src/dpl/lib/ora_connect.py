@@ -129,7 +129,7 @@ def _batch_rows(settings: dict) -> int:
     return DEFAULT_BATCH_SIZE
 
 def iter_batches(conn, query: str, batch_size: int = DEFAULT_BATCH_SIZE,
-                 declared: dict[str, pl.DataType] = None,
+                 declared: dict[str, DTypeLike] | None = None,
                  strict: bool = True):
      """Run query, yield one DataFrame per batch constructed with DECLARED dtypes.
 
@@ -175,8 +175,10 @@ def iter_batches(conn, query: str, batch_size: int = DEFAULT_BATCH_SIZE,
      finally:
          cur.close()
 
-
-def resolve_dtype(dtype_str: str) -> pl.DataType:
+# A schema dtype can be a bare class (pl.Int64) OR a parameterised
+# instance (pl.Datetime("us"), pl.Decimal(18, 6)). Both are valid.
+DTypeLike = pl.DataType | type[pl.DataType]
+def resolve_dtype(dtype_str: str) -> DTypeLike:
      """Comma-free master-CSV dtype string -> Polars type. Strict."""
      s = dtype_str.strip().lower()
      simple = {
@@ -200,7 +202,7 @@ def resolve_dtype(dtype_str: str) -> pl.DataType:
      raise ValueError(f"unknown dtype in schema master: {dtype_str!r}")
 
 def read_query(cfg: dict, connection_name: str, query: str,
-              declared: dict[str, pl.DataType] = None,
+              declared: dict[str, DTypeLike] | None = None,
               batch_size: int = DEFAULT_BATCH_SIZE,
               strict: bool = True) -> pl.DataFrame:
     """

@@ -97,7 +97,7 @@ RETRYABLE_ERRORS = (
 )
 
 # Child-table frame schema: (join key, value) - always these two columns.
-CHILD_SCHEMA: dict[str, pl.DataType] = {"objectguid": pl.Utf8, "value": pl.Utf8}
+CHILD_SCHEMA: dict[str, type[pl.DataType]] = {"objectguid": pl.Utf8, "value": pl.Utf8}
 
 _PL_DTYPES = {
      "utf8": pl.Utf8,
@@ -108,7 +108,7 @@ _PL_DTYPES = {
 }
 
 
-def _resolve_dtype(dt: str) -> pl.DataType:
+def _resolve_dtype(dt: str) -> type[pl.DataType]:
      """Master CSV dtype string -> Polars DataType (unknown -> Utf8)."""
      return _PL_DTYPES.get(dt.strip().lower(), pl.Utf8)
 
@@ -218,7 +218,7 @@ def _build_stats(
 
 
 def _declared_schema_for(schema_master: dict, folder: str,
-                          table_name: str) -> tuple[dict[str, pl.DataType], list[str]]:
+                          table_name: str) -> tuple[dict[str, type[pl.DataType]], list[str]]:
      """Resolve the master's dtypes + MV columns for one table.
 
      Returns (declared_dtypes, mv_child_columns) - the latter drawn from
