@@ -1,22 +1,16 @@
 name: dpl
 channels:
   - conda-forge
-  - defaults
-  - https://repo.anaconda.com/pkgs/main
-  - https://repo.anaconda.com/pkgs/r
 dependencies:
   - python=3.11
-  - setuptools>=68.0
   - pip>=24.0
-  - cryptography        # Fernet - DEFAULT secret engine (verified by import scan 2026-11-06)
-  - duckdb
-  - polars            # NOTE: on pre-AVX2 CPUs polars aborts (0xc000001d);
-                      # install conda-forge::polars-lts-cpu on those machines.
-  - oracledb
-  - ldap3
-  - schema
-  - pyyaml
-  - psycopg2-binary    # roadmap: PostgreSQL ingestion - not yet imported, kept deliberately
-  - pytest              # test-only. Kept ON PURPOSE: this ONE env serves both
-                        # production and the companion test kit's certification,
-                        # so cert conditions always equal prod conditions.
+# SINGLE OWNER RULE: this file provides the INTERPRETER. pyproject.toml
+# owns every Python package (installed by pip install .). Never list a
+# Python package here - two lists drift; one list cannot.
+#
+# SETUP:
+#   conda env create -f environment.yml && conda activate dpl
+#   Developers:          python -m pip install -e ".[dev]"
+#   Bundle receivers:    pip install ".[test]"
+# OLDER CPUs: if polars aborts (0xc000001d) or warns about missing
+#   CPU features, once per machine: pip install polars-lts-cpu

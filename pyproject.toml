@@ -13,28 +13,26 @@ dependencies = [
     "duckdb>=1.0.0",
     "oracledb>=2.0.0",
     "polars>=2.0.0",
-    "pandas>=2.0.0",
+    # RUNTIME-TRANSITIVE, not directly imported anywhere: DuckDB's
+    # replacement scan (polars DataFrame -> Arrow in write_parquet.py)
+    # requires pyarrow at execution time. Invisible to import scans -
+    # proven 2026-11-07: fresh env without it fails 16 writer tests.
+    # DO NOT remove.
     "pyarrow>=18.0.0",
-    "psycopg[binary]>=3.0.0",
     "pyyaml>=6.0",
     "schema>=0.7.0",
     "ldap3>=2.9.0",
-    "click>=8.0.0",
-    "tenacity>=9.0.0",
     "cryptography>=50.0.0",
-    "authlib>=1.6.0",
-    "expiringdict>=1.2.0",
-    "jinja2>=3.0.0",
-    "pydantic>=2.0.0",
-    "orjson>=3.9.0",
-    "pyodbc>=5.0.0",
+    # roadmap (connector "postgres" via lib/connectors.py): not yet
+    # imported anywhere - kept deliberately, same policy as before
+    "psycopg[binary]>=3.0.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=9.0.0",
-    "ruff>=0.1.0",
-]
+# Receivers that will certify (i.e. everyone, normally) need pytest:
+test = ["pytest>=9.0.0"]
+# Developers add the linter:
+dev = ["dpl[test]", "ruff>=0.1.0"]
 
 [project.scripts]
 dpl-run = "dpl.wrapper.run:main"
