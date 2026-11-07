@@ -38,20 +38,29 @@ The vault file itself carries a machine-generated warning header ("DO NOT EDIT M
 
 Complete this sequence once, **in order**, before doing any extraction work. Each step depends on the ones above it.
 
-### Step 0 — Python environment and DPL_HOME (prerequisite for everything)
+### Step 0 — Python environment, package registration, DPL_HOME (prerequisite for everything)
 
-All tooling (`vault.sh`, the test suite, the pipeline) runs on the project's Python environment, and expects `DPL_HOME` to point at the project root.
+All tooling (`vault.sh`, the test suite, the pipeline) runs on the
+project's Python environment, and expects `DPL_HOME` to point at the
+project root. The environment definition is `environment.yml` at the
+repo root — it is the single owner of all dependencies (pytest is
+included deliberately: one environment serves both running and
+certifying).
 
 ```bash
-# 1. Create/activate the project environment (example with conda)
-conda create -n dpl python=3.11 pyyaml cryptography -y
+# 1. Build and activate the environment from the shipped definition
+conda env create -f environment.yml
 conda activate dpl
 
-# 2. Point DPL_HOME at the project root
-export DPL_HOME=/Users/<you>/Workspace/Developer/pipeline
+# 2. Register the dpl package into it (editable - a DEVELOPER setup;
+#    a deployed/bundle copy instead uses non-editable `pip install .`)
+python -m pip install -e .
 
-# 3. Optional but recommended: add both lines to your shell profile
-#    (conda activate dpl; export DPL_HOME=...) so every new terminal is ready.
+# 3. Point DPL_HOME at the project root
+export DPL_HOME=/path/to/your/pipeline
+
+# 4. Optional but recommended: put the three lines above in your shell
+#    profile so every new terminal is ready.
 ```
 
 Why this comes first: `vault.sh` hunts for a Python that can `import yaml` — the `dpl` environment satisfies it. Without it, you get the "no Python found with PyYAML" error and nothing downstream works.
@@ -93,14 +102,14 @@ version: 1
 default_method: sops
 
 methods:
+  fernet:
+    key_file: ~/.dpl-keys/laptop/fernet/key
+    encrypted_file: secrets/secrets.fernet.bin
   sops:
     binary: bin/sops-v3.13.3.darwin.arm64     # platform-appropriate binary
     manifest: bin/sops_manifest.txt
     age_key_file: ~/.dpl-keys/laptop/sops-age/age.key
     encrypted_file: secrets/secrets.sops.yaml
-  fernet:
-    key_file: ~/.dpl-keys/laptop/fernet/key
-    encrypted_file: secrets/secrets.fernet.bin
 
 secrets:
   connections.ora_db.user_name.password: {}
@@ -113,14 +122,14 @@ version: 1
 default_method: sops
 
 methods:
+  fernet:
+    key_file: ~/.dpl-keys/prod/fernet/key
+    encrypted_file: secrets/secrets.fernet.bin
   sops:
     binary: bin/sops-v3.13.3.linux.amd64       # prod runs on RHEL
     manifest: bin/sops_manifest.txt
     age_key_file: ~/.dpl-keys/prod/sops-age/age.key
     encrypted_file: secrets/secrets.sops.yaml
-  fernet:
-    key_file: ~/.dpl-keys/prod/fernet/key
-    encrypted_file: secrets/secrets.fernet.bin
 
 secrets:
   connections.ora_db.user_name.password: {}
@@ -291,6 +300,7 @@ Each error maps to an operational remedy.
 | `ConfigError: key path ... escapes the home directory` | Tilde path traversing outside `~` | Correct the path in `pass_mgr.<env>.yaml` |
 | `ConfigError: Unknown method 'plain' for production` | Prod config has insecure method | Remove it — prod allows sops/fernet only |
 | `'list' needs an environment` | Missing argument | `./vault.sh list laptop` |
+| `Windows fatal exception: 0xc000001d / RuntimeWarning: Missing required CPU features (avx2, fma, bmi1, bmi2, lzcnt, movbe) on import polars` | Older CPU lacking instruction sets modern polars wheels require (physical or VM) | `conda install conda-forge::polars-lts-cpu` (removes plain polars automatically). Permanent on such hardware — this is supported configuration, not a workaround. Never set POLARS_SKIP_CPU_CHECK |
 
 ---
 
@@ -351,6 +361,7 @@ The Fernet method is implemented and tested (provider, envelope format, failure 
 |---|---|---|
 | 1.0 | 2026-11-03 | Initial release — onboarding, vault operations, bin/ restoration, policies |
 | 1.1 | 2026-11-03 | Fragments removed — scan is the only write path; masked-prompt policy; warning header; audit log with fingerprints; backups to secrets/backups (keep 3); logs to secrets/logs; onboarding reordered (Python/DPL_HOME → gitignore → bin → tests → keys → configs → first scan); config file templates added; lost-key scenario rewritten honestly; Fernet roadmap section |
+| 1.2 | 2026-11-07 | Step 0 rewritten: env from environment.yml + editable install + DPL_HOME/DPL_LOG_DIR/DPL_SETTINGS table; polars CPU-compatibility known issue added (0xc000001d → polars-lts-cpu); audience split made explicit (repo/development vs bundle receivers) |
 
 ---
 

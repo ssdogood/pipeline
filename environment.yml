@@ -10,7 +10,8 @@ dependencies:
   - pip>=24.0
   - cryptography        # Fernet - DEFAULT secret engine (verified by import scan 2026-11-06)
   - duckdb
-  - polars
+  - polars            # NOTE: on pre-AVX2 CPUs polars aborts (0xc000001d);
+                      # install conda-forge::polars-lts-cpu on those machines.
   - oracledb
   - ldap3
   - schema
