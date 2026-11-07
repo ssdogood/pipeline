@@ -28,12 +28,12 @@ from dpl.lib.ldap_connect import LDAP_CONFIG_SCHEMA
 from dpl.lib.ora_connect import ORACLE_CONFIG_SCHEMA
 
 CONNECTORS: dict[str, dict] = {
+    # schema    : validates config/extractors/<name>.yaml at load time
+    # extractor : module exporting extract_all(); run.py imports it
+    # generator : module exporting generate_schemas() for the
+    #             generate_schemas step; None = master is curated by
+    #             hand for this connector type
     "oracle": {
-        # schema    : validates config/extractors/<name>.yaml at load time
-        # extractor : module exporting extract_all(); run.py imports it
-        # generator : module exporting generate_schemas() for the
-        #             generate_schemas step; None = master is curated by
-        #             hand for this connector type
         "schema": ORACLE_CONFIG_SCHEMA,
         "extractor": "dpl.extractors.oracle_to_stg",
         "generator": "dpl.lib.generate_schemas",

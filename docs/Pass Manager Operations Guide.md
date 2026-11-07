@@ -54,7 +54,7 @@ conda activate dpl
 
 # 2. Register the dpl package into it (editable - a DEVELOPER setup;
 #    a deployed/bundle copy instead uses non-editable `pip install .`)
-python -m pip install -e .
+python -m pip install -e ".[dev]"
 
 # 3. Point DPL_HOME at the project root
 export DPL_HOME=/path/to/your/pipeline
