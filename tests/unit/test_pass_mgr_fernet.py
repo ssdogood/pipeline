@@ -46,6 +46,7 @@ from dpl.lib.pass_mgr import (
     get_secret,
     init,
 )
+from dpl.lib.pass_mgr._config import PassMgrConfig
 from dpl.lib.pass_mgr._providers import FERNET_ENVELOPE_VERSION, FernetProvider
 
 # ---------------------------------------------------------------------------
@@ -394,6 +395,18 @@ class TestEnvelopeHeaderTolerance:
     ENTRIES: ClassVar[dict] = {"ora_db.user_name.password": "pw-one",
                "ad_atm.subd_support.password": "pw-two"}
 
+    @staticmethod
+    def _cfg(tmp_path) -> PassMgrConfig:
+        """Minimal but REAL config object - providers only use base_dir."""
+        return PassMgrConfig(
+            environment="test",
+            is_production=False,
+            default_method="fernet",
+            method_sections={},
+            secret_methods={},
+            base_dir=tmp_path,
+        )
+
     def _build(self, tmp_path, lines_before, lines_after,
                token_mode="whole"):
         """Write a key + envelope file; return a provider over them."""
@@ -423,7 +436,7 @@ class TestEnvelopeHeaderTolerance:
         class _Cfg:
             base_dir = tmp_path          # minimal shim: only base_dir is used
 
-        return FernetProvider(section, _Cfg())
+        return FernetProvider(section, self._cfg(tmp_path))
 
     def test_headered_envelope_loads(self, tmp_path):
         banner = ["# =====", "# DO NOT EDIT", "# Last synced: 2026-11-04 03:00:00",
@@ -452,7 +465,7 @@ class TestEnvelopeHeaderTolerance:
         class _Cfg:
             base_dir = tmp_path
         with pytest.raises(PassMgrDecryptError):
-            FernetProvider(section, _Cfg()).load()
+            FernetProvider(section, self._cfg(tmp_path)).load()
 
     def test_comments_only_rejected(self, tmp_path):
         provider = self._build(tmp_path, ["# banner only"], [], token_mode="omit")

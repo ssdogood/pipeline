@@ -361,6 +361,7 @@ def test_load_table_rules(tmp_path):
                "oracle,customer4,all,\n"
                "etl,plain,,created\n")
     rules = load_table_rules(f)
+    assert rules is not None
     assert rules["oracle.customer"]["dedup"] == {"mode": "include", "columns": ["id", "region"]}
     assert rules["oracle.customer"]["sort_cols"] == ["id"]
     assert rules["oracle.customer2"]["dedup"] == {"mode": "include", "columns": ["id", "region"]}
@@ -417,6 +418,7 @@ def test_rules_with_sort(tmp_path):
     rules = load_table_rules(_write(tmp_path, "rs.csv",
                                     "folder,table_name,dedup_columns,sort_order\n"
                                     "etl,customer,custno,updated_at-|custno\n"))
+    assert rules is not None
     assert rules["etl.customer"]["sort_spec"] == \
         [("updated_at", "desc"), ("custno", "asc")]
     assert rules["etl.customer"]["sort_cols"] == ["updated_at", "custno"]

@@ -28,6 +28,8 @@ from cryptography.fernet import Fernet
 SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
 _spec = importlib.util.spec_from_file_location(
     "vault_ops", SCRIPTS_DIR / "vault_ops.py")
+assert _spec is not None and _spec.loader is not None, \
+    "vault_ops.py not found - scripts/ layout changed?"
 vault_ops = importlib.util.module_from_spec(_spec)
 sys.modules["vault_ops"] = vault_ops
 _spec.loader.exec_module(vault_ops)
