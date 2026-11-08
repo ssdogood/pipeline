@@ -233,7 +233,7 @@ def _copy(con, sql: str, path: Path, compression: str,
         try:
             con.execute(
                 f"COPY ({sql}) TO '{path.as_posix()}' "
-                f"({opts}, COMPRESSION_LEVEL {int(level)})"
+                f"({opts}, COMPRESSION_LEVEL {level})"
             )
             return
         except duckdb.Error as e:
