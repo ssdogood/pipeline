@@ -218,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"history: {ingested} ingested, {skipped} up to date "
               f"-> {db_path}")
         return 0
-    except (ValueError, sqlite3.Error, OSError, json.JSONDecodeError) as exc:
+    except (ValueError, sqlite3.Error, OSError) as exc:
         log.error("history update failed: %s", exc)
         print(f"history update failed: {exc}", file=sys.stderr)
         return 2                                        # SQLite/system failure
