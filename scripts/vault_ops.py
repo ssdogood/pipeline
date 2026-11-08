@@ -53,6 +53,7 @@ import secrets
 import hmac
 from datetime import datetime
 from pathlib import Path
+from typing import Any, NoReturn
 
 import yaml
 from cryptography.fernet import Fernet, InvalidToken
@@ -88,16 +89,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def fingerprint(secret_name: str, value: str) -> str:
+def fingerprint(secret_name: str, value: str | None) -> str:
     """Keyed, truncated log fingerprint of a secret value, bound to its
     name. Used ONLY in logs to prove a change occurred within this run.
     HMAC (not a bare hash) so log readers without this process's key
     cannot offline-test password guesses; truncation to 64 bits keeps
     fingerprints short and gives negligible false-match probability."""
-    payload = f"{secret_name}:{value}".encode("utf-8")
+    display = value if value is not None else "<absent>"
+    payload = f"{secret_name}:{display}".encode("utf-8")
     return hmac.new(_FINGERPRINT_KEY, payload, hashlib.sha256).hexdigest()[:16]
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     logger.error(f"VAULT ERROR: {message}")
     print(f"\nVAULT ERROR: {message}\n", file=sys.stderr)
     sys.exit(1)
