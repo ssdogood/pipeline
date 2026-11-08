@@ -254,7 +254,8 @@ def extract_table(
             for df in iter_batches(conn, query, batch_size=batch_rows,
                                    declared=declared, strict=strict_cast):
                 w.append(df)
-            return w.close()
+            stats = w.close()
+        return stats
 
 
     error = None

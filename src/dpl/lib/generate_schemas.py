@@ -17,10 +17,12 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import oracledb
 import shutil
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from dpl.lib import pass_mgr
 from dpl.lib.common import (
@@ -43,7 +45,7 @@ SOURCE_TYPE = "oracle"
 BACKUP_KEEP = 30
 
 # ----------------------------------------------------------- type mapping
-def oracle_dtype_to_comma_free(cursor_description_row: tuple,
+def oracle_dtype_to_comma_free(cursor_description_row: Any,
                                raw_column_name: str) -> str:
     """Convert a cursor.description row to the comma-free dtype notation.
 
@@ -52,11 +54,7 @@ def oracle_dtype_to_comma_free(cursor_description_row: tuple,
 
     Returns: "Int64", "Utf8", "Datetime", "Decimal(12.2)", "Float32", etc.
     """
-    try:
-        import oracledb
-        has_dbtype = hasattr(oracledb, "DbType")
-    except ImportError:
-        has_dbtype = False
+    has_dbtype = hasattr(oracledb, "DbType")
 
     name = raw_column_name.lower()
     type_info = cursor_description_row[1]
@@ -150,7 +148,8 @@ def introspect_table(cfg: dict, table_cfg: dict, connection_name: str) -> list[d
             try:
                 cur.execute(introspection_query)
                 columns = []
-                for idx, desc_row in enumerate(cur.description, 1):
+                desc_rows = cur.description or ()
+                for idx, desc_row in enumerate(desc_rows, 1):
                     col_name = desc_row[0].lower()
                     dtype = oracle_dtype_to_comma_free(desc_row, col_name)
                     columns.append({

@@ -345,7 +345,8 @@ class ParquetWriter:
         self._rows_staged = 0              # cumulative counter for _stage_seq
         self._start_wall = time.time()
 
-        self.stats = {
+        # heterogeneous stats bag: values are bool/int/float/str/None
+        self.stats: dict = {
             "name": self.table,
             "dedup": self.dedup_active,
             "rows_read": 0,
@@ -407,9 +408,12 @@ class ParquetWriter:
             # the write-time projection below drops it
             self._con.execute(f"CREATE TABLE _clean AS {clean_sql}")
             self.stats["rows_read"] = self._rows_read
-            self.stats["rows_written"] = self._con.execute(
+            row = self._con.execute(
                 "SELECT count(*) FROM _clean"
-            ).fetchone()[0]
+            ).fetchone()
+            # count(*) always yields exactly one row; guard satisfies the
+            # tuple | None signature of fetchone()
+            self.stats["rows_written"] = row[0] if row is not None else 0
 
             clean_cols = _column_types(self._con, "_clean")
             visible = [(n, t) for n, t in clean_cols if n != "_stage_seq"]
@@ -504,4 +508,5 @@ def write_table(cfg: dict, settings: dict, source: str, table: str,
     ) as w:
         for df in batches:
             w.append(df)
-        return w.close()
+        stats = w.close()
+    return stats

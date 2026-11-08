@@ -189,7 +189,7 @@ def parse_dedup_spec(spec: Any) -> dict:
     )
 
 # ------------------------------------------------------------------- sort
-def parse_sort_spec(cell: str) -> list[tuple[str, str]]:
+def parse_sort_spec(cell: str | None) -> list[tuple[str, str]]:
     """Parse a sort_order cell into [(column, 'asc'|'desc'), ...].
 
     Grammar (comma-free, '|' separated):
@@ -650,7 +650,7 @@ def load_config(path: str, schema: Schema) -> dict | None:
     return cfg
 
 
-def load_settings(path: str) -> dict:
+def load_settings(path: str) -> dict | None:
     """Load the global writer/runtime settings from the given YAML file.
 
     Mandatory path argument - no guessing or defaults. Applies the
