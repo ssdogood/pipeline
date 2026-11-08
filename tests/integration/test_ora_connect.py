@@ -134,7 +134,7 @@ def test_first_table_streamed(ora_cfg, ora_settings):
 @pytest.mark.integration
 def test_read_query_one_shot(ora_cfg, ora_settings):
     """read_query returns a single concatenated DataFrame (small query)."""
-    declared = {"one": pl.Int64, "label": pl.String}
+    declared: dict[str, DTypeLike] = {"one": pl.Int64, "label": pl.String}
     strict_cast = ora_settings.get("polars", {}).get("strict_cast", True)
     df = read_query(ora_cfg, "ora_db",
                     "SELECT 1 AS ONE, 'x' AS LABEL FROM dual",
