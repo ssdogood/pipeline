@@ -32,7 +32,13 @@ dependencies = [
 # Receivers that will certify (i.e. everyone, normally) need pytest:
 test = ["pytest>=9.0.0"]
 # Developers add the linter:
-dev = ["dpl[test]", "ruff>=0.1.0", "pyrefly"]
+dev = [
+    "dpl[test]", 
+    "ruff>=0.1.0", 
+    "pyrefly", 
+    "types-PyYAML", 
+    "types-ldap3"
+]
 
 [project.scripts]
 dpl-run = "dpl.wrapper.run:main"
