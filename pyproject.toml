@@ -62,3 +62,12 @@ filterwarnings = [
 
 [tool.pyrefly]
 conda-environment = "dpl"
+
+[tool.ruff.lint]
+ignore = [
+    # TRY004: ValueError is deliberate here (wrapper incident 2026-11-05,
+    # documented in the code comment above the raise)
+    "TRY004",
+    # RUF022: __all__ is intentionally grouped (facade first, then errors)
+    "RUF022",
+]

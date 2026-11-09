@@ -41,19 +41,19 @@ POLICY (enforced by design):
 
 import getpass
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
-import secrets
-import hmac
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import NoReturn
 
 import yaml
 from cryptography.fernet import Fernet, InvalidToken
@@ -96,7 +96,7 @@ def fingerprint(secret_name: str, value: str | None) -> str:
     cannot offline-test password guesses; truncation to 64 bits keeps
     fingerprints short and gives negligible false-match probability."""
     display = value if value is not None else "<absent>"
-    payload = f"{secret_name}:{display}".encode("utf-8")
+    payload = f"{secret_name}:{display}".encode()
     return hmac.new(_FINGERPRINT_KEY, payload, hashlib.sha256).hexdigest()[:16]
 
 def fail(message: str) -> NoReturn:
@@ -253,7 +253,7 @@ def discover_credential_refs() -> list:
     for cfg_file in cfg_files:
         try:
             cfg = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
-        except Exception as e:
+        except Exception as e:                                           # noqa: BLE001 - scan must survive one bad config file; log and continue
             log_action("SCAN_ERROR", f"failed to parse {cfg_file.name}: {e}")
             continue
 
@@ -466,7 +466,7 @@ def seal_fernet_and_verify(key_file: Path, target: Path, tree: dict) -> Path:
     except SystemExit:
         candidate.unlink(missing_ok=True)
         raise
-    except BaseException:
+    except BaseException:                       # noqa: BLE001 - teardown: unlink temp even on interrupt/abort (incl. KeyboardInterrupt) before re-raising via fail()
         candidate.unlink(missing_ok=True)
         fail(f"failed while sealing fernet vault; old vault left "
              f"untouched: {sys.exc_info()[1]}")
@@ -485,7 +485,8 @@ def run_sops(binary: Path, args, *, env_extra=None, stdin_data=None) -> str:
             capture_output=True,
             text=True,
             timeout=SOPS_TIMEOUT_SECONDS,
-            env=env,
+            env=env, 
+            check=False
         )
     except subprocess.TimeoutExpired:
         fail(f"sops did not respond within {SOPS_TIMEOUT_SECONDS}s - "
@@ -509,6 +510,7 @@ def encrypt_tree(binary: Path, recipient: str, tree: dict) -> str:
     plaintext_yaml = yaml.safe_dump(tree, sort_keys=True, default_flow_style=False)
     fd, tmp_name = tempfile.mkstemp(dir=SECRETS_DIR,
                                     prefix=".vault-plain-", suffix=".yaml")
+    os.close(fd)  # close raw descriptor; file is reopened by path below
     plaintext_file = Path(tmp_name)
     try:
         with open(plaintext_file, "w", encoding="utf-8") as fh:
@@ -593,7 +595,7 @@ def seal_sops_and_verify(binary: Path, key_file: Path, target: Path,
     except SystemExit:
         candidate.unlink(missing_ok=True)
         raise
-    except BaseException:
+    except BaseException:                                       # noqa: BLE001 - same teardown contract as fernet seal
         candidate.unlink(missing_ok=True)
         fail(f"failed while sealing the sops mirror; old vault left "
              f"untouched: {sys.exc_info()[1]}")
@@ -670,7 +672,7 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     sops_cfg = optional_sops_settings(cfg)
 
     refs = discover_credential_refs()
-    required_paths = set(r[0] for r in refs)
+    required_paths = {r[0] for r in refs}
 
     if not required_paths:
         existing_now = set(flatten(decrypt_fernet_tree(fernet_key, fernet_vault)))
@@ -708,9 +710,9 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     print(f"\nDiscovered {len(required_paths)} credential_ref(s) in config")
     print(f"Fernet vault (canonical) holds {len(existing_paths)} secret(s)")
     if sops_cfg:
-        print(f"SOPS mirror: provisioned - will be refreshed if it drifts")
+        print("SOPS mirror: provisioned - will be refreshed if it drifts")
     else:
-        print(f"SOPS mirror: not provisioned on this machine (skipped, logged)")
+        print("SOPS mirror: not provisioned on this machine (skipped, logged)")
 
     if new_paths:
         print(f"\n--- NEW SECRETS TO ADD ({len(new_paths)}) ---")
@@ -728,7 +730,7 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
             print(f"  ~ {p}")
 
     if dry_run:
-        print(f"\n[DRY RUN] No changes will be made.")
+        print("\n[DRY RUN] No changes will be made.")
         print(f"To proceed, run: ./vault.sh scan {env}")
         return
 
@@ -858,7 +860,7 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     if sops_cfg:
         print(f"SOPS mirror:   {'will be refreshed' if mirror_needed else 'already in sync'}")
     else:
-        print(f"SOPS mirror:   skipped on this machine (see SYNC_SKIP in log)")
+        print("SOPS mirror:   skipped on this machine (see SYNC_SKIP in log)")
 
     print(f"\nReady to write. A backup of each rewritten vault will be "
           f"saved to {BACKUP_DIR} before its replacement.")

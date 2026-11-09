@@ -17,12 +17,13 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
-import oracledb
 import shutil
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+import oracledb
 
 from dpl.lib import pass_mgr
 from dpl.lib.common import (
@@ -174,7 +175,7 @@ def introspect_table(cfg: dict, table_cfg: dict, connection_name: str) -> list[d
             )
             return columns
 
-    except Exception as exc:
+    except Exception as exc:                        # noqa: BLE001 - per-table introspection boundary: log and move to next table
         log.error(
             "INTROSPECTION FAILED for %s.%s (%s): %s",
             connection_name, table_name, table_key, exc
@@ -394,7 +395,7 @@ def generate_schemas(config_path: str, output_path: str,
 
 
     log.info("Schema master generated: %d rows, %d table(s)",
-             len(all_rows), len(set(r["table_name"] for r in all_rows)))
+             len(all_rows), len({r["table_name"] for r in all_rows}))
     return 1 if failed_tables else 0
 
 def _timestamp_name(base: str = "schema_master") -> str:
