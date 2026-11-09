@@ -413,7 +413,7 @@ sum(result["children"].values()) or 0,
                  output_path=result["output_path"],
                  children=result["children"],
              )
-         except Exception as exc:
+         except Exception as exc:                           # noqa: BLE001 - retry loop boundary: any failure counts the attempt, stream must continue
              error = str(exc)[:500]
              tlog.error("failed (attempt %d): %s", attempt + 1, error)
              tlog.debug("failure detail", exc_info=True)
@@ -568,7 +568,7 @@ def main(run_id: str = "-") -> int:
          settings = load_settings(SETTINGS_FILE)
          if settings is None:
              raise RuntimeError(f"Failed to load {SETTINGS_FILE}")
-     except Exception as exc:
+     except Exception as exc:                               	# noqa: BLE001 - top-level: any startup failure maps to exit code 1 with a logged cause
          log.critical("config/settings load failed: %s", exc)
          return 1
 

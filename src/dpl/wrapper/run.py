@@ -359,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
                         # wrapper-state stamp never landed in manifests.
                         if any_failed:
                             extract_failed = True
-                    except Exception as exc:
+                    except Exception as exc:                                # noqa: BLE001 - pipeline boundary: one failing pipe must not kill the run
                         log.error("pipe %s failed: %s", pipe.name, exc)
                         extract_failed = True
 
@@ -381,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
                 # profiles.py validates the vocabulary; unreachable
                 log.error("unknown step '%s' - skipping", name)
 
-        except Exception as exc:
+        except Exception as exc:                                # noqa: BLE001 - step boundary: log failure, continue remaining steps
             log.error("step '%s' failed: %s", name, exc)
             if name == "extract":
                 extract_failed = True

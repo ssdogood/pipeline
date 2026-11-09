@@ -253,7 +253,7 @@ def discover_credential_refs() -> list:
     for cfg_file in cfg_files:
         try:
             cfg = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))
-        except Exception as e:
+        except Exception as e:                                           # noqa: BLE001 - scan must survive one bad config file; log and continue
             log_action("SCAN_ERROR", f"failed to parse {cfg_file.name}: {e}")
             continue
 
@@ -466,7 +466,7 @@ def seal_fernet_and_verify(key_file: Path, target: Path, tree: dict) -> Path:
     except SystemExit:
         candidate.unlink(missing_ok=True)
         raise
-    except BaseException:
+    except BaseException:                       # noqa: BLE001 - teardown: unlink temp even on interrupt/abort (incl. KeyboardInterrupt) before re-raising via fail()
         candidate.unlink(missing_ok=True)
         fail(f"failed while sealing fernet vault; old vault left "
              f"untouched: {sys.exc_info()[1]}")
@@ -595,7 +595,7 @@ def seal_sops_and_verify(binary: Path, key_file: Path, target: Path,
     except SystemExit:
         candidate.unlink(missing_ok=True)
         raise
-    except BaseException:
+    except BaseException:                                       # noqa: BLE001 - same teardown contract as fernet seal
         candidate.unlink(missing_ok=True)
         fail(f"failed while sealing the sops mirror; old vault left "
              f"untouched: {sys.exc_info()[1]}")

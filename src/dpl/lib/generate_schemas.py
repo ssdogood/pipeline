@@ -175,7 +175,7 @@ def introspect_table(cfg: dict, table_cfg: dict, connection_name: str) -> list[d
             )
             return columns
 
-    except Exception as exc:
+    except Exception as exc:                        # noqa: BLE001 - per-table introspection boundary: log and move to next table
         log.error(
             "INTROSPECTION FAILED for %s.%s (%s): %s",
             connection_name, table_name, table_key, exc

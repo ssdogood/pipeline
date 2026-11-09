@@ -481,7 +481,7 @@ class ParquetWriter:
         if self._con is not None:
             try:
                 self._con.close()
-            except Exception:
+            except Exception:                                       # noqa: BLE001, S110 - best-effort teardown close; must not mask the primary error, nothing to log
                 pass
             self._con = None
         if not keep and self.tmp_dir.exists():
