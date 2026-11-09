@@ -1,0 +1,13 @@
+# Normalize line endings: LF in the repository and on checkout.
+* text=auto eol=lf
+
+# Explicit: shell scripts must always have LF (bash breaks on CRLF)
+*.sh text eol=lf
+
+# Explicit: never touch these (defensive - git usually detects them anyway)
+*.png binary
+*.jpg binary
+*.ico binary
+*.gz binary
+*.tar binary
+*.whl binary

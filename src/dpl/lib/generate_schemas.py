@@ -17,12 +17,13 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
-import oracledb
 import shutil
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+import oracledb
 
 from dpl.lib import pass_mgr
 from dpl.lib.common import (

@@ -781,7 +781,7 @@ def stage_mode(project_root: Path, verbose: bool) -> int:
           f"  ({payload:,} bytes shipped)")
     print(f"  kit     : {kit_root}")
     print(f"    {kit_count} staged files (tests + green scripts)")
-    print(f"  verify  : both staged trees re-checked against doctrine - OK")
+    print("  verify  : both staged trees re-checked against doctrine - OK")
     if verbose:
         print()
         print("Bundle files:")
@@ -870,9 +870,9 @@ def build_mode(project_root: Path, verbose: bool) -> int:
     print(f"  bundle  : {len(shipped)} shipped + {README_FIRST_NAME} + "
           f"{len(RUNTIME_SCAFFOLD_DIRS)} scaffold dirs")
     print(f"  kit     : {len(kit_snap)} files (tests + green scripts)")
-    print(f"  verify  : 4 archives reopened; every member hash-matched")
-    print(f"  clean   : bundle unpacked + kit overlaid in a throwaway dir;")
-    print(f"            kit's own green script run against the unpacked")
+    print("  verify  : 4 archives reopened; every member hash-matched")
+    print("  clean   : bundle unpacked + kit overlaid in a throwaway dir;")
+    print("            kit's own green script run against the unpacked")
     print(f"            code - GREEN (FERNET-ONLY), {counts}")
     print()
     print("Artifacts in dist/:")

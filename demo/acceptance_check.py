@@ -1,5 +1,5 @@
-from dpl.lib.pass_mgr._providers import FernetProvider
 from dpl.lib.pass_mgr._config import load_config
+from dpl.lib.pass_mgr._providers import FernetProvider
 
 cfg = load_config("laptop")
 section = cfg.method_sections["fernet"]

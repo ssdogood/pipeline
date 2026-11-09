@@ -41,16 +41,16 @@ POLICY (enforced by design):
 
 import getpass
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
-import secrets
-import hmac
 from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
@@ -708,9 +708,9 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     print(f"\nDiscovered {len(required_paths)} credential_ref(s) in config")
     print(f"Fernet vault (canonical) holds {len(existing_paths)} secret(s)")
     if sops_cfg:
-        print(f"SOPS mirror: provisioned - will be refreshed if it drifts")
+        print("SOPS mirror: provisioned - will be refreshed if it drifts")
     else:
-        print(f"SOPS mirror: not provisioned on this machine (skipped, logged)")
+        print("SOPS mirror: not provisioned on this machine (skipped, logged)")
 
     if new_paths:
         print(f"\n--- NEW SECRETS TO ADD ({len(new_paths)}) ---")
@@ -728,7 +728,7 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
             print(f"  ~ {p}")
 
     if dry_run:
-        print(f"\n[DRY RUN] No changes will be made.")
+        print("\n[DRY RUN] No changes will be made.")
         print(f"To proceed, run: ./vault.sh scan {env}")
         return
 
@@ -858,7 +858,7 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     if sops_cfg:
         print(f"SOPS mirror:   {'will be refreshed' if mirror_needed else 'already in sync'}")
     else:
-        print(f"SOPS mirror:   skipped on this machine (see SYNC_SKIP in log)")
+        print("SOPS mirror:   skipped on this machine (see SYNC_SKIP in log)")
 
     print(f"\nReady to write. A backup of each rewritten vault will be "
           f"saved to {BACKUP_DIR} before its replacement.")

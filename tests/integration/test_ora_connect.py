@@ -29,9 +29,9 @@ from dpl.lib.common import load_config, load_schema_master, load_settings
 from dpl.lib.logger import setup_logging
 from dpl.lib.ora_connect import (
     CONFIG_FILE,
-    DTypeLike,
     ORACLE_CONFIG_SCHEMA,
     SETTINGS_FILE,
+    DTypeLike,
     _batch_rows,
     connect,
     iter_batches,

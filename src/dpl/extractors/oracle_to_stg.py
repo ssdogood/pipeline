@@ -56,8 +56,8 @@ from dpl.lib.common import (
 )
 from dpl.lib.logger import get_run_logger, setup_logging
 from dpl.lib.ora_connect import (
-    DTypeLike,
     ORACLE_CONFIG_SCHEMA,
+    DTypeLike,
     connect,
     iter_batches,
     resolve_dtype,
