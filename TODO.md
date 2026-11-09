@@ -1,1 +1,6 @@
 * Move oracle_dtype_to_comma_free from lib/generate_schemas.py to lib/ora_connect.py — Oracle driver/type knowledge must live in one place (connector layer).
+* setup_secrets.sh absolute-path bug — the script writes expanded absolute key paths; resolve_relative_path rejects them (PassMgrConfigError). Known workaround (tilde form); proper fix is the script emitting tilde paths, coordinated with the policy redesign.
+* Key-path policy redesign — accept key files outside the project, reject those inside (inverts current rule). The six design questions remain open, plus: rewriting the tests that encode the old home-containment rule, and making vault_ops.py ~line 133's expanduser() agree with the validator.
+* Release Procedure doc fixes (three proven incidents from tonight): §6.1 "never copy a stale dist/ receipt"; §6.3 explicit asset names instead of dist/*; §6.2 lessons — angle brackets in notes get eaten by the Markdown renderer (alongside the v0.1.0 zsh-glob lesson). Optionally: have build_release.py sweep foreign files out of dist/ at build start, so the tool enforces what the doc preaches.
+* Move oracle_dtype_to_comma_free from generate_schemas to ora_connect (the deferred architecture item — drivers live in connect modules).
+* Security Demo Runbook — its embedded demo code is stale after the import fixes.
