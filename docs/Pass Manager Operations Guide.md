@@ -354,8 +354,16 @@ Mitigation to decide *before* this happens: store one offline copy of each envir
 The Fernet method is implemented and tested (provider, envelope format, failure modes — 16 tests), and `setup_secrets.sh` already provisions its key. What remains is operational: keeping `secrets/secrets.fernet.bin` synchronized with the sops vault so it functions as a genuine second decryption path (see Scenario D). Planned work: a `sync-fernet` operation in the vault tooling that reads the sops vault in memory and seals the same tree with the Fernet key — same no-plaintext-file rules, same verification-before-write. Until that lands, treat the Fernet vault as provisioned-but-not-populated.
 
 ---
+## 9. Ceremony Log
+Per-release record of certification results and receiver-side verification. One row per published release; append only, never edit history.
 
-## 9. Change Log (Document History)
+| Version | Date | Result | Notes |
+|---|---|---|---|
+| v0.1.0 | 2026-11-07 | GREEN (FERNET-ONLY), 136 passed / 25 skipped; 4 OK, diff silent | First release. Lessons folded into §6: zsh glob on inline notes → `--notes-file`; `gh` outside repo → `--repo`. |
+| v0.1.1 | 2026-11-09 | GREEN (FERNET-ONLY), 136 passed / 25 skipped; 4 OK, diff silent | Cleanup release. pyrefly 47→0, ruff 36→0, mkstemp descriptor leak fixed, executable bits normalized, pyasn1>=0.6.5 floor (CVE-2026-119194). Publish hiccups fixed post-tag: stale v0.1.0 assets swept in by `dist/*` (removed; §6.3 to mandate explicit names), hostname placeholder in notes eaten by renderer. |
+---
+
+## 10. Change Log (Document History)
 
 | Version | Date | Changes |
 |---|---|---|
