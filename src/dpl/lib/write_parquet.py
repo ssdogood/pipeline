@@ -45,6 +45,7 @@ import uuid
 from collections.abc import Iterable
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Self
 
 import duckdb
 import polars as pl
@@ -463,7 +464,7 @@ class ParquetWriter:
             self._release(keep=self._keep_scratch)
 
     # ---------------------------------------------------------- context manager
-    def __enter__(self) -> ParquetWriter:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:

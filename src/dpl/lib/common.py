@@ -228,7 +228,7 @@ def parse_sort_spec(cell: str | None) -> list[tuple[str, str]]:
             raise ValueError(
                 f"sort_order: bare direction sign in '{token}' "
                 f"(no column name)")
-        if tok.endswith("-") or tok.endswith("+"):
+        if tok.endswith(("-", "+")):
             # catches 'col--' and 'col-+' after the first strip
             raise ValueError(
                 f"sort_order: malformed token '{token}' "

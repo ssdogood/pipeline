@@ -360,8 +360,7 @@ def main(argv: list[str] | None = None) -> int:
                         if any_failed:
                             extract_failed = True
                     except Exception as exc:
-                        log.error("pipe %s failed: %s", pipe.name, exc,
-                                  exc_info=True)
+                        log.error("pipe %s failed: %s", pipe.name, exc)
                         extract_failed = True
 
             elif name == "update_history":
@@ -383,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
                 log.error("unknown step '%s' - skipping", name)
 
         except Exception as exc:
-            log.error("step '%s' failed: %s", name, exc, exc_info=True)
+            log.error("step '%s' failed: %s", name, exc)
             if name == "extract":
                 extract_failed = True
             elif name == "update_history":

@@ -499,16 +499,16 @@ def _normalize_tarinfo(ti: tarfile.TarInfo) -> tarfile.TarInfo:
 
 
 def build_tar_gz(staging_root: Path, out_path: Path, prefix: str) -> None:
-    with out_path.open("wb") as raw:
-        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
-            with tarfile.open(fileobj=gz, mode="w|") as tf:
-                for path, rel in _sorted_staged_entries(staging_root):
-                    tf.add(
-                        str(path),
-                        arcname=f"{prefix}/{rel}",
-                        recursive=False,
-                        filter=_normalize_tarinfo,
-                    )
+    with (out_path.open("wb") as raw,
+          gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz,
+          tarfile.open(fileobj=gz, mode="w|") as tf):
+        for path, rel in _sorted_staged_entries(staging_root):
+            tf.add(
+                str(path),
+                arcname=f"{prefix}/{rel}",
+                recursive=False,
+                filter=_normalize_tarinfo,
+            )
 
 
 def build_zip(staging_root: Path, out_path: Path, prefix: str) -> None:
@@ -678,7 +678,7 @@ def run_cleanroom(
     #    AS dpl, else the clean room would certify the wrong tree.
     pre = subprocess.run(
         [sys.executable, "-c", PREFLIGHT_SNIPPET, str(bundle_dir / "src")],
-        capture_output=True, text=True, env=env, cwd=bundle_dir, timeout=120,
+        capture_output=True, text=True, env=env, cwd=bundle_dir, timeout=120, check=False
     )
     if pre.returncode != 0:
         sys.exit("FATAL: clean-room preflight failed:\n" + (pre.stdout + pre.stderr))
@@ -688,7 +688,7 @@ def run_cleanroom(
     #    cannot hang on a binary, but Gatekeeper-class noise is free.
     proc = subprocess.run(
         [str(bundle_dir / "run_offline_tests.sh")],
-        capture_output=True, text=True, env=env,
+        check=False, capture_output=True, text=True, env=env,
         cwd=bundle_dir, timeout=600,
     )
     transcript = proc.stdout + proc.stderr

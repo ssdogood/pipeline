@@ -395,7 +395,7 @@ def generate_schemas(config_path: str, output_path: str,
 
 
     log.info("Schema master generated: %d rows, %d table(s)",
-             len(all_rows), len(set(r["table_name"] for r in all_rows)))
+             len(all_rows), len({r["table_name"] for r in all_rows}))
     return 1 if failed_tables else 0
 
 def _timestamp_name(base: str = "schema_master") -> str:

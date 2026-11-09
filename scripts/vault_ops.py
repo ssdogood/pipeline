@@ -53,7 +53,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import NoReturn
 
 import yaml
 from cryptography.fernet import Fernet, InvalidToken
@@ -96,7 +96,7 @@ def fingerprint(secret_name: str, value: str | None) -> str:
     cannot offline-test password guesses; truncation to 64 bits keeps
     fingerprints short and gives negligible false-match probability."""
     display = value if value is not None else "<absent>"
-    payload = f"{secret_name}:{display}".encode("utf-8")
+    payload = f"{secret_name}:{display}".encode()
     return hmac.new(_FINGERPRINT_KEY, payload, hashlib.sha256).hexdigest()[:16]
 
 def fail(message: str) -> NoReturn:
@@ -485,7 +485,8 @@ def run_sops(binary: Path, args, *, env_extra=None, stdin_data=None) -> str:
             capture_output=True,
             text=True,
             timeout=SOPS_TIMEOUT_SECONDS,
-            env=env,
+            env=env, 
+            check=False
         )
     except subprocess.TimeoutExpired:
         fail(f"sops did not respond within {SOPS_TIMEOUT_SECONDS}s - "
@@ -509,6 +510,7 @@ def encrypt_tree(binary: Path, recipient: str, tree: dict) -> str:
     plaintext_yaml = yaml.safe_dump(tree, sort_keys=True, default_flow_style=False)
     fd, tmp_name = tempfile.mkstemp(dir=SECRETS_DIR,
                                     prefix=".vault-plain-", suffix=".yaml")
+    os.close(fd)  # close raw descriptor; file is reopened by path below
     plaintext_file = Path(tmp_name)
     try:
         with open(plaintext_file, "w", encoding="utf-8") as fh:
@@ -670,7 +672,7 @@ def cmd_scan(env: str, dry_run: bool = False) -> None:
     sops_cfg = optional_sops_settings(cfg)
 
     refs = discover_credential_refs()
-    required_paths = set(r[0] for r in refs)
+    required_paths = {r[0] for r in refs}
 
     if not required_paths:
         existing_now = set(flatten(decrypt_fernet_tree(fernet_key, fernet_vault)))
