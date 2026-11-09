@@ -29,6 +29,7 @@ from dpl.lib.common import load_config, load_schema_master, load_settings
 from dpl.lib.logger import setup_logging
 from dpl.lib.ora_connect import (
     CONFIG_FILE,
+    DTypeLike,
     ORACLE_CONFIG_SCHEMA,
     SETTINGS_FILE,
     _batch_rows,
@@ -64,7 +65,7 @@ def ora_settings():
     return settings
 
 
-def _declared_for(cfg: dict, table_name: str) -> dict | None:
+def _declared_for(cfg: dict, table_name: str) -> dict[str, DTypeLike] | None:
     """Resolve declared schema for one table from the schema master CSV.
 
     Returns None when the table entry is absent - the caller skips,
@@ -133,7 +134,7 @@ def test_first_table_streamed(ora_cfg, ora_settings):
 @pytest.mark.integration
 def test_read_query_one_shot(ora_cfg, ora_settings):
     """read_query returns a single concatenated DataFrame (small query)."""
-    declared = {"one": pl.Int64, "label": pl.String}
+    declared: dict[str, DTypeLike] = {"one": pl.Int64, "label": pl.String}
     strict_cast = ora_settings.get("polars", {}).get("strict_cast", True)
     df = read_query(ora_cfg, "ora_db",
                     "SELECT 1 AS ONE, 'x' AS LABEL FROM dual",

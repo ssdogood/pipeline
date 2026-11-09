@@ -93,6 +93,7 @@ def test_settings_runs_root(tmp_path):
     f = tmp_path / "s_derived.yaml"
     f.write_text(yaml.dump(base))
     s = load_settings(str(f))
+    assert s is not None
     assert s["paths"]["runs_root"] == str(tmp_path / "landing" / "_runs"), s["paths"]
 
     # explicit -> honored verbatim
@@ -100,6 +101,7 @@ def test_settings_runs_root(tmp_path):
     f2 = tmp_path / "s_explicit.yaml"
     f2.write_text(yaml.dump(base))
     s2 = load_settings(str(f2))
+    assert s2 is not None
     assert s2["paths"]["runs_root"] == str(tmp_path / "elsewhere" / "runs")
 
     # empty string -> rejected by schema (And(str, len))
@@ -359,6 +361,7 @@ def test_load_table_rules(tmp_path):
                "oracle,customer4,all,\n"
                "etl,plain,,created\n")
     rules = load_table_rules(f)
+    assert rules is not None
     assert rules["oracle.customer"]["dedup"] == {"mode": "include", "columns": ["id", "region"]}
     assert rules["oracle.customer"]["sort_cols"] == ["id"]
     assert rules["oracle.customer2"]["dedup"] == {"mode": "include", "columns": ["id", "region"]}
@@ -415,6 +418,7 @@ def test_rules_with_sort(tmp_path):
     rules = load_table_rules(_write(tmp_path, "rs.csv",
                                     "folder,table_name,dedup_columns,sort_order\n"
                                     "etl,customer,custno,updated_at-|custno\n"))
+    assert rules is not None
     assert rules["etl.customer"]["sort_spec"] == \
         [("updated_at", "desc"), ("custno", "asc")]
     assert rules["etl.customer"]["sort_cols"] == ["updated_at", "custno"]

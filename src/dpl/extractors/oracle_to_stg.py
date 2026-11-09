@@ -37,8 +37,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-import polars as pl
-
 from dpl.lib import pass_mgr
 from dpl.lib.common import (
     FAILURE_STATUSES,
@@ -58,6 +56,7 @@ from dpl.lib.common import (
 )
 from dpl.lib.logger import get_run_logger, setup_logging
 from dpl.lib.ora_connect import (
+    DTypeLike,
     ORACLE_CONFIG_SCHEMA,
     connect,
     iter_batches,
@@ -150,7 +149,7 @@ def _build_stats(
 
 
 def _declared_schema_for(schema_master: dict | None, folder: str,
-                         table_name: str) -> dict[str, pl.DataType] | None:
+                         table_name: str) -> dict[str, DTypeLike] | None:
     """Resolve the master-CSV dtype strings for one table into Polars types.
 
     Returns None when no master was supplied (legacy/inference path).
@@ -255,7 +254,8 @@ def extract_table(
             for df in iter_batches(conn, query, batch_size=batch_rows,
                                    declared=declared, strict=strict_cast):
                 w.append(df)
-            return w.close()
+            stats = w.close()
+        return stats
 
 
     error = None

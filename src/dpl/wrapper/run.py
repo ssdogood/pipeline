@@ -446,8 +446,7 @@ def main(argv: list[str] | None = None) -> int:
     if not history_failed or manifests:
         try:
             update_history(settings, history_db, days=manifest_days)
-        except (sqlite3.Error, OSError, ValueError,
-                json.JSONDecodeError) as exc:
+        except (sqlite3.Error, OSError, ValueError) as exc:
             log.error("post-run history ingest failed: %s - repair with "
                        "`python -m wrapper.update_history`", exc)
             history_failed = True
