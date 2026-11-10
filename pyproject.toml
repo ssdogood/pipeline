@@ -42,7 +42,8 @@ dev = [
     "ruff>=0.1.0", 
     "pyrefly", 
     "types-PyYAML", 
-    "types-ldap3"
+    "types-ldap3",
+    "pytest-cov"
 ]
 
 [project.scripts]
@@ -65,9 +66,6 @@ filterwarnings = [
     "ignore::DeprecationWarning:ldap3.*",
 ]
 
-[tool.pyrefly]
-conda-environment = "dpl"
-
 [tool.ruff.lint]
 ignore = [
     # TRY004: ValueError is deliberate here (wrapper incident 2026-11-05,
@@ -75,4 +73,10 @@ ignore = [
     "TRY004",
     # RUF022: __all__ is intentionally grouped (facade first, then errors)
     "RUF022",
+]
+
+[tool.pyrefly]
+project-includes = [
+    "**/*.py*",
+    "**/*.ipynb",
 ]

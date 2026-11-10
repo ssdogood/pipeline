@@ -31,6 +31,7 @@ data_pipe_line_project*
 *.pyc
 .env
 *.db
+.coverage
 
 # macOS junk
 .DS_Store
