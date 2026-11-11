@@ -12,5 +12,7 @@ methods:
     encrypted_file: secrets/secrets.sops.yaml
 
 secrets:
-  "ad_main.subd_support.password": {}
+  "ad_atm.subd\\support.password": {}
+  "ad_main.subd\\support.password": {}
   "ora_db.user_name.password": {}
+  "smtp.password.secret": {}
