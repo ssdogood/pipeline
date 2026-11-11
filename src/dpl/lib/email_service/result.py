@@ -1,10 +1,10 @@
 # dpl/lib/email_service/result.py
-"""Structured, never-raises send result (stage 4c).
+"""Structured, never-raises send result.
 
 THE currency of the email service: every public operation returns a
 SendResult instead of raising (failure-isolation rule: an email
-problem can never perturb the caller's run status). The composer and,
-later, the transport fill these; callers read them and act (or ignore).
+problem can never perturb the caller's run status). The composer and
+transport fill these; callers read them and act (or ignore).
 
 Field set intentionally mirrors the history_db.email_sends schema
 (one module owns the concern - history_db - but the shapes must stay
@@ -12,10 +12,16 @@ in lockstep, enforced by tests comparing against
 EMAIL_SEND_ROW_KEYS). `message` and `envelope_recipients` are
 transport-stage extras: never persisted, never part of the row.
 
+Timestamp doctrine (FR-20 + finished_at ratification, 2026-11-11):
+  - created_at: composition time (= first-attempt start)
+  - finished_at: terminal-resolution time (sent / failed / dry_run);
+    None while the send is only composed. finished_at - created_at on
+    a history row is the total retry cost; attempts_used says how
+    many tries that cost bought.
+
 Outcome/error taxonomy: small and explicit so history queries are
-machine-filterable (the promoted error_class rationale). Transport
-classes (auth_failed, transport_failed, ...) join in stage 4d;
-SKIPPED is produced by the public API when a caller is disabled.
+machine-filterable (the promoted error_class rationale). Compose
+classes live here since 4c; transport classes since 4d.
 """
 from __future__ import annotations
 
@@ -39,7 +45,10 @@ EC_BAD_ATTACHMENT = "bad_attachment"
 EC_OUTBOX = "outbox_write_failed"
 EC_INTERNAL = "internal_error"
 EC_DISABLED = "disabled"
-# stage 4d reserves: EC_AUTH, EC_TRANSIENT, EC_REJECTED
+# transport classes (stage 4d):
+EC_AUTH_FAILED = "auth_failed"       # credentials refused; never retried
+EC_REJECTED = "rejected"             # permanent 5xx; never retried
+EC_TRANSIENT = "transient_error"     # network/4xx; retried per config
 
 
 @dataclass(frozen=True)
@@ -58,6 +67,7 @@ class SendResult:
     run_id: str                    # pipeline run context, "-" if none
     message: EmailMessage | None           # present when outcome=COMPOSED
     envelope_recipients: tuple[str, ...]    # To+CC+BCC; BCC never in headers
+    finished_at: str | None = None  # terminal time; None until resolved
 
     def ok(self) -> bool:
         """True when nothing needs attention (sent or dry-run or
@@ -81,6 +91,7 @@ class SendResult:
             "subject": self.subject,
             "error_summary": self.error_summary,
             "run_id": self.run_id,
+            "finished_at": self.finished_at,
         }
 
     @staticmethod
@@ -103,4 +114,7 @@ __all__ = [
     "EC_OUTBOX",
     "EC_INTERNAL",
     "EC_DISABLED",
+    "EC_AUTH_FAILED",
+    "EC_REJECTED",
+    "EC_TRANSIENT",
 ]

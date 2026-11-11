@@ -58,6 +58,7 @@ def sample_row(send_id: str, **overrides: object) -> dict:
         "subject": "[dpl] test",
         "error_summary": None,
         "run_id": "RUN-TEST",
+        "finished_at": None,
     }
     row.update(overrides)
     return row
@@ -162,6 +163,30 @@ def test_record_and_read_roundtrip(tmp_path: Path) -> None:
     assert got is not None, "row must exist after record_email_send"
     assert dict(zip(EMAIL_SEND_ROW_KEYS, got)) == row
 
+def test_record_rejects_malformed_finished_at(tmp_path: Path) -> None:
+    """finished_at provenance gate (ratified 2026-11-11): when present,
+    it must be canonical UTC-Z - same doctrine as created_at."""
+    db = tmp_path / "hist.db"
+    init_once(db)
+    row = sample_row("S-BADFIN", finished_at="2026-11-11 13:00:00")
+    with pytest.raises(ValueError, match="canonical"):
+        record_email_send(row, db_path=db)
+
+
+def test_stamped_finished_at_roundtrip(tmp_path: Path) -> None:
+    """A stamped finished_at survives write + read unchanged."""
+    db = tmp_path / "hist.db"
+    init_once(db)
+    fin = now_utc_z()
+    record_email_send(sample_row("S-FIN", finished_at=fin), db_path=db)
+    conn = open_db(db)
+    try:
+        got = conn.execute(
+            "SELECT finished_at FROM email_sends WHERE send_id = ?",
+            ("S-FIN",)).fetchone()[0]
+    finally:
+        conn.close()
+    assert got == fin
 
 def test_record_rejects_non_utc_timestamp(tmp_path: Path) -> None:
     db = tmp_path / "hist.db"

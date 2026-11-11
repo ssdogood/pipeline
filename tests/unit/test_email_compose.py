@@ -1,4 +1,5 @@
-"""Unit tests for email_service result.py + composer.py (stage 4c).
+"""Unit tests for email_service result.py + composer.py (stage 4c),
+amended for finished_at (ratified 2026-11-11).
 
 Runs under pytest AND standalone:
     python tests/unit/test_email_compose.py
@@ -11,6 +12,11 @@ territory).
 Fixture note: pytest's builtin is tmp_path; the `tmp` bridge fixture
 below hands it to every test under the shorter name.
 
+finished_at doctrine under test:
+  - dry_run (terminal)        -> stamped, canonical UTC-Z
+  - compose failures (terminal)-> stamped, canonical UTC-Z
+  - composed (NOT terminal)   -> None; transport stamps it later
+
 Group map:
   RESULT - schema lockstep + canonical created_at
   HDRS   - header discipline (From/To/Cc/Subject/BCC, custom headers)
@@ -18,6 +24,7 @@ Group map:
   FAIL   - every failure mode and its error_class
   ATTACH - whitelist, existence, size cap, content fidelity
   DRYRUN - outbox .eml writing, terminal result, write failure
+  FINSIH - finished_at stamping rules
 """
 from __future__ import annotations
 
@@ -104,7 +111,7 @@ def test_send_result_history_row_lockstep(tmp: Path) -> None:
         mode="live", outcome=OUTCOME_SENT, error_class=EC_NONE,
         attempts_used=1, recipient_count=2, subject="s",
         error_summary=None, run_id="R", message=None,
-        envelope_recipients=())
+        envelope_recipients=(), finished_at="2026-11-11T09:30:31Z")
     assert frozenset(r.to_history_row()) == SendResult.row_keys()
     assert r.ok() is True
 
@@ -115,8 +122,19 @@ def test_failed_result_not_ok(tmp: Path) -> None:
         mode="live", outcome=OUTCOME_FAILED, error_class=EC_INTERNAL,
         attempts_used=0, recipient_count=1, subject="",
         error_summary="boom", run_id="-", message=None,
-        envelope_recipients=())
+        envelope_recipients=(), finished_at="2026-11-11T09:30:00Z")
     assert r.ok() is False
+
+
+def test_finished_at_defaults_to_none(tmp: Path) -> None:
+    r = SendResult(
+        send_id="S-1", caller="c", created_at="2026-11-11T09:30:00Z",
+        mode="live", outcome=OUTCOME_SENT, error_class=EC_NONE,
+        attempts_used=1, recipient_count=1, subject="s",
+        error_summary=None, run_id="-", message=None,
+        envelope_recipients=())
+    assert r.finished_at is None, "optional field defaults None"
+    assert r.to_history_row()["finished_at"] is None
 
 
 # ------------------------------------------------------------------- HDRS ---
@@ -332,6 +350,29 @@ def test_live_compose_returns_composed_with_message(tmp: Path) -> None:
     assert r.message is not None
 
 
+# --------------------------------------------------------------- FINISHED ---
+
+def test_dry_run_stamps_finished_at(tmp: Path) -> None:
+    server = make_server(tmp, dry_run=True)
+    r = compose_email(server, make_caller(tmp), GOOD_DATA)
+    assert r.finished_at is not None, "dry_run is terminal: stamped"
+    require_utc_z(r.finished_at)
+
+
+def test_compose_failure_stamps_finished_at(tmp: Path) -> None:
+    r = compose_email(make_server(tmp), make_caller(tmp),
+                      {"subject": "s"})          # missing keys
+    assert r.outcome == OUTCOME_FAILED
+    assert r.finished_at is not None, "failure is terminal: stamped"
+    require_utc_z(r.finished_at)
+
+
+def test_composed_result_finished_at_is_none(tmp: Path) -> None:
+    r = compose_email(make_server(tmp), make_caller(tmp), GOOD_DATA)
+    assert r.outcome == OUTCOME_COMPOSED
+    assert r.finished_at is None, "composed is NOT terminal yet"
+
+
 # ------------------------------------------------------ standalone runner ----
 
 
@@ -340,6 +381,7 @@ def main() -> int:
         ("send_result_history_row_lockstep",
          test_send_result_history_row_lockstep),
         ("failed_result_not_ok", test_failed_result_not_ok),
+        ("finished_at_defaults_to_none", test_finished_at_defaults_to_none),
         ("compose_success_headers_and_envelope",
          test_compose_success_headers_and_envelope),
         ("custom_headers_present", test_custom_headers_present),
@@ -370,6 +412,11 @@ def main() -> int:
          test_dry_run_outbox_failure_reported),
         ("live_compose_returns_composed_with_message",
          test_live_compose_returns_composed_with_message),
+        ("dry_run_stamps_finished_at", test_dry_run_stamps_finished_at),
+        ("compose_failure_stamps_finished_at",
+         test_compose_failure_stamps_finished_at),
+        ("composed_result_finished_at_is_none",
+         test_composed_result_finished_at_is_none),
     ]
     failures: list[str] = []
     with tempfile.TemporaryDirectory() as td:
@@ -385,7 +432,7 @@ def main() -> int:
         print(f"RESULT: {total - bad}/{total} passed, FAILED: {failures}")
         return 1
     print(f"RESULT: ALL GREEN ({total}/{total}) - "
-          f"stage 4c composer verified")
+          f"stage 4c+finished_at verified")
     return 0
 
 

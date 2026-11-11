@@ -103,7 +103,8 @@ CREATE TABLE IF NOT EXISTS email_sends (
     recipient_count INTEGER NOT NULL,
     subject         TEXT,
     error_summary   TEXT,           -- masked; NULL when outcome != failed
-    run_id          TEXT
+    run_id          TEXT,
+    finished_at     TEXT            -- NULL until terminal; ISO-8601 UTC with Z
 );
 """
 
@@ -111,6 +112,7 @@ CREATE TABLE IF NOT EXISTS email_sends (
 EMAIL_SEND_ROW_KEYS: tuple[str, ...] = (
     "send_id", "caller", "created_at", "mode", "outcome", "error_class",
     "attempts_used", "recipient_count", "subject", "error_summary", "run_id",
+    "finished_at",
 )
 
 
@@ -258,7 +260,9 @@ def record_email_send(row: dict, *,
         raise ValueError(
             f"email_sends row must contain exactly {EMAIL_SEND_ROW_KEYS}; "
             f"missing: {missing}, unknown: {unknown}")
-    require_utc_z(row["created_at"])      # loud gate BEFORE touching disk
+    require_utc_z(row["created_at"])  
+    if row["finished_at"] is not None:
+        require_utc_z(row["finished_at"])    # loud gate BEFORE touching disk
 
     path = Path(db_path) if db_path else resolve_db_path()
     conn = open_db(path)

@@ -22,6 +22,11 @@ Responsibilities (and nothing else):
   - LIVE: returns outcome=composed with the message attached; the
     transport stage (4d) finalizes to sent and records history
 
+finished_at doctrine (ratified 2026-11-11): every TERMINAL outcome
+stamped at resolution - dry_run successes and all compose failures
+get finished_at=now_utc_z(); a live composed result keeps None
+because it is not terminal yet (transport stamps it).
+
 compose_email NEVER raises: every fault, including internal bugs,
 becomes a failed SendResult (failure-isolation rule).
 """
@@ -170,7 +175,8 @@ def compose_email(server: ServerConfig, caller: CallerConfig,
     The merged mapping must carry a scalar 'subject'; all ${placeholders}
     the template declares must resolve. Returns OUTCOME_COMPOSED (live)
     or OUTCOME_DRY_RUN (+ .eml in the outbox), or OUTCOME_FAILED with
-    a precise error_class.
+    a precise error_class. finished_at is stamped on every terminal
+    outcome here; a live composed result carries finished_at=None.
     """
     send_id = _new_send_id()
     created_at = now_utc_z()
@@ -185,7 +191,8 @@ def compose_email(server: ServerConfig, caller: CallerConfig,
             mode=mode, outcome=OUTCOME_FAILED, error_class=error_class,
             attempts_used=0, recipient_count=recipient_count,
             subject="", error_summary=summary, run_id=run_id,
-            message=None, envelope_recipients=())
+            message=None, envelope_recipients=(),
+            finished_at=now_utc_z())      # compose failure IS terminal
 
     try:
         if not isinstance(data, Mapping):
@@ -224,7 +231,8 @@ def compose_email(server: ServerConfig, caller: CallerConfig,
                 mode=mode, outcome=OUTCOME_DRY_RUN, error_class=EC_NONE,
                 attempts_used=1, recipient_count=recipient_count,
                 subject=subject, error_summary=None, run_id=run_id,
-                message=None, envelope_recipients=envelope)
+                message=None, envelope_recipients=envelope,
+                finished_at=now_utc_z())   # dry-run IS terminal
 
         log.info("composed: caller=%s send_id=%s recipients=%d "
                  "attachments=%d", caller.name, send_id,
@@ -234,7 +242,8 @@ def compose_email(server: ServerConfig, caller: CallerConfig,
             mode=mode, outcome=OUTCOME_COMPOSED, error_class=EC_NONE,
             attempts_used=0, recipient_count=recipient_count,
             subject=subject, error_summary=None, run_id=run_id,
-            message=msg, envelope_recipients=envelope)
+            message=msg, envelope_recipients=envelope,
+            finished_at=None)              # not terminal until transport
 
     except _Fault as fault:
         return fail(fault.error_class, fault.summary)
