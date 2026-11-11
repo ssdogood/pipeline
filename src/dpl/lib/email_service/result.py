@@ -21,7 +21,10 @@ Timestamp doctrine (FR-20 + finished_at ratification, 2026-11-11):
 
 Outcome/error taxonomy: small and explicit so history queries are
 machine-filterable (the promoted error_class rationale). Compose
-classes live here since 4c; transport classes since 4d.
+classes since 4c; transport classes since 4d; facade classes
+(bad_caller, bad_config) since the acceptance slice - a typo'd
+caller name and a config fault are the two most likely integration
+mistakes, and each deserves its own filterable class.
 """
 from __future__ import annotations
 
@@ -49,6 +52,9 @@ EC_DISABLED = "disabled"
 EC_AUTH_FAILED = "auth_failed"       # credentials refused; never retried
 EC_REJECTED = "rejected"             # permanent 5xx; never retried
 EC_TRANSIENT = "transient_error"     # network/4xx; retried per config
+# facade classes (acceptance slice):
+EC_BAD_CALLER = "bad_caller"         # caller name not in config
+EC_BAD_CONFIG = "bad_config"         # config fault surfaced at call time
 
 
 @dataclass(frozen=True)
@@ -64,7 +70,7 @@ class SendResult:
     recipient_count: int
     subject: str                    # "" when composition failed early
     error_summary: str | None
-    run_id: str                    # pipeline run context, "-" if none
+    run_id: str                     # pipeline run context, "-" if none
     message: EmailMessage | None           # present when outcome=COMPOSED
     envelope_recipients: tuple[str, ...]    # To+CC+BCC; BCC never in headers
     finished_at: str | None = None  # terminal time; None until resolved
@@ -117,4 +123,6 @@ __all__ = [
     "EC_AUTH_FAILED",
     "EC_REJECTED",
     "EC_TRANSIENT",
+    "EC_BAD_CALLER",
+    "EC_BAD_CONFIG",
 ]

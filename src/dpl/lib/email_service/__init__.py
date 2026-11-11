@@ -17,3 +17,6 @@ Stage 4c: result.py - the structured never-raises SendResult, aligned
           sanitized, attachments gated at compose time), dry-run .eml
           outbox writer.
 """
+from dpl.lib.email_service.api import send_email
+
+__all__ = ["send_email"]

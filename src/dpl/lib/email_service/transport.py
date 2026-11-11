@@ -25,9 +25,16 @@ Error classification map (ORDER MATTERS - see classify_error):
   generic OSError branch or permanent 5xx refusals would be retried
   (the bug test_5xx_response_is_rejected caught in review).
 
-auth_scheme honored at the wire: 'basic' -> credentials resolved via
-pass_mgr (the only path - literals are load-time errors) then
-smtp.login(); 'none' -> NO vault fetch, NO LOGIN command.
+auth_scheme honored at the wire: 'basic' -> credentials resolved
+then smtp.login(); 'none' -> NO vault fetch, NO LOGIN command.
+Credential doctrine (asymmetric rule, ratified 2026-11-11):
+  - PASSWORD: vault ONLY, via password_ref. A literal 'password:'
+    key in YAML is a load-time error (config validation) - the vault
+    is the only password path there will ever be.
+  - USERNAME: vault via username_ref when set, otherwise the literal
+    'username:' key from config (public config by nature). Exactly
+    one of the two must exist - config enforces it; the guard in
+    _credentials is loud defense-in-depth.
 
 mode: plain emits exactly ONE WARNING per send (pre-loop, ratified),
 fixed wording - a retried send never stacks warning lines.
@@ -136,37 +143,62 @@ def classify_error(exc: Exception) -> TransportFailure:
 
 
 # --------------------------------------------------------------------------
-# credential resolution (vault refs, never literals)
+# credential resolution (vault for secrets, literal for public login)
 # --------------------------------------------------------------------------
 
 def _credentials(server: ServerConfig) -> tuple[str, str]:
-    """Resolve credentials for auth_scheme 'basic' via pass_mgr - the
-    ONLY path (literal username:/password: in YAML are load-time
-    errors by config validation). For auth_scheme 'none': no vault
-    fetch at all - returns ("", ""), no LOGIN command is sent.
+    """Resolve credentials for auth_scheme 'basic'.
+
+    PASSWORD: always via pass_mgr using server.password_ref - the
+    ONLY path (a literal 'password:' key in YAML is a load-time
+    error in config validation; that will never change).
+
+    USERNAME: from the vault when username_ref is set; otherwise the
+    literal 'username:' from config (public by nature, ratified
+    2026-11-11). Config validation guarantees exactly one of the two
+    exists; the guards below are loud defense-in-depth.
+
+    auth_scheme 'none': no vault fetch at all, no LOGIN command -
+    returns ("", "").
 
     A vault outage is NOT an auth failure (the relay is innocent) and
     NOT transient (retrying in 30s won't fix the vault): classified
     internal_error with a pointed summary."""
     if server.auth_scheme != "basic":
         return "", ""
-    u_ref, p_ref = server.username_ref, server.password_ref
-    if u_ref is None or p_ref is None:
+    if server.password_ref is None:
         # config validation should make this unreachable; loud anyway
         raise TransportFailure(
             EC_INTERNAL,
-            "auth_scheme 'basic' but username_ref/password_ref "
-            "missing from config", transient=False)
+            "auth_scheme 'basic' but password_ref missing from "
+            "config", transient=False)
     from dpl.lib import pass_mgr  # local import: keeps cold-start light
 
     try:
-        user = pass_mgr.get_secret(u_ref)
-        pw = pass_mgr.get_secret(p_ref)
+        pw = pass_mgr.get_secret(server.password_ref)
     except Exception as exc:
         raise TransportFailure(
             EC_INTERNAL,
-            f"credential fetch from vault failed: {exc}",
+            f"password fetch from vault failed: {exc}",
             transient=False) from exc
+
+    user_ref = server.username_ref
+    if user_ref is not None:
+        try:
+            user = pass_mgr.get_secret(user_ref)
+        except Exception as exc:
+            raise TransportFailure(
+                EC_INTERNAL,
+                f"username fetch from vault failed: {exc}",
+                transient=False) from exc
+    else:
+        user = server.username or ""
+        if not user:
+            # config validation should make this unreachable; loud anyway
+            raise TransportFailure(
+                EC_INTERNAL,
+                "auth_scheme 'basic' but neither 'username_ref' nor a "
+                "literal 'username' present in config", transient=False)
     return user, pw
 
 

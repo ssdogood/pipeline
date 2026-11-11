@@ -241,12 +241,18 @@ def test_reserved_collision_via_call_data_fails(tmp: Path) -> None:
 
 
 def test_non_mapping_data_never_raises(tmp: Path) -> None:
-    r = compose_email(                   # type: ignore[arg-type]
-        make_server(tmp), make_caller(tmp), None)
+    r = compose_email(make_server(tmp), make_caller(tmp), ["not", "a", "map"])  # type: ignore[arg-type]
     assert r.outcome == OUTCOME_FAILED
     assert r.error_class == EC_INTERNAL
     assert r.message is None, "no half-built message escapes"
 
+def test_none_data_uses_config_data_only(tmp: Path) -> None:
+    caller = make_caller(tmp, data={"subject": "config subject",
+                                    "title": "T", "status": "ok"})
+    r = compose_email(               # type: ignore[arg-type]
+        make_server(tmp), caller, None)
+    assert r.outcome == OUTCOME_COMPOSED
+    assert r.subject == "config subject"
 
 # ----------------------------------------------------------------- ATTACH ---
 
@@ -417,6 +423,8 @@ def main() -> int:
          test_compose_failure_stamps_finished_at),
         ("composed_result_finished_at_is_none",
          test_composed_result_finished_at_is_none),
+         ("none_data_uses_config_data_only", 
+         test_none_data_uses_config_data_only),
     ]
     failures: list[str] = []
     with tempfile.TemporaryDirectory() as td:

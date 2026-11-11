@@ -1,0 +1,72 @@
+# config/email_service.yaml — starter configuration for the dpl
+# email service.
+#
+# SAFE BY DEFAULT: dry_run is true, so send_email() composes real
+# messages, writes .eml files into the outbox, records history rows —
+# and never touches a network socket.
+#
+# GOING LIVE — edit exactly these five things:
+#   1. host          — real relay hostname
+#   2. mode / port   — ssl+465 (recommended) | starttls+587 | plain+25
+#   3. auth.username — real relay login name (public config)
+#   4. password_ref  — keep smtp.password.secret; vault it via scan
+#   5. dry_run: false
+# Then also review: sender, and every caller's recipient list.
+#
+# CREDENTIAL DOCTRINE: the password lives ONLY in the vault, fetched
+# at send time by its ref. It enters through the masked prompt during
+# a vault scan, which discovers it from the smtp credentials file. A
+# literal 'password:' key in this file is a LOAD ERROR — by design.
+
+email:
+  host: smtp.example.org            # CHANGE-ME: relay hostname
+  port: 465
+  mode: ssl                         # ssl | starttls | plain (opt-in,
+                                    # warns on every send)
+  auth:
+    scheme: basic
+    username: CHANGE-ME-relay-user  # literal OK (public config);
+                                    # OR username_ref (vault) — never both
+    password_ref: smtp.password.secret
+  sender: dpl-pipeline@example.org  # CHANGE-ME: From address
+  allow_html: false                 # capability ceiling
+  allow_bcc: false                  # capability gate
+  allowed_recipient_domains: []     # [] = any domain
+  attachments:
+    allowed_extensions: [csv, xlsx, log, txt, parquet]
+    max_total_mb: 10
+  retries: 2                        # transient-error retries
+  timeout_sec: 30
+  dry_run: true                     # REQUIRED key — false only when live
+  templates_dir: config/email_templates
+  outbox_dir: logs/email_outbox     # dry-run .eml drops land here
+
+callers:
+  # Acceptance-script caller; also the worked example for new callers.
+  # Template: config/email_templates/selftest.txt (reserved keys only,
+  # so data needs nothing but a subject).
+  selftest:
+    enabled: true
+    to: [ops@example.org]           # CHANGE-ME: real recipient(s)
+    cc: []
+    bcc: []
+    template: selftest.txt
+    use_html: false
+    data:
+      subject: "[dpl] email service selftest"
+    attachments: []
+
+  # Skeleton for your first real caller. Copy, rename, enable — and
+  # create its template file under config/email_templates/ first.
+  # Commented out because this template does not exist yet.
+  #
+  # daily_report:
+  #   enabled: false
+  #   to: [ops@example.org]
+  #   cc: []
+  #   bcc: []
+  #   template: daily_run_summary.txt
+  #   use_html: false
+  #   data:
+  #     subject: "[dpl] daily report"
+  #   attachments: []

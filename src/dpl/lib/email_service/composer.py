@@ -195,6 +195,8 @@ def compose_email(server: ServerConfig, caller: CallerConfig,
             finished_at=now_utc_z())      # compose failure IS terminal
 
     try:
+        if data is None:
+            data = {}      # no call-time values: caller config data only
         if not isinstance(data, Mapping):
             raise _Fault(EC_INTERNAL,
                          f"data must be a mapping, got "

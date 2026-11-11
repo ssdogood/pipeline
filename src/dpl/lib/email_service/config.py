@@ -26,8 +26,10 @@ Config file shape (default: config/email_service.yaml):
                                         # never negotiated or fallen back
       auth:
         scheme: basic                   # basic | none
-        username_ref: smtp/username     # VAULT REFS ONLY - a literal
-        password_ref: smtp/password     # 'password:' key is an ERROR
+        username: relay-user            # literal is OK (public config);
+                                        # OR username_ref (vault) - never both
+        password_ref: smtp.password.secret  # vault ONLY - a literal
+                                        # 'password:' key is an ERROR
       sender: dpl-pipeline@example.org
       allow_html: false                 # capability ceiling (default false)
       allow_bcc: false                  # capability gate (default false)
@@ -78,7 +80,7 @@ RESERVED_TEMPLATE_KEYS = frozenset(
 _MODES = ("ssl", "starttls", "plain")
 _DEFAULT_PORT = {"ssl": 465, "starttls": 587, "plain": 25}
 _AUTH_SCHEMES = ("none", "basic")
-_AUTH_FORBIDDEN_LITERALS = ("username", "password")
+_AUTH_FORBIDDEN_LITERALS = ("password",)
 _DEFAULT_ATTACH_EXTENSIONS = ("csv", "xlsx", "log", "txt", "parquet")
 _DEFAULT_MAX_ATTACH_MB = 10.0
 
@@ -94,7 +96,8 @@ _GLOBAL_KEYS = frozenset({
     "dry_run", "templates_dir", "outbox_dir",
 })
 _AUTH_KEYS = frozenset(
-    {"scheme", "username_ref", "password_ref"} | set(_AUTH_FORBIDDEN_LITERALS))
+    {"scheme", "username", "username_ref", "password_ref"}
+    | set(_AUTH_FORBIDDEN_LITERALS))
 _ATTACH_KEYS = frozenset({"allowed_extensions", "max_total_mb"})
 _CALLER_KEYS = frozenset({
     "enabled", "to", "cc", "bcc", "template", "use_html", "data",
@@ -132,6 +135,7 @@ class ServerConfig:
     dry_run: bool
     templates_dir: Path
     outbox_dir: Path
+    username: str | None = None  # literal login (public); None = refs only
 
 
 @dataclass(frozen=True)
@@ -260,6 +264,7 @@ def _load_server(raw: object, errors: list[str]) -> ServerConfig:
     scheme = "none"
     user_ref: str | None = None
     pass_ref: str | None = None
+    username: str | None = None
     if not isinstance(auth, dict):
         errors.append("'email.auth' section is required "
                       "(scheme: basic or none)")
@@ -281,16 +286,29 @@ def _load_server(raw: object, errors: list[str]) -> ServerConfig:
         elif scheme == "basic":
             user_ref = auth.get("username_ref")
             pass_ref = auth.get("password_ref")
-            if not isinstance(user_ref, str) or not user_ref.strip():
-                errors.append(
-                    "'email.auth.username_ref' is required when "
-                    "scheme=basic (vault reference, not a literal)")
-                user_ref = None
+            username = auth.get("username")
+            if isinstance(username, str) and not username.strip():
+                username = None
             if not isinstance(pass_ref, str) or not pass_ref.strip():
                 errors.append(
                     "'email.auth.password_ref' is required when "
-                    "scheme=basic (vault reference, not a literal)")
+                    "scheme=basic (vault reference, never a literal)")
                 pass_ref = None
+            has_ref = isinstance(user_ref, str) and bool(user_ref.strip())
+            has_lit = isinstance(username, str) and bool(username.strip())
+            if has_ref and has_lit:
+                errors.append(
+                    "'email.auth' accepts EITHER a literal 'username:' "
+                    "(public config) OR a vault 'username_ref:', not both")
+            elif not has_ref and not has_lit:
+                errors.append(
+                    "'email.auth' needs a login identity when "
+                    "scheme=basic: either a literal 'username:' or a "
+                    "vault 'username_ref:'")
+                user_ref = None
+                username = None
+            if not has_ref:
+                user_ref = None
 
     allow_html = raw.get("allow_html", False)
     if not isinstance(allow_html, bool):
@@ -387,7 +405,8 @@ def _load_server(raw: object, errors: list[str]) -> ServerConfig:
             "configured - every send will log this warning")
     return ServerConfig(
         host=host, port=port, mode=mode, auth_scheme=scheme,
-        username_ref=user_ref, password_ref=pass_ref, sender=sender,
+        username_ref=user_ref, password_ref=pass_ref, username=username,
+        sender=sender,
         allow_html=allow_html, allow_bcc=allow_bcc,
         allowed_domains=tuple(domains), attach_extensions=extensions,
         max_attach_mb=max_mb, retries=retries, timeout_sec=timeout_sec,
