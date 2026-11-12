@@ -77,6 +77,12 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "email_service.yaml"
 RESERVED_TEMPLATE_KEYS = frozenset(
     {"generated_at", "send_id", "caller"})
 
+#: Tier-1 callers that may never be disabled via config. Failure alerts
+#: are constitutionally on: a silenced run_failed means failed runs can
+#: pass silently, which is the one outcome this service exists to
+#: prevent. 'enabled: false' on one of these is a LOUD load error.
+PROTECTED_CALLERS = frozenset({"run_failed"})
+
 _MODES = ("ssl", "starttls", "plain")
 _DEFAULT_PORT = {"ssl": 465, "starttls": 587, "plain": 25}
 _AUTH_SCHEMES = ("none", "basic")
@@ -103,7 +109,7 @@ _CALLER_KEYS = frozenset({
     "enabled", "to", "cc", "bcc", "template", "use_html", "data",
     "attachments",
 })
-
+PROTECTED_CALLERS = frozenset({"run_failed"})
 
 class ConfigError(Exception):
     """All email configuration faults, collected and reported together."""
@@ -417,6 +423,12 @@ def _load_server(raw: object, errors: list[str]) -> ServerConfig:
 def _load_caller(name: str, raw: object, server: ServerConfig,
                  errors: list[str]) -> CallerConfig | None:
     where = f"callers.{name}"
+    if (name in PROTECTED_CALLERS
+            and isinstance(raw, dict)
+            and raw.get("enabled") is False):
+        errors.append(
+            f"{where}: Tier-1 protected caller - 'enabled: false' is not "
+            f"permitted (failure alerts can never be switched off)")
     if not _CALLER_NAME_RE.fullmatch(name):
         errors.append(f"{where}: caller name must be lowercase "
                       f"alphanumeric/underscore/dash/dot, got {name!r}")

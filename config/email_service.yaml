@@ -70,3 +70,43 @@ callers:
   #   data:
   #     subject: "[dpl] daily report"
   #   attachments: []
+
+  # ── EVENT: run_started ─────────────────────────────────────────
+  # TIER 3 (dormant). Fires once per run, at run_id creation.
+  # MAIL BUDGET: 1/run. Data keys: run_id, profile, tables.
+  run_started:
+    enabled: true
+    to: [ops@yourdomain.org]              # CHANGE-ME
+    template: run_started.txt
+    data:
+      subject: "[dpl] run started"
+
+  # ── EVENT: run_completed ───────────────────────────────────────
+  # TIER 2 (opt-in). Fires once, on clean exit (exit 0).
+  # MAIL BUDGET: 1/run. Data keys: run_id, profile, pipes, status.
+  run_completed:
+    enabled: true
+    to: [ops@yourdomain.org]              # CHANGE-ME
+    template: run_completed.txt
+    data:
+      subject: "[dpl] run completed OK"
+
+  # ── EVENT: run_failed ───────────────────────────────────────────
+  # TIER 1 (ALWAYS-ON). 'enabled: false' is REJECTED at load time -
+  # protected in config.py (PROTECTED_CALLERS). Fires once, on any
+  # non-zero exit after start. MAIL BUDGET: 1/failure.
+  # Data keys: run_id, profile, status, exit_code, failed_pipes.
+  #
+  # ── v2 PROVISION (reserved seam) ────────────────────────────────
+  # Dynamic attachments, generated at send time from the history DB.
+  # Unknown provider names are a LOUD config error today; v2 will
+  # implement:
+  #   failed_tables_csv  - failed tables for this run_id, attached CSV
+  #   failed_tables_json - same, as JSON
+  # attachment_providers: [failed_tables_csv]
+  run_failed:
+    enabled: true
+    to: [ops@yourdomain.org]              # CHANGE-ME
+    template: run_failed.txt
+    data:
+      subject: "[dpl] run FAILED - operator attention required"

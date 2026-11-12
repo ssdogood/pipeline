@@ -1,0 +1,8 @@
+DPL run COMPLETED successfully.
+
+Run ID:  ${run_id}
+Profile: ${profile}
+Pipes:   ${pipes}
+Status:  ${status}
+
+Full log: grep "run_id=${run_id}" logs/dpl_pipeline.log
