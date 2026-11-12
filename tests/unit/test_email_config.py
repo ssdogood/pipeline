@@ -327,6 +327,34 @@ def test_use_html_ok_when_global_on(tmp_path: Path) -> None:
     assert cfg.callers["daily_report"].use_html is False  # unchanged
     assert cfg.server.allow_html is True
 
+# --------------------------------------------- protected Tier-1 caller -----
+
+_RUN_FAILED_TRUE = (
+    "  run_failed:\n"
+    "    enabled: true\n"
+    "    to: [ops@example.org]\n"
+    "    cc: [lead@example.org]\n"
+    "    bcc: []\n"
+    "    template: summary.txt\n"
+    "    use_html: false\n"
+    "  daily_report:"
+)
+
+_RUN_FAILED_FALSE = _RUN_FAILED_TRUE.replace("    enabled: true",
+                                             "    enabled: false")
+
+
+def test_protected_caller_rejected_when_disabled(tmp_path: Path) -> None:
+    """'enabled: false' on run_failed is a LOUD load error (Tier-1)."""
+    errs = errors_of(tmp_path, "  daily_report:", _RUN_FAILED_FALSE)
+    assert any("Tier-1 protected caller" in e for e in errs), errs
+
+
+def test_protected_caller_allowed_when_enabled(tmp_path: Path) -> None:
+    """enabled: true (or absent/false-anywhere-else) loads normally."""
+    cfg = cfg_with(tmp_path, "  daily_report:", _RUN_FAILED_TRUE)
+    c = load_email_config(cfg)          # must NOT raise
+    assert "run_failed" in c.callers
 
 def test_missing_template_file_rejected(tmp_path: Path) -> None:
     errs = errors_of(tmp_path, "    template: summary.txt\n",
