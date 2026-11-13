@@ -20,7 +20,7 @@ release bundle at build time.
    pytest -v
    ```
 
-   Expect all suites passing and 6 deselected (integration tests — they
+   Expect all suites passing and 7 deselected (integration tests — they
    need live servers and are not part of the offline certification).
 3. **The pinned SOPS/age binaries are present in `bin/`** so the
    builder-side run exercises the binary-dependent suites too. The
