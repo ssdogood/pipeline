@@ -49,6 +49,9 @@ def tmp_project(tmp_path, monkeypatch):
     monkeypatch.setattr(vault_ops, "PROJECT_ROOT", pr)
     monkeypatch.setattr(vault_ops, "CONFIG_DIR", pr / "config")
     monkeypatch.setattr(vault_ops, "EXTRACTORS_DIR", pr / "config" / "extractors")
+    (pr / "config" / "smtp").mkdir(parents=True)
+    monkeypatch.setattr(vault_ops, "SMTP_CREDENTIALS_DIR",
+                        pr / "config" / "smtp")
     monkeypatch.setattr(vault_ops, "SECRETS_DIR", pr / "secrets")
     monkeypatch.setattr(vault_ops, "BACKUP_DIR", pr / "secrets" / "backups")
     monkeypatch.setattr(vault_ops, "LOG_FILE", pr / "secrets" / "logs" / "x.log")

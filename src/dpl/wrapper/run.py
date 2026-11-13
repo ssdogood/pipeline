@@ -190,6 +190,22 @@ def _utc_now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _notify(event: str, run_id: str, data: dict[str, object]) -> None:
+    """Fire one email event. NEVER affects the run's exit code (FR-17).
+
+    Failure isolation runs both ways: a broken email stack must not
+    damage a data run. The late import keeps a damaged install from
+    killing the wrapper at import time; the broad except guards even
+    a misbehaving facade.
+    """
+    nlog = get_run_logger("dpl.wrapper", run_id=run_id)
+    try:
+        from dpl.lib.email_service import send_email
+        r = send_email(caller=event, run_id=run_id, data=data)
+        nlog.info("email %s: %s (%s)", event, r.outcome, r.send_id)
+    except Exception as exc:              # noqa: BLE001 - email is never fatal
+        nlog.error("email event %s could not fire: %s", event, exc)
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m wrapper.run",
@@ -272,6 +288,13 @@ def main(argv: list[str] | None = None) -> int:
     log.info("wrapper start: profile=%s run_id=%s tables=%s",
              args.profile, run_id, only_tables or "all")
 
+    # Tier-3 event (dormant by default; config-governed)
+    _notify("run_started", run_id, {
+        "run_id": run_id,
+        "profile": args.profile,
+        "tables": ", ".join(only_tables) if only_tables else "all",
+    })
+
     # ------------------------------------------------------------------
     # History: insert the 'running' row so a crash leaves a visible stub
     # ------------------------------------------------------------------
@@ -295,6 +318,7 @@ def main(argv: list[str] | None = None) -> int:
     # Execute steps: record-and-continue semantics
     # ------------------------------------------------------------------
     extract_failed = False
+    failed_pipes: list[str] = []
     manifests: dict[str, dict] = {}
 
     for step in steps:
@@ -343,6 +367,7 @@ def main(argv: list[str] | None = None) -> int:
                             log.error("pipe %s: config failed validation "
                                       "(%s)", pipe.name, pipe.path)
                             extract_failed = True
+                            failed_pipes.append(pipe.name)
                             continue
 
                         ext_mod = importlib.import_module(
@@ -359,9 +384,11 @@ def main(argv: list[str] | None = None) -> int:
                         # wrapper-state stamp never landed in manifests.
                         if any_failed:
                             extract_failed = True
+                            failed_pipes.append(pipe.name)
                     except Exception as exc:                                # noqa: BLE001 - pipeline boundary: one failing pipe must not kill the run
                         log.error("pipe %s failed: %s", pipe.name, exc)
                         extract_failed = True
+                        failed_pipes.append(pipe.name)
 
             elif name == "update_history":
                 ingested, skipped = update_history(
@@ -450,6 +477,24 @@ def main(argv: list[str] | None = None) -> int:
                        "`python -m wrapper.update_history`", exc)
             history_failed = True
             exit_code = EXIT_HISTORY
+
+    # ── Email events: fire after final state is known, before exit ──
+    # Exactly one terminal event per run. Tier protection for
+    # run_failed lives in config.py (enabled: false -> load error).
+    if exit_code == EXIT_OK:
+        _notify("run_completed", run_id, {
+            "run_id": run_id, "profile": args.profile,
+            "pipes": str(len(pipes)), "status": "success",
+        })
+    else:
+        status = ("partial_failure" if extract_failed
+                  else ("history_error" if history_failed else "success"))
+        _notify("run_failed", run_id, {
+            "run_id": run_id, "profile": args.profile,
+            "status": status, "exit_code": str(exit_code),
+            "failed_pipes": ", ".join(sorted(set(failed_pipes)))
+            if failed_pipes else "unknown (see log)",
+        })
 
     log.info("wrapper done: run_id=%s profile=%s exit=%s%s",
              run_id, args.profile, exit_code,

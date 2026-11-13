@@ -61,6 +61,7 @@ from cryptography.fernet import Fernet, InvalidToken
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
 EXTRACTORS_DIR = PROJECT_ROOT / "config" / "extractors"
+SMTP_CREDENTIALS_DIR = PROJECT_ROOT / "config" / "smtp"
 SECRETS_DIR = PROJECT_ROOT / "secrets"
 BACKUP_DIR = SECRETS_DIR / "backups"
 LOG_FILE = SECRETS_DIR / "logs" / "dpl_pass_mgr.log"
@@ -248,8 +249,11 @@ def discover_credential_refs() -> list:
     if not EXTRACTORS_DIR.is_dir():
         log_action("SCAN", f"extractors directory not found at {EXTRACTORS_DIR}")
         return refs
-
     cfg_files = sorted(EXTRACTORS_DIR.glob("*.yaml"))
+    # SMTP credentials live in their own folder (NOT an extractor);
+    # same connections/users/credential_ref shape as extractor files.
+    if SMTP_CREDENTIALS_DIR.is_dir():
+        cfg_files += sorted(SMTP_CREDENTIALS_DIR.glob("*.yaml"))
     for cfg_file in cfg_files:
         try:
             cfg = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))

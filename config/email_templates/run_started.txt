@@ -1,0 +1,7 @@
+DPL run started.
+
+Run ID:  ${run_id}
+Profile: ${profile}
+Tables:  ${tables}
+
+(Tier-3 informational event.)

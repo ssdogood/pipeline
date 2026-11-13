@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import logging.config
 import os
+import time
 from pathlib import Path
 
 import yaml
@@ -50,6 +51,19 @@ CONTEXT_DEFAULTS = {"run_id": "-", "table": "-"}
 
 ROOT_LOGGER_NAME = "dpl"
 
+class UtcFormatter(logging.Formatter):
+    """Formatter whose asctime renders in UTC (doctrine: rev2 timestamps).
+
+    logging.Formatter defaults to LOCAL time via time.localtime().
+    The dpl timestamp doctrine is ISO-8601 UTC, literal Z suffix, no
+    fractional seconds - identical to lib/timefmt.py. Setting the
+    converter at CLASS level plus the Z-bearing datefmt yields exactly
+    that. Scoped to formatters our config names explicitly; third-party
+    loggers in the same process keep their own rendering (no global
+    monkeypatch, no surprises we do not own).
+    """
+
+    converter = time.gmtime
 
 def _load_config(path: Path = DEFAULT_CONFIG_PATH) -> dict:
     """Load logging config from YAML; fall back to built-in defaults if missing."""
@@ -66,9 +80,11 @@ def _default_config() -> dict:
         "disable_existing_loggers": False,
         "formatters": {
             "standard": {
+                "()": "dpl.lib.logger.UtcFormatter",
                 "format": "%(asctime)s | %(name)s | %(funcName)s | "
                           "%(levelname)-8s | run_id=%(run_id)s | "
                           "table=%(table)s | %(message)s",
+                "datefmt": "%Y-%m-%dT%H:%M:%SZ",
                 "defaults": CONTEXT_DEFAULTS,
             },
         },

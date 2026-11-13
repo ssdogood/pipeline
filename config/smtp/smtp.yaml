@@ -1,0 +1,9 @@
+# config/smtp.yaml — pseudo-connection for the vault scanner.
+# SMTP is not an extractor, but it consumes vault secrets like one.
+# Only the password is managed; the username is public config.
+connections:
+  smtp:
+    type: smtp
+    users:
+      password:
+        credential_ref: smtp.password.secret

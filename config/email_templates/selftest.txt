@@ -1,0 +1,4 @@
+dpl email-service selftest
+Caller:   ${caller}
+Send ID:  ${send_id}
+Sent at:  ${generated_at}

@@ -1,0 +1,11 @@
+DPL run FAILED - operator attention required.
+
+Run ID:       ${run_id}
+Profile:      ${profile}
+Status:       ${status}
+Exit code:    ${exit_code}
+Failed pipes: ${failed_pipes}
+
+Full log: grep "run_id=${run_id}" logs/dpl_pipeline.log
+History repair (if status=history_error):
+    python -m wrapper.update_history

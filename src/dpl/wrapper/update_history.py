@@ -1,8 +1,8 @@
-# wrapper/update_history.py
-"""SQLite history for run manifests - the ONLY database-touching module.
+# dpl/wrapper/update_history.py
+"""SQLite history for run manifests - manifest-ingestion specialist.
 
 Two call paths:
-  1. Standalone recovery:  python -m wrapper.update_history [--db ...]
+  1. Standalone recovery:  python -m dpl.wrapper.update_history [--db ...]
   2. Wrapper final step:   update_history(settings, db_path) (slice 4)
 
 Model (design note rev2 §6):
@@ -12,83 +12,39 @@ Model (design note rev2 §6):
   - the scan window equals manifest retention (default 90 days) - files
     outside the window don't exist, so the filesystem bounds the scan
 
-DB is created with DDL on first open (staging/_history/ auto-mkdir).
-"""
+OWNERSHIP SPLIT (stage 3 refactor, 2026-11-10):
+  Since stage 2, dpl.lib.history_db is the ONLY module in the pipeline
+  that touches sqlite3. This module KEEPS its manifest-ingestion SQL,
+  its CLI, and its exit codes, but obtains everything else from there:
 
+      connections, WAL/busy_timeout pragmas, db-path rules
+          -> dpl.lib.history_db (open_db, default_db_path, validate_db_path)
+
+  SCHEMA CHANGE OF BEHAVIOR: this module no longer creates tables on
+  first open. The schema is installed explicitly, once per machine:
+
+      python scripts/init_history_db.py [--db PATH]
+
+  (idempotent; also upgrades a deployed DB in place). Ingesting into an
+  uninitialized database fails loudly with that instruction.
+"""
 from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import sys
 from datetime import date, timedelta
 from pathlib import Path
 
 from dpl.lib.common import get_run_logger, load_settings
+from dpl.lib.history_db import (
+    DbError,
+    default_db_path,
+    open_db,
+    validate_db_path,
+)
 
 log = get_run_logger("dpl.history")
-
-DDL = """
-CREATE TABLE IF NOT EXISTS runs (
-    run_id      TEXT PRIMARY KEY,
-    profile     TEXT NOT NULL,
-    started_at  TEXT NOT NULL,
-    finished_at TEXT,               -- max across the run's folder manifests
-    status      TEXT NOT NULL,      -- success | partial_failure | failed | running
-    exit_code   INTEGER              -- wrapper-level; NULL until slice 4
-);
-CREATE TABLE IF NOT EXISTS table_runs (
-    run_id       TEXT NOT NULL REFERENCES runs(run_id),
-    folder       TEXT NOT NULL,
-    table_name   TEXT NOT NULL,
-    connection   TEXT,
-    schema       TEXT,
-    status       TEXT NOT NULL,
-    rows_read    INTEGER,
-    rows_written INTEGER,
-    duration_sec REAL,
-    output_path  TEXT,
-    error        TEXT,
-    PRIMARY KEY (run_id, folder, table_name)
-);
-"""
-
-
-def default_db_path(settings: dict) -> Path:
-    """Provisional default: <landing_root>/_history/dpl_history.db.
-
-    Same sibling-of-date-dirs pattern as runs_root. Slice 4 lets
-    wrapper.yaml override via db_path_for().
-    """
-    return Path(settings["paths"]["landing_root"]) / "_history" / "dpl_history.db"
-
-
-def validate_db_path(db_path: Path, settings: dict) -> None:
-    """Reject a DB living inside a landing DATA directory.
-
-    Rule: history must not sit in the data path. The
-    check: the resolved db_path must not lie under a date-named
-    directory (<landing_root>/<YYYY-MM-DD>/...). landing_root itself
-    and non-date siblings (_history/, _runs/) are allowed.
-    """
-    db_path = db_path.resolve()
-    landing = Path(settings["paths"]["landing_root"]).resolve()
-    try:
-        rel = db_path.relative_to(landing)
-    except ValueError:
-        return                      # outside landing entirely: fine
-    if rel.parts and rel.parts[0][:4].isdigit():
-        raise ValueError(
-            f"history db path must not live inside a landing data "
-            f"directory: {db_path} (under {landing / rel.parts[0]})")
-
-
-def open_db(db_path: Path) -> sqlite3.Connection:
-    """Open (creating if needed) and apply DDL. Caller owns the conn."""
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.executescript(DDL)
-    return conn
 
 
 def discover_manifests(runs_root: str | Path, days: int = 90
@@ -117,12 +73,16 @@ def discover_manifests(runs_root: str | Path, days: int = 90
     return found
 
 
-def ingest_manifest(conn: sqlite3.Connection, mpath: Path) -> None:
+def ingest_manifest(conn, mpath: Path) -> None:
     """Upsert one envelope: 1 runs row + N table_runs rows.
 
     INSERT OR REPLACE on runs keeps finished_at monotonically current
     across the run's folders (later manifests win); a wrapper-written
     'running' row gets overwritten by the manifest's final state.
+
+    NOTE: `conn` is untyped on purpose - this module must not name
+    sqlite3 types; every connection it uses arrives from
+    dpl.lib.history_db.open_db().
     """
     env = json.loads(mpath.read_text(encoding="utf-8"))
     conn.execute(
@@ -146,7 +106,7 @@ def ingest_manifest(conn: sqlite3.Connection, mpath: Path) -> None:
              t.get("error")))
 
 
-def existing_identities(conn: sqlite3.Connection) -> set[tuple[str, str, str]]:
+def existing_identities(conn) -> set[tuple[str, str, str]]:
     """(run_id, folder, table_name) pairs already persisted."""
     rows = conn.execute(
         "SELECT run_id, folder, table_name FROM table_runs").fetchall()
@@ -166,15 +126,23 @@ def update_history(settings: dict, db_path: Path, days: int = 90,
     runs_root = settings["paths"]["runs_root"]
     discovered = discover_manifests(runs_root, days)
 
-    conn = open_db(db_path)
+    conn = open_db(db_path)      # from history_db; schema NOT created here
     try:
-        known = existing_identities(conn)
+        try:
+            known = existing_identities(conn)
+        except DbError as exc:
+            if "no such table" in str(exc):
+                raise RuntimeError(
+                    f"history schema is not installed in {db_path}; run "
+                    f"'python scripts/init_history_db.py' once, then "
+                    f"retry") from exc
+            raise
         todo, skipped = [], 0
         for run_id, folder, mpath in discovered:
             # peek identity triples without full ingest: cheap pre-pass
             env = json.loads(mpath.read_text(encoding="utf-8"))
             triples = {(run_id, folder, t["name"].lower())
-                      for t in env.get("tables", [])}
+                       for t in env.get("tables", [])}
             if triples <= known:
                 skipped += 1
                 continue
@@ -197,7 +165,7 @@ def update_history(settings: dict, db_path: Path, days: int = 90,
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m wrapper.update_history",
+        prog="python -m dpl.wrapper.update_history",
         description="Ingest manifest envelopes into the SQLite history DB")
     parser.add_argument("--db", help="DB path (default: derived from settings)")
     parser.add_argument("--settings", default="config/settings.laptop.yaml")
@@ -218,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"history: {ingested} ingested, {skipped} up to date "
               f"-> {db_path}")
         return 0
-    except (ValueError, sqlite3.Error, OSError) as exc:
+    except (ValueError, DbError, RuntimeError, OSError) as exc:
         log.error("history update failed: %s", exc)
         print(f"history update failed: {exc}", file=sys.stderr)
         return 2                                        # SQLite/system failure

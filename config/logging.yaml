@@ -10,13 +10,18 @@
 # project's environment). The REAL guarantee that every record carries
 # run_id/table is the LoggerAdapter from get_run_logger() - all component
 # loggers emit through it, never through a bare getLogger().
+#
+# ASCTIME: rendered in UTC with a literal Z (lib/logger.py UtcFormatter),
+# matching the dpl timestamp doctrine everywhere (history, email, logs).
 # ==============================================================================
 version: 1
 disable_existing_loggers: false
 
 formatters:
   standard:
+    (): dpl.lib.logger.UtcFormatter
     format: "%(asctime)s | %(name)s | %(funcName)s | %(levelname)-8s | run_id=%(run_id)s | table=%(table)s | %(message)s"
+    datefmt: "%Y-%m-%dT%H:%M:%SZ"
     defaults:
       run_id: "-"
       table: "-"
