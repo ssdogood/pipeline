@@ -201,4 +201,5 @@ becomes `v<next>`, never a retag.
 | Version | Date | Result | Notes |
 |---|---|---|---|
 | v0.1.0 | 2026-11-07 | GREEN (FERNET-ONLY), 136 passed / 25 skipped; 4 OK, diff silent | First release. Lessons folded into §6: zsh glob on inline notes → `--notes-file`; `gh` outside repo → `--repo`. |
-| | | | |
+| v0.1.1 | 2026-11-09 | GREEN (FERNET-ONLY), 136 passed / 25 skipped; 4 OK, diff silent | Cleanup release. pyrefly 47→0, ruff 36→0, mkstemp descriptor leak fixed, executable bits normalized, pyasn1>=0.6.5 floor (CVE-2026-119194). Publish hiccups fixed post-tag: stale v0.1.0 assets swept in by wildcard assets; §6.3 now mandates explicit asset names; hostname placeholder in notes eaten by renderer. |
+| v0.2.0 | 2026-11-13 | GREEN (FERNET-ONLY), 326 passed / 25 skipped; 5 assets, diff silent | Feature release: email notification service (tiered events, audited sends, twin HTML bodies); UTC-Z timestamps with conformance verifier. |
