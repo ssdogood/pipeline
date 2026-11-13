@@ -21,7 +21,7 @@ profiles:
 
   full:                     # nightly default: regenerate, reconcile, extract all
     steps:
-      - {name: generate_schemas, force: true}
+      - {name: generate_schemas, force: false}
       - {name: reconcile_pending}
       - {name: extract, force: true}
       - {name: update_history}
