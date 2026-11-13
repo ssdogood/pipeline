@@ -190,10 +190,13 @@ def test_body_has_reserved_stamps(tmp: Path) -> None:
 def test_html_subtype_when_requested(tmp: Path) -> None:
     server = make_server(tmp, allow_html=True)
     caller = make_caller(tmp, use_html=True)
+    (tmp / "templates" / "tpl.html").write_text(HTML_TPL, encoding="utf-8")
     r = compose_email(server, caller, GOOD_DATA)
     msg = r.message
     assert msg is not None
-    assert msg.get_content_subtype() == "html"
+    assert msg.get_content_type() == "multipart/alternative"
+    parts = _parts(msg)
+    assert "html" in parts and "plain" in parts
 
 
 def test_config_data_merged_under_call_data(tmp: Path) -> None:
@@ -381,6 +384,72 @@ def test_composed_result_finished_at_is_none(tmp: Path) -> None:
 
 # ------------------------------------------------------ standalone runner ----
 
+HTML_TPL = ("<html><body><p>${title}</p>"
+            "<p>status: ${status}</p></body></html>")
+
+
+def _parts(msg: email.message.Message) -> dict[str, str]:
+    """Map subtype -> decoded text for every part of a message."""
+    out: dict[str, str] = {}
+    for part in msg.walk():
+        if part.get_content_maintype() == "text":
+            payload = part.get_payload(decode=True)
+            out[part.get_content_subtype()] = (
+                payload.decode("utf-8")
+                if isinstance(payload, bytes) else "")
+    return out
+
+
+def test_html_twin_builds_alternative(tmp: Path) -> None:
+    caller = make_caller(tmp, use_html=True,
+                         data={"subject": "S", "title": "T",
+                               "status": "ok"})
+    (tmp / "templates" / "tpl.html").write_text(HTML_TPL, encoding="utf-8")
+    r = compose_email(make_server(tmp), caller, None)
+    assert r.outcome == OUTCOME_COMPOSED
+    msg = r.message
+    assert msg is not None
+    assert msg.get_content_type() == "multipart/alternative"
+    parts = _parts(msg)
+    assert set(parts) == {"plain", "html"}
+
+
+def test_html_twin_missing_falls_back_plain(tmp: Path) -> None:
+    # No tpl.html written: cosmetic absence must never block a send.
+    caller = make_caller(tmp, use_html=True,
+                         data={"subject": "S", "title": "T",
+                               "status": "ok"})
+    r = compose_email(make_server(tmp), caller, None)
+    assert r.outcome == OUTCOME_COMPOSED
+    msg = r.message
+    assert msg is not None
+    assert msg.get_content_type() == "text/plain"   # fallback proven
+
+
+def test_data_values_escaped_in_html_intact_in_plain(tmp: Path) -> None:
+    evil = "<script>alert(1)</script>"
+    caller = make_caller(tmp, use_html=True,
+                         data={"subject": "S", "title": evil,
+                               "status": "ok"})
+    (tmp / "templates" / "tpl.html").write_text(HTML_TPL, encoding="utf-8")
+    r = compose_email(make_server(tmp), caller, None)
+    assert r.outcome == OUTCOME_COMPOSED
+    parts = _parts(r.message)                  # type: ignore[arg-type]
+    assert "&lt;script&gt;" in parts["html"]   # escaped: displays, never runs
+    assert evil in parts["plain"]              # plain twin stays faithful
+
+
+def test_no_use_html_ignores_existing_twin(tmp: Path) -> None:
+    caller = make_caller(tmp, use_html=False,
+                         data={"subject": "S", "title": "T",
+                               "status": "ok"})
+    (tmp / "templates" / "tpl.html").write_text(HTML_TPL, encoding="utf-8")
+    r = compose_email(make_server(tmp), caller, None)
+    assert r.outcome == OUTCOME_COMPOSED
+    msg = r.message
+    assert msg is not None
+    assert msg.get_content_type() == "text/plain"   # twin present but unused
+
 
 def main() -> int:
     tests: list[tuple[str, Callable[[Path], object]]] = [
@@ -425,6 +494,13 @@ def main() -> int:
          test_composed_result_finished_at_is_none),
          ("none_data_uses_config_data_only", 
          test_none_data_uses_config_data_only),
+        ("html_twin_builds_alternative", test_html_twin_builds_alternative),
+        ("html_twin_missing_falls_back_plain",
+        test_html_twin_missing_falls_back_plain),
+        ("data_values_escaped_in_html_intact_in_plain",
+        test_data_values_escaped_in_html_intact_in_plain),
+        ("no_use_html_ignores_existing_twin",
+        test_no_use_html_ignores_existing_twin),
     ]
     failures: list[str] = []
     with tempfile.TemporaryDirectory() as td:

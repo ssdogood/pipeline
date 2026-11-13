@@ -32,6 +32,7 @@ becomes a failed SendResult (failure-isolation rule).
 """
 from __future__ import annotations
 
+import html
 import mimetypes
 import re
 import uuid
@@ -128,6 +129,7 @@ def _gather_attachments(caller: CallerConfig,
 
 def _build_message(server: ServerConfig, caller: CallerConfig,
                    subject: str, body: str,
+                   html_body: str | None,
                    attachments: list[Path]) -> EmailMessage:
     msg = EmailMessage()
     msg["From"] = server.sender
@@ -139,8 +141,12 @@ def _build_message(server: ServerConfig, caller: CallerConfig,
     msg["Date"] = format_datetime(datetime.now(UTC), usegmt=True)
     msg["Auto-Submitted"] = "auto-generated"      # RFC 3834
     msg["X-dpl-Send-ID"] = "<filled by caller>"   # replaced below
-    msg.set_content(body, subtype="html" if caller.use_html else "plain",
-                    charset="utf-8")
+    msg.set_content(body, subtype="plain", charset="utf-8")
+    if html_body is not None:
+        # multipart/alternative: plain twin LAST in preference, both
+        # in one envelope. Clients that render HTML show the styled
+        # view; everything else falls back to plain invisibly.
+        msg.add_alternative(html_body, subtype="html", charset="utf-8")
     for p in attachments:
         ctype, _ = mimetypes.guess_type(p.name)
         maintype, _, subtype = (ctype or "application/octet-stream") \
@@ -206,6 +212,25 @@ def compose_email(server: ServerConfig, caller: CallerConfig,
 
         template_text = caller.template_path.read_text(encoding="utf-8")
         body = render_template(template_text, merged, reserved)
+        html_body: str | None = None
+        if caller.use_html:
+            twin = caller.template_path.with_suffix(".html")
+            if twin.exists():
+                # Values re-rendered ESCAPED for the HTML view: a data
+                # value like '<script>' displays as text, never
+                # executes. Template markup stays raw (it IS the view).
+                # Uniform, mechanical, never conditional - 'smart'
+                # escaping is where vulnerabilities come from.
+                html_body = render_template(
+                    twin.read_text(encoding="utf-8"),
+                    {k: html.escape(str(v)) for k, v in merged.items()},
+                    {k: html.escape(v) for k, v in reserved.items()})
+            else:
+                # Soft fallback (ratified): cosmetic twin missing must
+                # never silence a send - especially not run_failed.
+                log.warning("caller=%s wants html but twin %s missing "
+                            "- sending plain fallback",
+                            caller.name, twin.name)
 
         if "subject" not in merged:
             raise _Fault(EC_BAD_SUBJECT,
@@ -218,7 +243,7 @@ def compose_email(server: ServerConfig, caller: CallerConfig,
                          "subject is empty after sanitizing")
 
         attachments = _gather_attachments(caller, server)
-        msg = _build_message(server, caller, subject, body, attachments)
+        msg = _build_message(server, caller, subject, body, html_body, attachments)
         del msg["X-dpl-Send-ID"]           # placeholder replaced atomically
         msg["X-dpl-Send-ID"] = send_id
         envelope = tuple(caller.to) + tuple(caller.cc) + tuple(caller.bcc)

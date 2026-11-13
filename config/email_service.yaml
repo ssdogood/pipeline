@@ -29,7 +29,7 @@ email:
                                     # OR username_ref (vault) — never both
     password_ref: smtp.password.secret
   sender: dpl-pipeline@example.org  # CHANGE-ME: From address
-  allow_html: false                 # capability ceiling
+  allow_html: true                 # capability ceiling
   allow_bcc: false                  # capability gate
   allowed_recipient_domains: []     # [] = any domain
   attachments:
@@ -51,7 +51,7 @@ callers:
     cc: []
     bcc: []
     template: selftest.txt
-    use_html: false
+    use_html: true
     data:
       subject: "[dpl] email service selftest"
     attachments: []
@@ -108,5 +108,6 @@ callers:
     enabled: true
     to: [ops@yourdomain.org]              # CHANGE-ME
     template: run_failed.txt
+    use_html: true
     data:
       subject: "[dpl] run FAILED - operator attention required"
