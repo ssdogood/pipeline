@@ -55,6 +55,12 @@ from dpl.lib.common import (
     validate_secrets_layout,
 )
 from dpl.lib.connectors import CONNECTORS
+from dpl.lib.extraction_config import (
+    build_plan,
+    format_plan,
+    validate_global_extraction,
+    validate_pipe_connections,
+)
 from dpl.lib.logger import setup_logging
 from dpl.wrapper.profiles import load_wrapper_config, resolve_profile
 from dpl.wrapper.update_history import (
@@ -214,6 +220,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="profile name from wrapper.yaml (default: full)")
     parser.add_argument("--tables", default=None,
                         help="comma-separated table filter (testing/targeted)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="validate configs and print the extraction "
+                             "plan (connections, serial groups, worst-case "
+                             "sessions); run NOTHING")
     parser.add_argument("--settings", default=None,
                         help="path to settings yaml "
                              "(default: config/settings.laptop.yaml; "
@@ -248,8 +258,26 @@ def main(argv: list[str] | None = None) -> int:
     if not pipes:
         log.error("no pipes registered in config/run.yaml")
         return EXIT_CONFIG
-    log.info("registered pipes: %s",
-             ", ".join(f"{p.name}[{p.source_type}]" for p in pipes))
+    # --dry-run: Tier-1 validation + plan printing ONLY. No run_id, no
+    # history rows, no vault init, no connections - configuration truth,
+    # printed for the operator, then exit. Nothing anywhere is executed.
+    if args.dry_run:
+        try:
+            gk = validate_global_extraction(settings)
+            conns: dict[str, dict] = {}
+            for pipe in pipes:
+                cfg = load_config(pipe.path, pipe.connector["schema"])
+                if cfg is None:
+                    log.error("dry run: pipe %s config failed validation (%s)",
+                              pipe.name, pipe.path)
+                    return EXIT_CONFIG
+                conns.update(validate_pipe_connections(pipe.name, cfg))
+            print(format_plan(build_plan(gk["max_parallel_folders"], conns)))
+            log.info("dry run: plan valid - nothing was executed")
+        except ValueError as e:
+            log.error("dry run failed: %s", e)
+            return EXIT_CONFIG
+        return EXIT_OK
 
     history_db = Path(settings["paths"]["history_db"])
     try:
@@ -366,6 +394,13 @@ def main(argv: list[str] | None = None) -> int:
                         if cfg is None:
                             log.error("pipe %s: config failed validation "
                                       "(%s)", pipe.name, pipe.path)
+                            extract_failed = True
+                            failed_pipes.append(pipe.name)
+                            continue
+                        try:
+                            validate_pipe_connections(pipe.name, cfg)
+                        except ValueError as e:
+                            log.error("pipe %s: %s", pipe.name, e)
                             extract_failed = True
                             failed_pipes.append(pipe.name)
                             continue

@@ -91,6 +91,10 @@ SETTINGS_SCHEMA = Schema({
         Optional("max_file_mb", default=512): And(int, lambda n: n > 0),
         Optional("keep_scratch_on_success", default=False): bool,
         Optional(str): object
+    },
+    Optional("extraction"): {
+        Optional("max_parallel_folders"): And(int, lambda n: n >= 1),
+        Optional("keepalive_minutes"): And(int, lambda n: n >= 1),
     }
 })
 

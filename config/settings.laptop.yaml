@@ -150,3 +150,12 @@ writer:
   compression_level: 3
   max_file_mb: 1024
   keep_scratch_on_success: false
+
+# --- Parallel extraction knobs (v0.3.0) -------------------------------------
+# max_parallel_folders: how many connection folders extract simultaneously.
+#   1 = sequential (previous behavior). Production Stage 1 = 2, Stage 2 = 4.
+# keepalive_minutes: Oracle expire_time (server probe interval in minutes).
+#   Must stay BELOW the network firewall's idle timeout.
+extraction:
+  max_parallel_folders: 4
+  keepalive_minutes: 10
