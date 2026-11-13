@@ -327,7 +327,6 @@ def extract_all(
     runs_root = settings["paths"]["runs_root"]
 
     # --- guards: fail loudly before opening anything ---
-    # --- guards: fail loudly before opening anything ---
     validate_config_folders(cfg)
     table_collision_check(cfg)
 
