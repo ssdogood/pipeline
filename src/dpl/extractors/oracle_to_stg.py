@@ -62,6 +62,7 @@ from dpl.lib.ora_connect import (
     iter_batches,
     resolve_dtype,
 )
+from dpl.lib.session_pool import run_folder_tables
 from dpl.lib.write_parquet import ParquetWriter
 
 log = get_run_logger("dpl.oracle_to_stg")
@@ -78,33 +79,6 @@ RULES_CSV = "config/extractors/table_rules_oracle_to_stg.csv"
 # Which connection *type* this extractor handles. Selection is by type,
 # never by connection name - names are user-chosen and arbitrary.
 SOURCE_TYPE = "oracle"
-
-RETRYABLE_ERRORS = (
-    "ORA-03113",  # end-of-file
-    "ORA-03114",  # not connected to oracle
-    "ORA-12170",  # TNS:Connect timeout
-    "ORA-12541",  # TNS:no listener
-    "ConnectionReset",
-    "ConnectionRefused",
-    "Network",
-    "Timeout",
-    "End-of-file",
-)
-
-FATAL_ERRORS = ()  # everything else is fatal; extend list if needed
-
-
-def _is_retryable(exc: BaseException) -> bool:
-    """Return True if the exception suggests retrying may succeed."""
-    msg = str(exc).replace("\n", " ")
-    return any(r in msg for r in RETRYABLE_ERRORS)
-
-
-def _sleep_between_retries(attempt: int) -> None:
-    """Backoff before retry: 0.5s on first retry."""
-    if attempt > 0:
-        time.sleep(0.5)
-
 
 def _check_exists(settings: dict, cfg: dict, load_date: date,
                   conn_name: str, table_name: str) -> Path | None:
@@ -187,62 +161,55 @@ def _rules_for(rules: dict | None, folder: str,
 def _utc_now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-def extract_table(
+def _task_for(
     cfg: dict,
     settings: dict,
     table_cfg: dict,
     load_date: date,
-    force: bool = False,
-    schema_master: dict | None = None,
-    rules: dict | None = None,
-    run_id: str = "-",
-) -> dict[str, Any]:
-    """Extract one table; return stats dict.
+    force: bool,
+    schema_master: dict | None,
+    rules: dict | None,
+    run_id: str,
+):
+    """Build the per-table task for the folder worker (B1).
 
-    - Skips if output exists (unless forced)
-    - Declared schema from the master CSV drives frame construction
-    - Dedup/sort come from table_rules.csv (raw_dedup cell + parsed
-      sort_spec); tables absent from the rules file run unruled
-    - One retry on transient failure; EACH attempt is a completely fresh
-      run (new connection, new writer, new generator)
-    - Never raises; all errors recorded in stats
-    - run_id threads the wrapper's run identifier into every log line
-      this table emits (table= comes from the adapter scope below)
+    The returned callable takes the LIVE folder-session connection and
+    performs exactly ONE attempt: fresh writer, fresh generator (the
+    write_parquet retry contract). On any failure it RAISES - the
+    worker's health gate classifies (session vs data), resets the
+    session only when transport broke, and retries per the connection's
+    configured knobs. Skip-check runs first and needs no connection.
     """
-    start = time.time()
     table_name = table_cfg["name"]
     query = table_cfg["query"]
     conn_name = table_cfg["connection"]
     folder = cfg["connections"][conn_name]["folder"]
     batch_rows = settings.get("polars", {}).get("batch_rows", 50_000)
     strict_cast = settings.get("polars", {}).get("strict_cast", True)
-
-
-    # run-scoped adapter: every line from here on carries this table's name
     tlog = get_run_logger("dpl.oracle_to_stg", run_id=run_id, table=table_name)
 
+    def attempt(conn):
+        """One attempt on the open session. Returns stats; raises on failure."""
+        start = time.time()
 
-    if not force:
-        existing_dir = _check_exists(settings, cfg, load_date, conn_name, table_name)
-        if existing_dir:
-            tlog.info("skipping (%s exists)", existing_dir)
-            return _build_stats(table_cfg, load_date, "skipped")
+        if not force:
+            existing_dir = _check_exists(settings, cfg, load_date,
+                                         conn_name, table_name)
+            if existing_dir:
+                tlog.info("skipping (%s exists)", existing_dir)
+                return _build_stats(table_cfg, load_date, "skipped")
 
-    # --- declared schema: the master CSV is the authority (M3/M5) ---
-    try:
+        # declared schema: the master CSV is the authority (M3/M5).
+        # A missing-table ValueError is data-class: classification
+        # refuses to retry it, the worker records the failure - same
+        # net behavior as the old no-retry early return.
         declared = _declared_schema_for(schema_master, folder, table_name)
-    except ValueError as exc:
-        tlog.error("%s", exc)
-        return _build_stats(table_cfg, load_date, "failed",
-                            duration_sec=time.time() - start, error=str(exc))
 
-    rule = _rules_for(rules, folder, table_name)
-    dedup_parsed = rule.get("dedup")
-    sort_spec = rule.get("sort_spec") or []
+        rule = _rules_for(rules, folder, table_name)
+        dedup_parsed = rule.get("dedup")
+        sort_spec = rule.get("sort_spec") or []
 
-    def _run_attempt() -> dict:
-        """One full attempt: fresh connection, fresh writer, fresh counters."""
-        with connect(cfg, conn_name) as conn, ParquetWriter(
+        with ParquetWriter(
             settings,
             source=folder,
             table=table_name.lower(),
@@ -254,44 +221,24 @@ def extract_table(
             for df in iter_batches(conn, query, batch_size=batch_rows,
                                    declared=declared, strict=strict_cast):
                 w.append(df)
-            stats = w.close()
-        return stats
+            wstats = w.close()
+        if wstats is None:
+            # regression guard: close() always returns a stats dict
+            raise RuntimeError(
+                f"internal error: writer returned no stats for "
+                f"{folder}.{table_name} - close() was not called?")
+        tlog.info("completed (%d rows, %.1fs%s)", wstats.get("rows_read", 0),
+                  time.time() - start,
+                  ", sorted" if wstats.get("sort_columns") else "")
+        return _build_stats(
+            table_cfg, load_date, "extracted",
+            rows_read=wstats.get("rows_read", 0),
+            rows_written=wstats.get("rows_written", 0),
+            duration_sec=time.time() - start,
+            output_path=wstats.get("output_dir"),
+        )
 
-
-    error = None
-    for attempt in range(2):          # initial try + at most one retry
-        if attempt > 0:
-            _sleep_between_retries(attempt)
-        try:
-            wstats = _run_attempt()
-            if wstats is None:
-                # ParquetWriter.close() always returns a stats dict;
-                # None means the call chain lost it (regression guard)
-                raise RuntimeError(
-                    f"internal error: writer returned no stats for "
-                    f"{folder}.{table_name} - close() was not called?")
-            tlog.info("completed (%d rows, %.1fs%s)", wstats.get("rows_read", 0),
-                      time.time() - start,
-                      ", sorted" if wstats.get("sort_columns") else "")
-            return _build_stats(
-                table_cfg, load_date, "extracted",
-                rows_read=wstats.get("rows_read", 0),
-                rows_written=wstats.get("rows_written", 0),
-                duration_sec=time.time() - start,
-                output_path=wstats.get("output_dir"),
-            )
-        except Exception as exc:                        # noqa: BLE001 - retry loop boundary: any failure counts the attempt, other tables must continue
-            error = str(exc)[:500]
-            tlog.error("failed (attempt %d): %s", attempt + 1, error)
-            tlog.debug("failure detail", exc_info=True)
-            if not (attempt == 0 and _is_retryable(exc)):
-                break
-            tlog.info("retryable error, attempting recovery...")
-
-    tlog.error("final failure (%s)", error)
-    tlog.debug("failure detail", exc_info=True)
-    return _build_stats(table_cfg, load_date, "failed",
-                        duration_sec=time.time() - start, error=error)
+    return attempt
 
 def extract_all(
     cfg: dict,
@@ -313,7 +260,11 @@ def extract_all(
       connection name, then grouped by their connection's folder. Folder
       and connection are 1:1 (enforced by validate_config_folders), so a
       folder group is exactly one connection's workload.
-    - Sequential execution, one folder group at a time.
+    - Long-lived session per folder; the session_pool health gate
+      classifies failures (session vs data), retries per the
+      connection's configured retries/backoff, and each retry is a
+      fresh attempt (new writer, new generator) on a reset-if-needed
+      session
     - CONTINUE ON FAILURE (D4.1 tiers 2 & 3): a table that fails is recorded
       as 'failed' and the next table proceeds normally. Each attempt opens
       its own connection, so one table's failure cannot poison its siblings.
@@ -371,19 +322,50 @@ def extract_all(
     any_failed = False
 
     for folder, folder_tables in by_folder.items():
-        results: list[dict[str, Any]] = []
+        # folder:connection is 1:1 (enforced by validate_config_folders),
+        # so the folder's tables all share ONE connection - take it from
+        # the first table and read its per-connection knobs.
+        conn_name = folder_tables[0]["connection"]
+        conn_cfg = cfg["connections"][conn_name]
+        keepalive = (settings.get("extraction") or {}).get("keepalive_minutes")
+        table_conc = conn_cfg.get("table_concurrency", 1)
+        retries = conn_cfg.get("retries", 2)
+        backoff = conn_cfg.get("retry_backoff_seconds", 5)
 
-        for i, t in enumerate(folder_tables, 1):
-            rlog.info("[%s %d/%d] extracting %s.%s...",
-                     folder, i, len(folder_tables), t["connection"], t["name"])
-            stats = extract_table(cfg, settings, t, load_date, force=force,
-                                  schema_master=schema_master, rules=rules,
-                                  run_id=run_id)
+        def factory(_cn=conn_name, _ka=keepalive):
+            return connect(cfg, _cn, expire_time=_ka)
+
+        rlog.info("[%s] extracting %d table(s) (lanes=%d, retries=%d, "
+                  "keepalive=%s min)", folder, len(folder_tables),
+                  table_conc, retries, keepalive)
+
+        tasks = [
+            (t["name"], _task_for(cfg, settings, t, load_date, force,
+                                  schema_master, rules, run_id))
+            for t in folder_tables
+        ]
+
+        outcomes = run_folder_tables(
+            folder, tasks, factory,
+            table_concurrency=table_conc, retries=retries,
+            backoff_seconds=backoff)
+
+        results: list[dict[str, Any]] = []
+        for t, oc in zip(folder_tables, outcomes):
+            if oc["status"] == "ok":
+                stats = oc["result"]
+            else:
+                # duration on the failure path is 0.0: the worker owns
+                # the clock now, and duration_sec is volatile-stripped by
+                # the equivalence comparator anyway.
+                stats = _build_stats(t, load_date, "failed",
+                                     error=oc["error"])
+            stats["attempts"] = oc["attempts"]
             results.append(stats)
 
             if stats["status"] in FAILURE_STATUSES:
-                rlog.warning("[%s %d/%d] %s.%s failed - continuing with next table",
-                             folder, i, len(folder_tables), t["connection"], t["name"])
+                rlog.warning("[%s] %s failed after %d attempt(s) - continuing",
+                             folder, t["name"], stats["attempts"])
 
         folder_failed = any(t["status"] in FAILURE_STATUSES for t in results)
         any_failed = any_failed or folder_failed
@@ -403,13 +385,20 @@ def extract_all(
             "folder": folder,
             "load_date": load_date.isoformat(),
             "tables": results,
+            # operator summary counts (Part B request, 2026-11-14):
+            # additive keys; history ingestion reads named fields only,
+            # the comparator demands equality when both sides have them.
+            "tables_total": len(results),
+            "tables_extracted": sum(
+                1 for r in results if r["status"] == "extracted"),
+            "tables_skipped": sum(
+                1 for r in results if r["status"] == "skipped"),
+            "tables_failed": sum(
+                1 for r in results if r["status"] in FAILURE_STATUSES),
         }
         manifests[folder] = envelope
 
         # THE manifest write - extractor-owned, into the archive.
-        # runs_root/<date>/<folder>/_manifest_<run_id>.json; write_manifest
-        # mkdirs. Note: one file per folder per run - a second run never
-        # overwrites (different run_id in the name).
         manifest_dir = runs_dir(runs_root, load_date, folder)
         write_manifest(manifest_dir, run_id, envelope)
         rlog.info("manifest written: %s/_manifest_%s.json",
