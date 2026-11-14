@@ -175,18 +175,29 @@ def test_fewer_tables_than_lanes_opens_no_extra_session():
 
 
 def test_all_sessions_closed_after_run_even_mid_crash():
-    # a table exploding must still leave every lane's session closed
+    # a table exploding must still leave every lane's session closed.
+    # Deterministic: barrier(2) forces BOTH lanes to be inside tasks
+    # (sessions open) before either may proceed - one crashes after
+    # the barrier, the sibling continues. No lane-starvation luck.
     make, created = _factory()
+    barrier = threading.Barrier(2, timeout=5)
 
     def boom(conn):
+        barrier.wait()
         raise RuntimeError("table blew up mid-run")
 
-    tasks = [(f"t{i}", boom if i == 0 else (lambda c: "ok"))
-             for i in range(4)]
-    run_folder_tables("f", tasks, make, table_concurrency=2,
-                      retries=0, sleeper=_no_sleep)
+    def blocked_ok(conn):
+        barrier.wait()
+        return "ok"
+
+    tasks = [("t0", boom), ("t1", blocked_ok),
+             ("t2", lambda c: "ok"), ("t3", lambda c: "ok")]
+    out = run_folder_tables("f", tasks, make, table_concurrency=2,
+                            retries=0, sleeper=_no_sleep)
     assert len(created) == 2
     assert all(cm.exited for cm in created)
+    assert out[0]["status"] == "failed"      # the crasher failed
+    assert [o["status"] for o in out[1:]] == ["ok"] * 3   # siblings survived
 
 
 def test_empty_task_list_returns_empty():
