@@ -42,6 +42,7 @@ inject the clock. No module-level driver imports.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -209,3 +210,107 @@ def run_with_retry(
             session.reset()
             if backoff_seconds:
                 sleeper(backoff_seconds)
+
+# --- folder table-worker ---------------------------------------------------------
+
+def run_folder_tables(
+    folder_label: str,
+    # Callable[..., Any]: the true contract is documented above (one
+    # arg, the connection); the looser annotation avoids the checker's
+    # lambda/closure inference limitation. Tests enforce the real shape.
+    tasks: list[tuple[str, Callable[..., Any]]],
+    connect_factory: Callable[[], AbstractContextManager],
+    table_concurrency: int = 1,
+    retries: int = 2,
+    backoff_seconds: int = 5,
+    classify: Callable[[BaseException], str] = classify_error,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> list[dict[str, Any]]:
+    """Serve one folder's table queue with 1-2 long-lived sessions.
+
+    The 'checkout lanes' of the parallel-extraction design: each lane
+    owns its own FolderSession (own health gate, own retries); tables
+    are pulled from ONE shared queue, so a slow table never blocks the
+    next - a free lane simply takes it. At table_concurrency=1 this is
+    a plain single-session serial loop. Ceiling is 2 (enforced upstream
+    by extraction_config validation - not re-checked here).
+
+    tasks: [(table_name, task_fn)] in CONFIG ORDER; task_fn(conn) must
+    be fresh-per-call (new writer, new generator - the write_parquet
+    retry contract) and returns a result dict or raises.
+
+    Returns one outcome dict per task, IN INPUT ORDER regardless of
+    completion order (manifest order is equivalence-sacred):
+        {"name", "status": "ok"|"failed",
+         "result",        # task_fn's return value (None on failure)
+         "error",         # str(exc)[:500] on failure, else None
+         "attempts"}      # attempts made incl. the failing one
+
+    attempts on the failure path counts task_fn invocations; if the
+    very connect failed on every attempt, it floors at 1 (an attempt
+    was still made - the connect).
+    """
+    if not tasks:
+        return []
+
+    n_workers = max(1, min(table_concurrency, len(tasks)))
+
+    # shared queue: an index pointer under a lock - cheapest possible
+    # dispatch, and order of PICKUP never matters because outcomes are
+    # written back by original index.
+    pos = {"next": 0}
+    qlock = threading.Lock()
+
+    def next_index() -> int | None:
+        with qlock:
+            i = pos["next"]
+            pos["next"] += 1
+            return i if i < len(tasks) else None
+
+    outcomes: list[dict[str, Any] | None] = [None] * len(tasks)
+
+    def worker(worker_id: int) -> None:
+        session = FolderSession(
+            connect_factory, label=f"{folder_label}/lane{worker_id}")
+        try:
+            while True:
+                idx = next_index()
+                if idx is None:
+                    return
+                name, task_fn = tasks[idx]
+                calls = {"n": 0}
+
+                def counted(conn, _fn=task_fn, _calls=calls):
+                    _calls["n"] += 1
+                    return _fn(conn)
+
+                try:
+                    result, attempts = run_with_retry(
+                        session, counted, retries=retries,
+                        backoff_seconds=backoff_seconds,
+                        classify=classify, sleeper=sleeper)
+                    outcomes[idx] = {"name": name, "status": "ok",
+                                     "result": result, "error": None,
+                                     "attempts": attempts}
+                except Exception as exc:                    # noqa: BLE001 - lane isolation: record the failure, keep serving the queue
+                    log.warning("[%s] table '%s' failed after %d "
+                                "attempt(s) - continuing queue",
+                                folder_label, name,
+                                max(calls["n"], 1))
+                    outcomes[idx] = {"name": name, "status": "failed",
+                                    "result": None,
+                                    "error": str(exc)[:500],
+                                    "attempts": max(calls["n"], 1)}
+        finally:
+            session.close()          # guaranteed lane shutdown
+
+    threads = [threading.Thread(target=worker, args=(w,),
+                                name=f"dpl-{folder_label}-lane{w}")
+               for w in range(n_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # all slots filled unless tasks was mutated concurrently - it is not
+    return [o for o in outcomes]        # type: ignore[return-value]
