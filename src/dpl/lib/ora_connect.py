@@ -70,7 +70,7 @@ ORACLE_CONFIG_SCHEMA = Schema({
 
 # connect
 @contextmanager
-def connect(cfg: dict, connection_name: str):
+def connect(cfg: dict, connection_name: str, expire_time: int | None = None):
     """
     Yield an open Oracle connection; always closed on exit.
     with connect(cfg, "ora_db") as conn:
@@ -107,7 +107,16 @@ def connect(cfg: dict, connection_name: str):
 
     log.info("connecting to %s (%s:%s/%s)", connection_name, c["host"], c["port"], c["service"])
 
-    conn = oracledb.connect(user=user_name, password=password, dsn=dsn)
+    # Keepalive (parallel-extraction design v3 §4): probe every
+    # `expire_time` minutes so long midnight sessions survive
+    # firewall/NAT idle-timeout teardowns. None (default) keeps
+    # today's exact behavior. session_pool (Phase 4 wiring) passes
+    # the settings knob extraction.keepalive_minutes (default 10).
+    if expire_time:
+        conn = oracledb.connect(user=user_name, password=password,
+                                dsn=dsn, expire_time=expire_time)
+    else:
+        conn = oracledb.connect(user=user_name, password=password, dsn=dsn)
     try:
         yield conn
     finally:
