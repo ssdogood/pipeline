@@ -39,6 +39,7 @@ import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -61,6 +62,7 @@ from dpl.lib.extraction_config import (
     validate_global_extraction,
     validate_pipe_connections,
 )
+from dpl.lib.folder_runner import jobs_from_plan, run_jobs
 from dpl.lib.logger import setup_logging
 from dpl.wrapper.profiles import load_wrapper_config, resolve_profile
 from dpl.wrapper.update_history import (
@@ -212,6 +214,51 @@ def _notify(event: str, run_id: str, data: dict[str, object]) -> None:
     except Exception as exc:              # noqa: BLE001 - email is never fatal
         nlog.error("email event %s could not fire: %s", event, exc)
 
+
+# --------------------------------------------- merged scheduler (C2) ------
+#
+# Option B (design v3): ONE scheduler for all pipes. The wrapper merges
+# every pipe's folder jobs into a single plan and executes them through
+# folder_runner. These two pure functions are the merge; both are
+# covered by tests/unit/test_wrapper_merge.py.
+
+def _namespaced_connections(
+    pipe_conns: list[tuple[str, dict[str, dict]]],
+    folders_with_work: set[str] | None = None,
+) -> dict[str, dict]:
+    """Merge per-pipe validated connections into ONE plan namespace.
+
+    Keys become '<pipe>::<connection>' so equal connection names in
+    different pipes can never collide silently (the old dry-run merged
+    by bare name - an Oracle and an MSSQL connection both named
+    'ora_db' would have overwritten each other). folders_with_work is
+    the union of every pipe's ctx['by_folder'] - folders that actually
+    have tables after any --tables filter; an idle folder must never
+    enter the scheduler.
+    """
+    merged: dict[str, dict] = {}
+    for pipe_name, conns in pipe_conns:
+        for cname, summary in conns.items():
+            if folders_with_work is not None \
+                    and summary["folder"] not in folders_with_work:
+                continue
+            merged[f"{pipe_name}::{cname}"] = summary
+    return merged
+
+
+def _folder_owners(ready: list[tuple[Any, Any, dict, dict]]
+                   ) -> dict[str, tuple[Any, Any, dict]]:
+    """Map every prepared folder to its owning (pipe, cfg, ctx).
+
+    Folder names are globally unique across pipes (build_plan raises
+    on duplicates), so this is a strict 1:1 routing table from the
+    scheduler's folder jobs back to the pipe that extracts them.
+    """
+    return {summary["folder"]: (pipe, cfg, ctx)
+            for pipe, cfg, conns, ctx in ready
+            for summary in conns.values()}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m wrapper.run",
@@ -258,21 +305,33 @@ def main(argv: list[str] | None = None) -> int:
     if not pipes:
         log.error("no pipes registered in config/run.yaml")
         return EXIT_CONFIG
+
+    # Global extraction knobs: present-but-invalid is a CONFIG error
+    # (exit 3, nothing ran) - validated once here, reused by dry-run
+    # and extract. A settings file WITHOUT the block still just warns
+    # and runs sequential (safe-upgrade rule, Phase 1).
+    try:
+        gk = validate_global_extraction(settings)
+    except ValueError as e:
+        log.error("extraction knobs invalid - aborting: %s", e)
+        return EXIT_CONFIG
     # --dry-run: Tier-1 validation + plan printing ONLY. No run_id, no
     # history rows, no vault init, no connections - configuration truth,
     # printed for the operator, then exit. Nothing anywhere is executed.
     if args.dry_run:
         try:
-            gk = validate_global_extraction(settings)
-            conns: dict[str, dict] = {}
+            pipe_conns: list[tuple[str, dict[str, dict]]] = []
             for pipe in pipes:
                 cfg = load_config(pipe.path, pipe.connector["schema"])
                 if cfg is None:
                     log.error("dry run: pipe %s config failed validation (%s)",
                               pipe.name, pipe.path)
                     return EXIT_CONFIG
-                conns.update(validate_pipe_connections(pipe.name, cfg))
-            print(format_plan(build_plan(gk["max_parallel_folders"], conns)))
+                pipe_conns.append(
+                    (pipe.name, validate_pipe_connections(pipe.name, cfg)))
+            print(format_plan(build_plan(
+                gk["max_parallel_folders"],
+                _namespaced_connections(pipe_conns))))
             log.info("dry run: plan valid - nothing was executed")
         except ValueError as e:
             log.error("dry run failed: %s", e)
@@ -386,44 +445,95 @@ def main(argv: list[str] | None = None) -> int:
                          resolved if resolved else "none")
 
             elif name == "extract":
-                # Every REGISTERED pipe, in run.yaml order. Failures mark
-                # the run but never stop the remaining pipes.
+                # Phase 4 C2: ONE merged scheduler for all pipes (Option B).
+                # Preflight every pipe first (no connections opened during
+                # preflight), then run every folder job through folder_runner
+                # with the global cap. Ruling Decision 2: a pipe failing ANY
+                # preflight check is skipped - the healthy pipes still run.
+                ready: list[tuple[Any, Any, dict, dict]] = []
+                ext_by_pipe: dict[str, Any] = {}
                 for pipe in pipes:
-                    try:
-                        cfg = load_config(pipe.path, pipe.connector["schema"])
-                        if cfg is None:
-                            log.error("pipe %s: config failed validation "
-                                      "(%s)", pipe.name, pipe.path)
-                            extract_failed = True
-                            failed_pipes.append(pipe.name)
-                            continue
-                        try:
-                            validate_pipe_connections(pipe.name, cfg)
-                        except ValueError as e:
-                            log.error("pipe %s: %s", pipe.name, e)
-                            extract_failed = True
-                            failed_pipes.append(pipe.name)
-                            continue
-
-                        ext_mod = importlib.import_module(
-                            pipe.connector["extractor"])
-                        manifests_src, any_failed = ext_mod.extract_all(
-                            cfg, settings, load_date,
-                            force=step.get("force", False),
-                            only_tables=only_tables,
-                            run_id=run_id,
-                            profile=args.profile)
-                        manifests.update(manifests_src)   # FIXED: merge -
-                        # previously collected but never merged, so the
-                        # envelope-rewrite loop below ran empty and the
-                        # wrapper-state stamp never landed in manifests.
-                        if any_failed:
-                            extract_failed = True
-                            failed_pipes.append(pipe.name)
-                    except Exception as exc:                                # noqa: BLE001 - pipeline boundary: one failing pipe must not kill the run
-                        log.error("pipe %s failed: %s", pipe.name, exc)
+                    cfg = load_config(pipe.path, pipe.connector["schema"])
+                    if cfg is None:
+                        log.error("pipe %s: config failed validation (%s)",
+                                  pipe.name, pipe.path)
                         extract_failed = True
                         failed_pipes.append(pipe.name)
+                        continue
+                    try:
+                        conns = validate_pipe_connections(pipe.name, cfg)
+                    except ValueError as e:
+                        log.error("pipe %s: %s", pipe.name, e)
+                        extract_failed = True
+                        failed_pipes.append(pipe.name)
+                        continue
+                    try:
+                        ext_mod = importlib.import_module(
+                            pipe.connector["extractor"])
+                        ctx = ext_mod.prepare_run(
+                            cfg, settings, only_tables=only_tables,
+                            run_id=run_id)
+                    except Exception as exc:                    # noqa: BLE001 - pipe boundary: a bad pipe never kills the healthy ones
+                        log.error("pipe %s prepare failed: %s",
+                                  pipe.name, exc)
+                        extract_failed = True
+                        failed_pipes.append(pipe.name)
+                        continue
+                    ready.append((pipe, cfg, conns, ctx))
+                    ext_by_pipe[pipe.name] = ext_mod
+
+                if not ready:
+                    log.error("extract: no pipe prepared - nothing to run")
+                else:
+                    work_folders: set[str] = set()
+                    for _p, _c, _conns, ctx in ready:
+                        work_folders.update(ctx["by_folder"])
+
+                    plan = build_plan(
+                        gk["max_parallel_folders"],
+                        _namespaced_connections(
+                            [(p.name, c) for p, _pc, c, _px in ready],
+                            work_folders))
+                    owners = _folder_owners(ready)
+
+                    _force = step.get("force", False)
+
+                    def make_task(folder, _owners=owners,
+                                  _ext=ext_by_pipe,
+                                  _force=_force):
+                        pipe, cfg, ctx = _owners[folder]
+
+                        def task():
+                            return _ext[pipe.name].extract_folder(
+                                ctx, cfg, settings, load_date, folder,
+                                force=_force, run_id=run_id,
+                                profile=args.profile)
+                        return task
+
+                    log.info("extract: %d folder job(s), max_parallel=%d "
+                             "(worst-case sessions=%d)", plan["tasks"],
+                             gk["max_parallel_folders"],
+                             plan["worst_case_sessions"])
+
+                    outcomes = run_jobs(
+                        jobs_from_plan(plan, make_task),
+                        gk["max_parallel_folders"])
+
+                    for folder, (status, value) in outcomes.items():
+                        if status == "ok":
+                            manifests[folder] = value
+                        else:
+                            # Ruling Decision 1: folder-level
+                            # continue-on-failure - the crash is recorded,
+                            # siblings already ran; no envelope for this
+                            # folder, tomorrow's disk-as-truth re-extracts.
+                            log.error("folder '%s' failed: %s: %s",
+                                      folder, type(value).__name__,
+                                      str(value)[:300])
+                            extract_failed = True
+                            pipe_name = owners[folder][0].name
+                            if pipe_name not in failed_pipes:
+                                failed_pipes.append(pipe_name)
 
             elif name == "update_history":
                 ingested, skipped = update_history(
