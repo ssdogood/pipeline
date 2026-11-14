@@ -81,9 +81,10 @@ def _default_config() -> dict:
         "formatters": {
             "standard": {
                 "()": "dpl.lib.logger.UtcFormatter",
-                "format": "%(asctime)s | %(name)s | %(funcName)s | "
-                          "%(levelname)-8s | run_id=%(run_id)s | "
-                          "table=%(table)s | %(message)s",
+                "format": "%(asctime)s | tid=%(thread)d | %(name)s | "
+                          "%(funcName)s | %(levelname)-8s | "
+                          "run_id=%(run_id)s | table=%(table)s | "
+                          "%(message)s",
                 "datefmt": "%Y-%m-%dT%H:%M:%SZ",
                 "defaults": CONTEXT_DEFAULTS,
             },

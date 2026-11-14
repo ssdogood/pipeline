@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -58,3 +59,28 @@ def test_deployed_yaml_uses_utc_formatter() -> None:
     std = cfg["formatters"]["standard"]
     assert std["()"] == "dpl.lib.logger.UtcFormatter"
     assert std["datefmt"] == _DATEFMT
+
+def test_thread_id_field_in_fallback_config() -> None:
+    fmt = _default_config()["formatters"]["standard"]["format"]
+    assert "tid=%(thread)d" in fmt
+
+
+def test_thread_id_field_in_deployed_yaml() -> None:
+    cfg = yaml.safe_load(
+        Path("config/logging.yaml").read_text(encoding="utf-8"))
+    fmt = cfg["formatters"]["standard"]["format"]
+    assert "tid=%(thread)d" in fmt
+
+
+def test_tid_renders_on_real_record_and_matches_current_thread() -> None:
+    f = UtcFormatter(
+        "%(asctime)s | tid=%(thread)d | %(name)s | %(levelname)-8s | "
+        "run_id=%(run_id)s | table=%(table)s | %(message)s",
+        datefmt=_DATEFMT)
+    rec = _probe_record()
+    rec.run_id = "-"        # bare record lacks the adapter context fields
+    rec.table = "-"
+    out = f.format(rec)
+    m = re.search(r"tid=(\d+)", out)
+    assert m, out
+    assert int(m.group(1)) == threading.get_ident()
