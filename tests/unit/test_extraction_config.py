@@ -73,18 +73,23 @@ def test_connection_defaults_applied():
 
 def test_connection_overrides_roundtrip():
     k = validate_connection("p", "ora_db", _cfg(
-        table_concurrency=3, retries=1,
+        table_concurrency=2, retries=1,
         retry_backoff_seconds=10, serial_group="box_a"
     )["connections"]["ora_db"])
     assert (k["table_concurrency"], k["retries"],
-            k["retry_backoff_seconds"], k["serial_group"]) == (3, 1, 10, "box_a")
+            k["retry_backoff_seconds"], k["serial_group"]) == (2, 1, 10, "box_a")
 
 
-@pytest.mark.parametrize("bad", [0, -1, True, "2", None])
+@pytest.mark.parametrize("bad", [0, -1, 3, True, "2", None])
 def test_bad_table_concurrency_fails_loud(bad):
     with pytest.raises(ValueError, match="table_concurrency"):
         validate_connection("p", "ora_db", _cfg(table_concurrency=bad)["connections"]["ora_db"])
 
+@pytest.mark.parametrize("good", [1, 2])
+def test_table_concurrency_ceiling_allows_1_and_2(good):
+    k = validate_connection(
+        "p", "ora_db", _cfg(table_concurrency=good)["connections"]["ora_db"])
+    assert k["table_concurrency"] == good
 
 @pytest.mark.parametrize("bad", [-1, True, "2", None])
 def test_bad_retries_fails_loud(bad):

@@ -91,6 +91,21 @@ def validate_global_extraction(settings: dict) -> dict:
 
 
 # ------------------------------------------------------------ connections ---
+def _table_concurrency(value: object, ctx: str) -> int:
+    """table_concurrency must be an int 1 or 2 - a HARD session ceiling.
+
+    Worst-case sessions = max_parallel_folders x table_concurrency,
+    capped at 4 x 2 = 8 (the ceiling approved for infrastructure).
+    Values above 2 are rejected here, not merely discouraged: the
+    ceiling lives in validation, so no config can ever exceed it.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) \
+            or value not in (1, 2):
+        raise ValueError(
+            f"{ctx}: 'table_concurrency' must be 1 or 2 "
+            f"(hard session ceiling: max_parallel_folders x 2), got {value!r}")
+    return value
+
 def validate_connection(pipe_name: str, conn_name: str,
                         conn_cfg: dict) -> dict:
     """Validate one connection's knobs; return its normalized summary.
@@ -103,9 +118,9 @@ def validate_connection(pipe_name: str, conn_name: str,
     out: dict = {
         "folder": conn_cfg["folder"],
         "type": conn_cfg["type"],
-        "table_concurrency": _int_ge(
+        "table_concurrency": _table_concurrency(
             conn_cfg.get("table_concurrency", CONN_DEFAULTS["table_concurrency"]),
-            "table_concurrency", ctx, 1),
+            ctx),
         "retries": _int_ge(
             conn_cfg.get("retries", CONN_DEFAULTS["retries"]),
             "retries", ctx, 0),
