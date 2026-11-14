@@ -67,6 +67,7 @@ from dpl.lib.common import (
 )
 from dpl.lib.ldap_connect import LDAP_CONFIG_SCHEMA, connect, iter_paged
 from dpl.lib.logger import get_run_logger, setup_logging
+from dpl.lib.session_pool import run_folder_tables
 from dpl.lib.write_parquet import ParquetWriter
 
 log = get_run_logger("dpl.ad_to_stg")
@@ -83,19 +84,6 @@ SOURCE_TYPE = "ldap"
 # Entries buffered in plain dicts before one DataFrame is built and # appended - keeps DuckDB insert count sane while staying memory-bounded # (buffers flush long before page accumulation matters).
 ENTRY_FLUSH = 500
 
-RETRYABLE_ERRORS = (
-     "LDAP",
-     "Socket",
-     "Connection",
-     "TLS",
-     "SSL",
-     "timeout",
-     "network",
-     "reset",
-     "refused",
-     "bind",
-)
-
 # Child-table frame schema: (join key, value) - always these two columns.
 CHILD_SCHEMA: dict[str, type[pl.DataType]] = {"objectguid": pl.Utf8, "value": pl.Utf8}
 
@@ -111,18 +99,6 @@ _PL_DTYPES = {
 def _resolve_dtype(dt: str) -> type[pl.DataType]:
      """Master CSV dtype string -> Polars DataType (unknown -> Utf8)."""
      return _PL_DTYPES.get(dt.strip().lower(), pl.Utf8)
-
-
-def _is_retryable(exc: BaseException) -> bool:
-     """True if the exception suggests retrying may succeed."""
-     msg = str(exc).replace("\n", " ")
-     return any(r.lower() in msg.lower() for r in RETRYABLE_ERRORS)
-
-
-def _sleep_between_retries(attempt: int) -> None:
-     """Backoff before retry: 0.5s on first retry."""
-     if attempt > 0:
-         time.sleep(0.5)
 
 
 def _cell(v: Any) -> str | None:
@@ -250,29 +226,27 @@ def _utc_now_iso() -> str:
      return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def extract_table(
+def _task_for(
      cfg: dict,
      settings: dict,
      table_cfg: dict,
      load_date: date,
-     force: bool = False,
-     schema_master: dict | None = None,
-     rules: dict | None = None,
-     run_id: str = "-",
-) -> dict[str, Any]:
-     """Extract one AD table (and its MV children); return stats dict.
+     force: bool,
+     schema_master: dict | None,
+     rules: dict | None,
+     run_id: str,
+):
+     """Build the per-table task for the folder worker (B1).
 
-     - Skips if parent + all children exist (unless forced)
-     - Declared schema from the master CSV drives frame construction
-     - Dedup/sort from table_rules_ad_to_stg.csv, per table (parents and
-       children each have their own row); tables absent from the rules
-       file run unruled
-     - ONE paged search feeds parent and child writers alike
-     - One retry on transient failure; each attempt is completely fresh
-       (new connection, new writers, new buffers)
-     - Never raises; all errors recorded in stats
+     Mirrors oracle_to_stg._task_for exactly. The returned callable takes
+     the LIVE folder-session connection and performs exactly ONE attempt:
+     fresh writers, fresh buffers, fresh paged search. On any failure it
+     RAISES - the health gate classifies, resets the session only on
+     transport-class errors, and retries per the connection's knobs.
+     Declared-schema check runs before the skip check (order preserved
+     from the old code): a table missing from the master fails even if
+     its parquet exists.
      """
-     start = time.time()
      table_name = table_cfg["name"]
      search_base = table_cfg["search_base"]
      search_filter = table_cfg["filter"]
@@ -280,42 +254,38 @@ def extract_table(
      folder = cfg["connections"][conn_name]["folder"]
      page_size = cfg["connections"][conn_name].get("page_size", 500)
 
-     # run-scoped adapter: every line from here on carries this table's name
      tlog = get_run_logger("dpl.ad_to_stg", run_id=run_id, table=table_name)
 
-     # --- declared schema: the master CSV is the authority (M3/M5) ---
-     try:
+     def attempt(conn):
+         """One attempt on the open session. Returns stats; raises on failure."""
+         start = time.time()
+
+         # --- declared schema: the master CSV is the authority (M3/M5) ---
+         # ValueError here is data-class: no retry, table fails - same
+         # net behavior as the old no-retry early return.
          if schema_master is None:
              raise ValueError("schema master not supplied")
          declared, mv_columns = _declared_schema_for(schema_master,
-folder, table_name)
-     except ValueError as exc:
-         tlog.error("%s", exc)
-         return _build_stats(table_cfg, load_date, "failed",
-                             duration_sec=time.time() - start,
-error=str(exc))
+                                                    folder, table_name)
 
-     # parent columns exclude MV children; the LDAP request includes them
-     parent_cols = [c for c in declared if c not in mv_columns]
-     ldap_attributes = list(declared.keys())
+         parent_cols = [c for c in declared if c not in mv_columns]
+         ldap_attributes = list(declared.keys())
 
-     child_names = {mv: f"{table_name.lower()}_{mv}" for mv in mv_columns}
+         child_names = {mv: f"{table_name.lower()}_{mv}" for mv in mv_columns}
 
-     if not force:
-         existing_dir = _check_exists(settings, cfg, load_date, conn_name,
-                                       table_name,
-list(child_names.values()))
-         if existing_dir:
-             tlog.info("skipping (%s exists)", existing_dir)
-             return _build_stats(table_cfg, load_date, "skipped")
+         if not force:
+             existing_dir = _check_exists(settings, cfg, load_date,
+                                          conn_name, table_name,
+                                          list(child_names.values()))
+             if existing_dir:
+                 tlog.info("skipping (%s exists)", existing_dir)
+                 return _build_stats(table_cfg, load_date, "skipped")
 
-     rule = _rules_for(rules, folder, table_name)
-     dedup_parsed = rule.get("dedup")
-     sort_spec = rule.get("sort_spec") or []
+         rule = _rules_for(rules, folder, table_name)
+         dedup_parsed = rule.get("dedup")
+         sort_spec = rule.get("sort_spec") or []
 
-     def _run_attempt() -> dict:
-         """One full attempt: fresh connection, fresh writers, fresh buffers."""
-         with connect(cfg, conn_name) as conn, ExitStack() as stack:
+         with ExitStack() as stack:
              pw = stack.enter_context(ParquetWriter(
                  settings,
                  source=folder,
@@ -347,18 +317,17 @@ list(child_names.values()))
                  if parent_buf:
                      pw.append(pl.from_dicts(parent_buf,
                                              schema={c: declared[c]
-                                                     for c in
-parent_cols}))
+                                                     for c in parent_cols}))
                      parent_buf.clear()
                  for mv, buf in child_bufs.items():
                      if buf:
                          cws[mv].append(pl.from_dicts(buf,
-schema=CHILD_SCHEMA))
+                                         schema=CHILD_SCHEMA))
                          buf.clear()
 
              for entry in iter_paged(conn, search_base, search_filter,
                                      ldap_attributes,
-page_size=page_size):
+                                     page_size=page_size):
                  # case-insensitive: server casing -> master lowercase
                  low = {k.lower(): v for k, v in (entry or {}).items()}
                  guid = _cell(low.get("objectguid"))
@@ -384,47 +353,23 @@ page_size=page_size):
 
              parent_stats = pw.close()
              child_stats = {child_names[mv]:
-cws[mv].close().get("rows_written", 0)
+                            cws[mv].close().get("rows_written", 0)
                             for mv in mv_columns}
 
-             return {
-                 "rows_read": parent_stats.get("rows_read", 0),
-                 "rows_written": parent_stats.get("rows_written", 0),
-                 "output_path": parent_stats.get("output_dir"),
-                 "children": child_stats,
-             }
-
-     error = None
-     for attempt in range(2):          # initial try + at most one retry
-         if attempt > 0:
-             _sleep_between_retries(attempt)
-         try:
-             result = _run_attempt()
              tlog.info("completed (%d rows, %d child rows, %.1fs)",
-                       result["rows_written"],
-                       result["children"] and
-sum(result["children"].values()) or 0,
+                       parent_stats.get("rows_written", 0),
+                       sum(child_stats.values()) if child_stats else 0,
                        time.time() - start)
              return _build_stats(
                  table_cfg, load_date, "extracted",
-                 rows_read=result["rows_read"],
-                 rows_written=result["rows_written"],
+                 rows_read=parent_stats.get("rows_read", 0),
+                 rows_written=parent_stats.get("rows_written", 0),
                  duration_sec=time.time() - start,
-                 output_path=result["output_path"],
-                 children=result["children"],
+                 output_path=parent_stats.get("output_dir"),
+                 children=child_stats,
              )
-         except Exception as exc:                           # noqa: BLE001 - retry loop boundary: any failure counts the attempt, stream must continue
-             error = str(exc)[:500]
-             tlog.error("failed (attempt %d): %s", attempt + 1, error)
-             tlog.debug("failure detail", exc_info=True)
-             if not (attempt == 0 and _is_retryable(exc)):
-                 break
-             tlog.info("retryable error, attempting recovery...")
 
-     tlog.error("final failure (%s)", error)
-     tlog.debug("failure detail", exc_info=True)
-     return _build_stats(table_cfg, load_date, "failed",
-                         duration_sec=time.time() - start, error=error)
+     return attempt
 
 
 def extract_all(
@@ -495,23 +440,48 @@ def extract_all(
      any_failed = False
 
      for folder, folder_tables in by_folder.items():
-         results: list[dict[str, Any]] = []
+         # folder:connection is 1:1, so all tables share ONE connection.
+         conn_name = folder_tables[0]["connection"]
+         conn_cfg = cfg["connections"][conn_name]
+         table_conc = conn_cfg.get("table_concurrency", 1)
+         retries = conn_cfg.get("retries", 2)
+         backoff = conn_cfg.get("retry_backoff_seconds", 5)
 
-         for i, t in enumerate(folder_tables, 1):
-             rlog.info("[%s %d/%d] extracting %s.%s...",
-                      folder, i, len(folder_tables), t["connection"],
-t["name"])
-             stats = extract_table(cfg, settings, t, load_date, force=force,
-                                   schema_master=schema_master, rules=rules,
-                                   run_id=run_id)
+         # AD ruling: plain connect, NO keepalive/expiry - reconnect on
+         # failure is handled by the health gate, not pooling semantics.
+         def factory(_cn=conn_name):
+             return connect(cfg, _cn)
+
+         rlog.info("[%s] extracting %d table(s) (lanes=%d, retries=%d)",
+                   folder, len(folder_tables), table_conc, retries)
+
+         tasks = [
+             (t["name"], _task_for(cfg, settings, t, load_date, force,
+                                   schema_master, rules, run_id))
+             for t in folder_tables
+         ]
+
+         outcomes = run_folder_tables(
+             folder, tasks, factory,
+             table_concurrency=table_conc, retries=retries,
+             backoff_seconds=backoff)
+
+         results: list[dict[str, Any]] = []
+         for t, oc in zip(folder_tables, outcomes):
+             if oc["status"] == "ok":
+                 stats = oc["result"]
+             else:
+                 stats = _build_stats(t, load_date, "failed",
+                                     error=oc["error"])
+             stats["attempts"] = oc["attempts"]
              results.append(stats)
 
              if stats["status"] in FAILURE_STATUSES:
-                 rlog.warning("[%s %d/%d] %s.%s failed - continuing with next table",
-                              folder, i, len(folder_tables), t["connection"], t["name"])
+                 rlog.warning("[%s] %s failed after %d attempt(s) - "
+                              "continuing", folder, t["name"],
+                              stats["attempts"])
 
-         folder_failed = any(t["status"] in FAILURE_STATUSES for t in
-results)
+         folder_failed = any(t["status"] in FAILURE_STATUSES for t in results)
          any_failed = any_failed or folder_failed
 
          pending_tables = [t["name"] for t in results
@@ -525,10 +495,18 @@ results)
              "finished_at": _utc_now_iso(),
              "status": "partial_failure" if folder_failed else "success",
              "pending_tables": pending_tables,
-             # folder-level fields
+             # folder-level fields (as before)
              "folder": folder,
              "load_date": load_date.isoformat(),
              "tables": results,
+             # operator summary counts (Part B request, 2026-11-14)
+             "tables_total": len(results),
+             "tables_extracted": sum(
+                 1 for r in results if r["status"] == "extracted"),
+             "tables_skipped": sum(
+                 1 for r in results if r["status"] == "skipped"),
+             "tables_failed": sum(
+                 1 for r in results if r["status"] in FAILURE_STATUSES),
          }
          manifests[folder] = envelope
 
