@@ -157,5 +157,5 @@ writer:
 # keepalive_minutes: Oracle expire_time (server probe interval in minutes).
 #   Must stay BELOW the network firewall's idle timeout.
 extraction:
-  max_parallel_folders: 4
+  max_parallel_folders: 1
   keepalive_minutes: 10

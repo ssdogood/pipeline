@@ -33,6 +33,9 @@ connections:
     port: 1523
     service: prd
     folder: etl
+    table_concurrency: 1
+    retries: 2
+    retry_backoff_seconds: 5
     users:
       user_name:
         credential_ref: ora_db.user_name.password
