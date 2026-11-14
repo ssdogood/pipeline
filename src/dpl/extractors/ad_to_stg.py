@@ -372,32 +372,25 @@ def _task_for(
      return attempt
 
 
-def extract_all(
+def prepare_run(
      cfg: dict,
      settings: dict,
-     load_date: date,
-     force: bool = False,
      only_tables: list[str] | None = None,
      run_id: str = "-",
-     profile: str = "manual",
-) -> tuple[dict[str, dict[str, Any]], bool]:
-     """Extract all AD tables; return (manifests_by_folder, any_failed).
+) -> dict[str, Any]:
+     """Run head carved out of extract_all (Phase 4 C1).
 
-     - Startup guards run BEFORE any connection is opened: duplicate/unsafe
-       folders, table collisions, and master/rules drift all raise.
-     - The master CSV is loaded ONCE here and threaded down to every table.
-     - Tables are selected by connection TYPE (SOURCE_TYPE), grouped by
-       their connection's folder, sequential execution per folder group.
-     - CONTINUE ON FAILURE: a table that fails is recorded as 'failed' and
-       the next table proceeds normally. The run's exit code still
-       reflects overall failure via any_failed.
-     - Each folder gets its own manifest payload, keyed by folder name.
-     - run_id (from the wrapper) is stamped into every table's log context.
+     Mirrors oracle_to_stg.prepare_run: guards, vault init, master and
+     rules load/validation, table selection, folder grouping - the
+     everything-before-any-bind step. The wrapper (C2) calls this
+     once per pipe, then schedules folders via extract_folder.
+
+     Returns the run context (started_at, by_folder, schema_master,
+     rules) - same keys as the Oracle extractor, by contract.
      """
      rlog = get_run_logger("dpl.ad_to_stg", run_id=run_id)
 
      started_at = _utc_now_iso()
-     runs_root = settings["paths"]["runs_root"]
 
      # --- guards: fail loudly before opening anything ---
      validate_config_folders(cfg)
@@ -436,85 +429,136 @@ def extract_all(
          folder = cfg["connections"][t["connection"]]["folder"]
          by_folder.setdefault(folder, []).append(t)
 
+     return {
+         "started_at": started_at,
+         "by_folder": by_folder,
+         "schema_master": schema_master,
+         "rules": rules,
+     }
+
+
+def extract_folder(
+     ctx: dict[str, Any],
+     cfg: dict,
+     settings: dict,
+     load_date: date,
+     folder: str,
+     force: bool = False,
+     run_id: str = "-",
+     profile: str = "manual",
+) -> dict[str, Any]:
+     """Extract ONE folder's tables; return its envelope (Phase 4 C1).
+
+     The former folder-loop body, unchanged: one long-lived LDAP
+     session (B1 worker), per-connection knobs, envelope with summary
+     counts, manifest write. No keepalive (AD ruling: reconnect on
+     failure is handled by the health gate, not pooling semantics).
+     Table failures are recorded, never raised; a folder name not in
+     ctx['by_folder'] raises KeyError (the caller records it).
+     """
+     rlog = get_run_logger("dpl.ad_to_stg", run_id=run_id)
+     folder_tables = ctx["by_folder"][folder]
+     runs_root = settings["paths"]["runs_root"]
+
+     # folder:connection is 1:1, so all tables share ONE connection.
+     conn_name = folder_tables[0]["connection"]
+     conn_cfg = cfg["connections"][conn_name]
+     table_conc = conn_cfg.get("table_concurrency", 1)
+     retries = conn_cfg.get("retries", 2)
+     backoff = conn_cfg.get("retry_backoff_seconds", 5)
+
+     # AD ruling: plain connect, NO keepalive/expiry.
+     def factory(_cn=conn_name):
+         return connect(cfg, _cn)
+
+     rlog.info("[%s] extracting %d table(s) (lanes=%d, retries=%d)",
+               folder, len(folder_tables), table_conc, retries)
+
+     tasks = [
+         (t["name"], _task_for(cfg, settings, t, load_date, force,
+                               ctx["schema_master"], ctx["rules"], run_id))
+         for t in folder_tables
+     ]
+
+     outcomes = run_folder_tables(
+         folder, tasks, factory,
+         table_concurrency=table_conc, retries=retries,
+         backoff_seconds=backoff)
+
+     results: list[dict[str, Any]] = []
+     for t, oc in zip(folder_tables, outcomes):
+         if oc["status"] == "ok":
+             stats = oc["result"]
+         else:
+             stats = _build_stats(t, load_date, "failed",
+                                  error=oc["error"])
+         stats["attempts"] = oc["attempts"]
+         results.append(stats)
+
+         if stats["status"] in FAILURE_STATUSES:
+             rlog.warning("[%s] %s failed after %d attempt(s) - continuing",
+                          folder, t["name"], stats["attempts"])
+
+     folder_failed = any(t["status"] in FAILURE_STATUSES for t in results)
+
+     pending_tables = [t["name"] for t in results
+                       if t["status"] in FAILURE_STATUSES]
+
+     envelope = {
+         # run-level fields: update_history rebuilds the DB from these
+         "run_id": run_id,
+         "profile": profile,
+         "started_at": ctx["started_at"],
+         "finished_at": _utc_now_iso(),
+         "status": "partial_failure" if folder_failed else "success",
+         "pending_tables": pending_tables,
+         # folder-level fields (as before)
+         "folder": folder,
+         "load_date": load_date.isoformat(),
+         "tables": results,
+         # operator summary counts (Part B request, 2026-11-14)
+         "tables_total": len(results),
+         "tables_extracted": sum(
+             1 for r in results if r["status"] == "extracted"),
+         "tables_skipped": sum(
+             1 for r in results if r["status"] == "skipped"),
+         "tables_failed": sum(
+             1 for r in results if r["status"] in FAILURE_STATUSES),
+     }
+
+     manifest_dir = runs_dir(runs_root, load_date, folder)
+     write_manifest(manifest_dir, run_id, envelope)
+     rlog.info("manifest written: %s/_manifest_%s.json",
+               manifest_dir, run_id)
+
+     return envelope
+
+
+def extract_all(
+     cfg: dict,
+     settings: dict,
+     load_date: date,
+     force: bool = False,
+     only_tables: list[str] | None = None,
+     run_id: str = "-",
+     profile: str = "manual",
+) -> tuple[dict[str, dict[str, Any]], bool]:
+     """Extract all AD tables; return (manifests_by_folder, any_failed).
+
+     Thin shell over prepare_run + extract_folder (Phase 4 C1) - the
+     manual CLI path. The wrapper's merged scheduler (C2) calls the
+     pieces separately. Signature and behavior unchanged.
+     """
+     ctx = prepare_run(cfg, settings, only_tables=only_tables, run_id=run_id)
+
      manifests: dict[str, dict[str, Any]] = {}
-     any_failed = False
+     for folder in ctx["by_folder"]:
+         manifests[folder] = extract_folder(
+             ctx, cfg, settings, load_date, folder, force=force,
+             run_id=run_id, profile=profile)
 
-     for folder, folder_tables in by_folder.items():
-         # folder:connection is 1:1, so all tables share ONE connection.
-         conn_name = folder_tables[0]["connection"]
-         conn_cfg = cfg["connections"][conn_name]
-         table_conc = conn_cfg.get("table_concurrency", 1)
-         retries = conn_cfg.get("retries", 2)
-         backoff = conn_cfg.get("retry_backoff_seconds", 5)
-
-         # AD ruling: plain connect, NO keepalive/expiry - reconnect on
-         # failure is handled by the health gate, not pooling semantics.
-         def factory(_cn=conn_name):
-             return connect(cfg, _cn)
-
-         rlog.info("[%s] extracting %d table(s) (lanes=%d, retries=%d)",
-                   folder, len(folder_tables), table_conc, retries)
-
-         tasks = [
-             (t["name"], _task_for(cfg, settings, t, load_date, force,
-                                   schema_master, rules, run_id))
-             for t in folder_tables
-         ]
-
-         outcomes = run_folder_tables(
-             folder, tasks, factory,
-             table_concurrency=table_conc, retries=retries,
-             backoff_seconds=backoff)
-
-         results: list[dict[str, Any]] = []
-         for t, oc in zip(folder_tables, outcomes):
-             if oc["status"] == "ok":
-                 stats = oc["result"]
-             else:
-                 stats = _build_stats(t, load_date, "failed",
-                                     error=oc["error"])
-             stats["attempts"] = oc["attempts"]
-             results.append(stats)
-
-             if stats["status"] in FAILURE_STATUSES:
-                 rlog.warning("[%s] %s failed after %d attempt(s) - "
-                              "continuing", folder, t["name"],
-                              stats["attempts"])
-
-         folder_failed = any(t["status"] in FAILURE_STATUSES for t in results)
-         any_failed = any_failed or folder_failed
-
-         pending_tables = [t["name"] for t in results
-                           if t["status"] in FAILURE_STATUSES]
-
-         envelope = {
-             # run-level fields: update_history rebuilds the DB from these
-             "run_id": run_id,
-             "profile": profile,
-             "started_at": started_at,
-             "finished_at": _utc_now_iso(),
-             "status": "partial_failure" if folder_failed else "success",
-             "pending_tables": pending_tables,
-             # folder-level fields (as before)
-             "folder": folder,
-             "load_date": load_date.isoformat(),
-             "tables": results,
-             # operator summary counts (Part B request, 2026-11-14)
-             "tables_total": len(results),
-             "tables_extracted": sum(
-                 1 for r in results if r["status"] == "extracted"),
-             "tables_skipped": sum(
-                 1 for r in results if r["status"] == "skipped"),
-             "tables_failed": sum(
-                 1 for r in results if r["status"] in FAILURE_STATUSES),
-         }
-         manifests[folder] = envelope
-
-         manifest_dir = runs_dir(runs_root, load_date, folder)
-         write_manifest(manifest_dir, run_id, envelope)
-         rlog.info("manifest written: %s/_manifest_%s.json",
-                   manifest_dir, run_id)
-
+     any_failed = any(m["status"] == "partial_failure"
+                      for m in manifests.values())
      return manifests, any_failed
 
 
