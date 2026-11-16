@@ -70,8 +70,10 @@ log = get_run_logger("dpl.oracle_to_stg")
 CONFIG_FILE = "config/extractors/oracle_to_stg.yaml"
 SETTINGS_FILE = "config/settings.laptop.yaml"
 
-# Registry files - auto is generator-owned, ad is hand-maintained.
-# They are merged at load time; a table key may appear in only one of them.
+# Registry files for THIS extractor, one set per extractor:
+# the schema master is generator-owned (dpl.lib.generate_schemas),
+# the table rules CSV is hand-maintained. They are NOT merged with
+# any other extractor's registries.
 MASTER_AUTO = "config/extractors/schema_master_oracle_to_stg.csv"
 RULES_CSV = "config/extractors/table_rules_oracle_to_stg.csv"
 
@@ -170,6 +172,8 @@ def _task_for(
     schema_master: dict | None,
     rules: dict | None,
     run_id: str,
+    pos: int | None = None,
+    total: int | None = None,
 ):
     """Build the per-table task for the folder worker (B1).
 
@@ -191,6 +195,13 @@ def _task_for(
     def attempt(conn):
         """One attempt on the open session. Returns stats; raises on failure."""
         start = time.time()
+
+        if pos is not None:
+            # PT-029: per-table start line restored at its new home -
+            # old extract_all printed "[stg N/136] extracting..." before
+            # each table; the counter is the table's fixed config
+            # position, stable across retries and interleaved lanes.
+            tlog.info("[%s %d/%d] extracting...", folder, pos, total)
 
         if not force:
             existing_dir = _check_exists(settings, cfg, load_date,
@@ -217,6 +228,7 @@ def _task_for(
             transforms=cfg.get("transforms", {}),
             dedup_columns=dedup_parsed,
             sort_spec=sort_spec,
+            run_id=run_id,
         ) as w:
             for df in iter_batches(conn, query, batch_size=batch_rows,
                                    declared=declared, strict=strict_cast):
@@ -351,10 +363,12 @@ def extract_folder(
               "keepalive=%s min)", folder, len(folder_tables),
               table_conc, retries, keepalive)
 
+    total_tables = len(folder_tables)
     tasks = [
         (t["name"], _task_for(cfg, settings, t, load_date, force,
-                              ctx["schema_master"], ctx["rules"], run_id))
-        for t in folder_tables
+                              ctx["schema_master"], ctx["rules"], run_id,
+                              pos=pos, total=total_tables))
+        for pos, t in enumerate(folder_tables, start=1)
     ]
 
     outcomes = run_folder_tables(

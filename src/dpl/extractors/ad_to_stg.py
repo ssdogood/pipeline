@@ -227,149 +227,159 @@ def _utc_now_iso() -> str:
 
 
 def _task_for(
-     cfg: dict,
-     settings: dict,
-     table_cfg: dict,
-     load_date: date,
-     force: bool,
-     schema_master: dict | None,
-     rules: dict | None,
-     run_id: str,
+    cfg: dict,
+    settings: dict,
+    table_cfg: dict,
+    load_date: date,
+    force: bool,
+    schema_master: dict | None,
+    rules: dict | None,
+    run_id: str,
+    pos: int | None = None,
+    total: int | None = None,
 ):
-     """Build the per-table task for the folder worker (B1).
+    """Build the per-table task for the folder worker (B1).
 
-     Mirrors oracle_to_stg._task_for exactly. The returned callable takes
-     the LIVE folder-session connection and performs exactly ONE attempt:
-     fresh writers, fresh buffers, fresh paged search. On any failure it
-     RAISES - the health gate classifies, resets the session only on
-     transport-class errors, and retries per the connection's knobs.
-     Declared-schema check runs before the skip check (order preserved
-     from the old code): a table missing from the master fails even if
-     its parquet exists.
-     """
-     table_name = table_cfg["name"]
-     search_base = table_cfg["search_base"]
-     search_filter = table_cfg["filter"]
-     conn_name = table_cfg["connection"]
-     folder = cfg["connections"][conn_name]["folder"]
-     page_size = cfg["connections"][conn_name].get("page_size", 500)
+    Mirrors oracle_to_stg._task_for exactly. The returned callable takes
+    the LIVE folder-session connection and performs exactly ONE attempt:
+    fresh writers, fresh buffers, fresh paged search. On any failure it
+    RAISES - the health gate classifies, resets the session only on
+    transport-class errors, and retries per the connection's knobs.
+    Declared-schema check runs before the skip check (order preserved
+    from the old code): a table missing from the master fails even if
+    its parquet exists.
+    """
+    table_name = table_cfg["name"]
+    search_base = table_cfg["search_base"]
+    search_filter = table_cfg["filter"]
+    conn_name = table_cfg["connection"]
+    folder = cfg["connections"][conn_name]["folder"]
+    page_size = cfg["connections"][conn_name].get("page_size", 500)
 
-     tlog = get_run_logger("dpl.ad_to_stg", run_id=run_id, table=table_name)
+    tlog = get_run_logger("dpl.ad_to_stg", run_id=run_id, table=table_name)
 
-     def attempt(conn):
-         """One attempt on the open session. Returns stats; raises on failure."""
-         start = time.time()
+    def attempt(conn):
+        """One attempt on the open session. Returns stats; raises on failure."""
+        start = time.time()
 
-         # --- declared schema: the master CSV is the authority (M3/M5) ---
-         # ValueError here is data-class: no retry, table fails - same
-         # net behavior as the old no-retry early return.
-         if schema_master is None:
-             raise ValueError("schema master not supplied")
-         declared, mv_columns = _declared_schema_for(schema_master,
-                                                    folder, table_name)
+        if pos is not None:
+            # PT-029: per-table start line restored at its new home -
+            # counter is the table's fixed config position; mirrors
+            # oracle_to_stg's attempt() exactly.
+            tlog.info("[%s %d/%d] extracting...", folder, pos, total)
 
-         parent_cols = [c for c in declared if c not in mv_columns]
-         ldap_attributes = list(declared.keys())
+        # --- declared schema: the master CSV is the authority (M3/M5) ---
+        # ValueError here is data-class: no retry, table fails - same
+        # net behavior as the old no-retry early return.
+        if schema_master is None:
+            raise ValueError("schema master not supplied")
+        declared, mv_columns = _declared_schema_for(schema_master,
+                                                folder, table_name)
 
-         child_names = {mv: f"{table_name.lower()}_{mv}" for mv in mv_columns}
+        parent_cols = [c for c in declared if c not in mv_columns]
+        ldap_attributes = list(declared.keys())
 
-         if not force:
-             existing_dir = _check_exists(settings, cfg, load_date,
-                                          conn_name, table_name,
-                                          list(child_names.values()))
-             if existing_dir:
-                 tlog.info("skipping (%s exists)", existing_dir)
-                 return _build_stats(table_cfg, load_date, "skipped")
+        child_names = {mv: f"{table_name.lower()}_{mv}" for mv in mv_columns}
 
-         rule = _rules_for(rules, folder, table_name)
-         dedup_parsed = rule.get("dedup")
-         sort_spec = rule.get("sort_spec") or []
+        if not force:
+            existing_dir = _check_exists(settings, cfg, load_date,
+                                        conn_name, table_name,
+                                        list(child_names.values()))
+            if existing_dir:
+                tlog.info("skipping (%s exists)", existing_dir)
+                return _build_stats(table_cfg, load_date, "skipped")
 
-         with ExitStack() as stack:
-             pw = stack.enter_context(ParquetWriter(
-                 settings,
-                 source=folder,
-                 table=table_name.lower(),
-                 load_date=load_date,
-                 transforms={},          # AD: case-preserved, no cleanse
-                 dedup_columns=dedup_parsed,
-                 sort_spec=sort_spec,
-             ))
-             # child writers: own rules row, own dedup/sort
-             cws: dict[str, Any] = {}
-             for mv, cname in child_names.items():
-                 crule = _rules_for(rules, folder, cname)
-                 cws[mv] = stack.enter_context(ParquetWriter(
-                     settings,
-                     source=folder,
-                     table=cname,
-                     load_date=load_date,
-                     transforms={},
-                     dedup_columns=crule.get("dedup"),
-                     sort_spec=crule.get("sort_spec") or [],
-                 ))
+        rule = _rules_for(rules, folder, table_name)
+        dedup_parsed = rule.get("dedup")
+        sort_spec = rule.get("sort_spec") or []
 
-             parent_buf: list[dict[str, Any]] = []
-             child_bufs: dict[str, list[dict[str, Any]]] = \
-                     {mv: [] for mv in mv_columns}
+        with ExitStack() as stack:
+            pw = stack.enter_context(ParquetWriter(
+                settings,
+                source=folder,
+                table=table_name.lower(),
+                load_date=load_date,
+                transforms={},          # AD: case-preserved, no cleanse
+                dedup_columns=dedup_parsed,
+                sort_spec=sort_spec,
+                run_id=run_id,
+            ))
+            # child writers: own rules row, own dedup/sort
+            cws: dict[str, Any] = {}
+            for mv, cname in child_names.items():
+                crule = _rules_for(rules, folder, cname)
+                cws[mv] = stack.enter_context(ParquetWriter(
+                    settings,
+                    source=folder,
+                    table=cname,
+                    load_date=load_date,
+                    transforms={},
+                    dedup_columns=crule.get("dedup"),
+                    sort_spec=crule.get("sort_spec") or [],
+                    run_id=run_id,
+                ))
 
-             def _flush() -> None:
-                 if parent_buf:
-                     pw.append(pl.from_dicts(parent_buf,
-                                             schema={c: declared[c]
-                                                     for c in parent_cols}))
-                     parent_buf.clear()
-                 for mv, buf in child_bufs.items():
-                     if buf:
-                         cws[mv].append(pl.from_dicts(buf,
-                                         schema=CHILD_SCHEMA))
-                         buf.clear()
+            parent_buf: list[dict[str, Any]] = []
+            child_bufs: dict[str, list[dict[str, Any]]] = \
+                    {mv: [] for mv in mv_columns}
 
-             for entry in iter_paged(conn, search_base, search_filter,
-                                     ldap_attributes,
-                                     page_size=page_size):
-                 # case-insensitive: server casing -> master lowercase
-                 low = {k.lower(): v for k, v in (entry or {}).items()}
-                 guid = _cell(low.get("objectguid"))
+            def _flush() -> None:
+                if parent_buf:
+                    pw.append(pl.from_dicts(parent_buf,
+                                            schema={c: declared[c]
+                                                    for c in parent_cols}))
+                    parent_buf.clear()
+                for mv, buf in child_bufs.items():
+                    if buf:
+                        cws[mv].append(pl.from_dicts(buf,
+                                        schema=CHILD_SCHEMA))
+                        buf.clear()
 
-                 parent_buf.append(
-                     {c: _cell(low.get(c)) for c in parent_cols}
-                 )
-                 for mv in mv_columns:
-                     vals = low.get(mv)
-                     if vals is None or guid is None:
-                         continue
-                     if not isinstance(vals, (list, tuple)):
-                         vals = [vals]
-                     for v in vals:
-                         if v is not None:
-                             child_bufs[mv].append(
-                                 {"objectguid": guid, "value": str(v)}
-                             )
-                 if len(parent_buf) >= ENTRY_FLUSH:
-                     _flush()
+            for entry in iter_paged(conn, search_base, search_filter,
+                                    ldap_attributes,
+                                    page_size=page_size):
+                # case-insensitive: server casing -> master lowercase
+                low = {k.lower(): v for k, v in (entry or {}).items()}
+                guid = _cell(low.get("objectguid"))
 
-             _flush()
+                parent_buf.append(
+                    {c: _cell(low.get(c)) for c in parent_cols}
+                )
+                for mv in mv_columns:
+                    vals = low.get(mv)
+                    if vals is None or guid is None:
+                        continue
+                    if not isinstance(vals, (list, tuple)):
+                        vals = [vals]
+                    for v in vals:
+                        if v is not None:
+                            child_bufs[mv].append(
+                                {"objectguid": guid, "value": str(v)}
+                            )
+                if len(parent_buf) >= ENTRY_FLUSH:
+                    _flush()
 
-             parent_stats = pw.close()
-             child_stats = {child_names[mv]:
-                            cws[mv].close().get("rows_written", 0)
-                            for mv in mv_columns}
+            _flush()
 
-             tlog.info("completed (%d rows, %d child rows, %.1fs)",
-                       parent_stats.get("rows_written", 0),
-                       sum(child_stats.values()) if child_stats else 0,
-                       time.time() - start)
-             return _build_stats(
-                 table_cfg, load_date, "extracted",
-                 rows_read=parent_stats.get("rows_read", 0),
-                 rows_written=parent_stats.get("rows_written", 0),
-                 duration_sec=time.time() - start,
-                 output_path=parent_stats.get("output_dir"),
-                 children=child_stats,
-             )
+            parent_stats = pw.close()
+            child_stats = {child_names[mv]:
+                        cws[mv].close().get("rows_written", 0)
+                        for mv in mv_columns}
 
-     return attempt
+            tlog.info("completed (%d rows, %d child rows, %.1fs)",
+                    parent_stats.get("rows_written", 0),
+                    sum(child_stats.values()) if child_stats else 0,
+                    time.time() - start)
+            return _build_stats(
+                table_cfg, load_date, "extracted",
+                rows_read=parent_stats.get("rows_read", 0),
+                rows_written=parent_stats.get("rows_written", 0),
+                duration_sec=time.time() - start,
+                output_path=parent_stats.get("output_dir"),
+                children=child_stats,
+            )
+
+    return attempt
 
 
 def prepare_run(
@@ -447,91 +457,93 @@ def extract_folder(
      run_id: str = "-",
      profile: str = "manual",
 ) -> dict[str, Any]:
-     """Extract ONE folder's tables; return its envelope (Phase 4 C1).
+    """Extract ONE folder's tables; return its envelope (Phase 4 C1).
 
-     The former folder-loop body, unchanged: one long-lived LDAP
-     session (B1 worker), per-connection knobs, envelope with summary
-     counts, manifest write. No keepalive (AD ruling: reconnect on
-     failure is handled by the health gate, not pooling semantics).
-     Table failures are recorded, never raised; a folder name not in
-     ctx['by_folder'] raises KeyError (the caller records it).
-     """
-     rlog = get_run_logger("dpl.ad_to_stg", run_id=run_id)
-     folder_tables = ctx["by_folder"][folder]
-     runs_root = settings["paths"]["runs_root"]
+    The former folder-loop body, unchanged: one long-lived LDAP
+    session (B1 worker), per-connection knobs, envelope with summary
+    counts, manifest write. No keepalive (AD ruling: reconnect on
+    failure is handled by the health gate, not pooling semantics).
+    Table failures are recorded, never raised; a folder name not in
+    ctx['by_folder'] raises KeyError (the caller records it).
+    """
+    rlog = get_run_logger("dpl.ad_to_stg", run_id=run_id)
+    folder_tables = ctx["by_folder"][folder]
+    runs_root = settings["paths"]["runs_root"]
 
-     # folder:connection is 1:1, so all tables share ONE connection.
-     conn_name = folder_tables[0]["connection"]
-     conn_cfg = cfg["connections"][conn_name]
-     table_conc = conn_cfg.get("table_concurrency", 1)
-     retries = conn_cfg.get("retries", 2)
-     backoff = conn_cfg.get("retry_backoff_seconds", 5)
+    # folder:connection is 1:1, so all tables share ONE connection.
+    conn_name = folder_tables[0]["connection"]
+    conn_cfg = cfg["connections"][conn_name]
+    table_conc = conn_cfg.get("table_concurrency", 1)
+    retries = conn_cfg.get("retries", 2)
+    backoff = conn_cfg.get("retry_backoff_seconds", 5)
 
-     # AD ruling: plain connect, NO keepalive/expiry.
-     def factory(_cn=conn_name):
-         return connect(cfg, _cn)
+    # AD ruling: plain connect, NO keepalive/expiry.
+    def factory(_cn=conn_name):
+        return connect(cfg, _cn)
 
-     rlog.info("[%s] extracting %d table(s) (lanes=%d, retries=%d)",
-               folder, len(folder_tables), table_conc, retries)
+    rlog.info("[%s] extracting %d table(s) (lanes=%d, retries=%d)",
+            folder, len(folder_tables), table_conc, retries)
 
-     tasks = [
-         (t["name"], _task_for(cfg, settings, t, load_date, force,
-                               ctx["schema_master"], ctx["rules"], run_id))
-         for t in folder_tables
-     ]
+    total_tables = len(folder_tables)
+    tasks = [
+        (t["name"], _task_for(cfg, settings, t, load_date, force,
+                              ctx["schema_master"], ctx["rules"], run_id,
+                              pos=pos, total=total_tables))
+        for pos, t in enumerate(folder_tables, start=1)
+    ]
 
-     outcomes = run_folder_tables(
-         folder, tasks, factory,
-         table_concurrency=table_conc, retries=retries,
-         backoff_seconds=backoff)
+    outcomes = run_folder_tables(
+        folder, tasks, factory,
+        table_concurrency=table_conc, retries=retries,
+        backoff_seconds=backoff)
 
-     results: list[dict[str, Any]] = []
-     for t, oc in zip(folder_tables, outcomes):
-         if oc["status"] == "ok":
-             stats = oc["result"]
-         else:
-             stats = _build_stats(t, load_date, "failed",
-                                  error=oc["error"])
-         stats["attempts"] = oc["attempts"]
-         results.append(stats)
+    results: list[dict[str, Any]] = []
+    for t, oc in zip(folder_tables, outcomes):
+        if oc["status"] == "ok":
+            stats = oc["result"]
+        else:
+            stats = _build_stats(t, load_date, "failed",
+                                error=oc["error"])
+        stats["attempts"] = oc["attempts"]
+        results.append(stats)
 
-         if stats["status"] in FAILURE_STATUSES:
-             rlog.warning("[%s] %s failed after %d attempt(s) - continuing",
-                          folder, t["name"], stats["attempts"])
+        if stats["status"] in FAILURE_STATUSES:
+            rlog.warning("[%s] %s failed after %d attempt(s) - continuing",
+                        folder, t["name"], stats["attempts"])
 
-     folder_failed = any(t["status"] in FAILURE_STATUSES for t in results)
+    folder_failed = any(t["status"] in FAILURE_STATUSES for t in results)
 
-     pending_tables = [t["name"] for t in results
-                       if t["status"] in FAILURE_STATUSES]
+    pending_tables = [t["name"] for t in results
+                    if t["status"] in FAILURE_STATUSES]
 
-     envelope = {
-         # run-level fields: update_history rebuilds the DB from these
-         "run_id": run_id,
-         "profile": profile,
-         "started_at": ctx["started_at"],
-         "finished_at": _utc_now_iso(),
-         "status": "partial_failure" if folder_failed else "success",
-         "pending_tables": pending_tables,
-         # folder-level fields (as before)
-         "folder": folder,
-         "load_date": load_date.isoformat(),
-         "tables": results,
-         # operator summary counts (Part B request, 2026-11-14)
-         "tables_total": len(results),
-         "tables_extracted": sum(
-             1 for r in results if r["status"] == "extracted"),
-         "tables_skipped": sum(
-             1 for r in results if r["status"] == "skipped"),
-         "tables_failed": sum(
-             1 for r in results if r["status"] in FAILURE_STATUSES),
-     }
+    envelope = {
+        # run-level fields: update_history rebuilds the DB from these
+        "run_id": run_id,
+        "profile": profile,
+        "started_at": ctx["started_at"],
+        "finished_at": _utc_now_iso(),
+        "status": "partial_failure" if folder_failed else "success",
+        "pending_tables": pending_tables,
+        # folder-level fields (as before)
+        "folder": folder,
+        "load_date": load_date.isoformat(),
+        "tables": results,
+        # operator summary counts (Part B request, 2026-11-14)
+        "tables_total": len(results),
+        "tables_extracted": sum(
+            1 for r in results if r["status"] == "extracted"),
+        "tables_skipped": sum(
+            1 for r in results if r["status"] == "skipped"),
+        "tables_failed": sum(
+            1 for r in results if r["status"] in FAILURE_STATUSES),
+    }
 
-     manifest_dir = runs_dir(runs_root, load_date, folder)
-     write_manifest(manifest_dir, run_id, envelope)
-     rlog.info("manifest written: %s/_manifest_%s.json",
-               manifest_dir, run_id)
+    manifest_dir = runs_dir(runs_root, load_date, folder)
+    write_manifest(manifest_dir, run_id, envelope)
+    rlog.info("manifest written: %s/_manifest_%s.json",
+            manifest_dir, run_id)
 
-     return envelope
+    return envelope
 
 
 def extract_all(
@@ -563,71 +575,71 @@ def extract_all(
 
 
 def main(run_id: str = "-") -> int:
-     parser = argparse.ArgumentParser(description="Active Directory extractor")
-     parser.add_argument("--force", action="store_true",
-                         help="re-extract even if files exist")
-     parser.add_argument("--tables",
-                         help="comma-separated table names to extract")
-     parser.add_argument("-v", "--verbose", action="store_true",
-                         help="verbose logging")
-     parser.add_argument("-c", "--config", default=CONFIG_FILE,
-                         help="config/extractors/ad_to_stg.yaml")
-     parser.add_argument("--settings", default=SETTINGS_FILE,
-                         help="config/settings.laptop.yaml")
+    parser = argparse.ArgumentParser(description="Active Directory extractor")
+    parser.add_argument("--force", action="store_true",
+                        help="re-extract even if files exist")
+    parser.add_argument("--tables",
+                        help="comma-separated table names to extract")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="verbose logging")
+    parser.add_argument("-c", "--config", default=CONFIG_FILE,
+                        help="config/extractors/ad_to_stg.yaml")
+    parser.add_argument("--settings", default=SETTINGS_FILE,
+                        help="config/settings.laptop.yaml")
 
-     args = parser.parse_args()
+    args = parser.parse_args()
 
-     setup_logging()
+    setup_logging()
 
-     if args.verbose:
-         log.setLevel(logging.DEBUG)
+    if args.verbose:
+        log.setLevel(logging.DEBUG)
 
-     try:
-         cfg = load_config(CONFIG_FILE, LDAP_CONFIG_SCHEMA)
-         if cfg is None:
-             raise RuntimeError(f"Failed to load {CONFIG_FILE}")
+    try:
+        cfg = load_config(CONFIG_FILE, LDAP_CONFIG_SCHEMA)
+        if cfg is None:
+            raise RuntimeError(f"Failed to load {CONFIG_FILE}")
 
-         settings = load_settings(SETTINGS_FILE)
-         if settings is None:
-             raise RuntimeError(f"Failed to load {SETTINGS_FILE}")
-     except Exception as exc:                               	# noqa: BLE001 - top-level: any startup failure maps to exit code 1 with a logged cause
-         log.critical("config/settings load failed: %s", exc)
-         return 1
+        settings = load_settings(SETTINGS_FILE)
+        if settings is None:
+            raise RuntimeError(f"Failed to load {SETTINGS_FILE}")
+    except Exception as exc:                               	# noqa: BLE001 - top-level: any startup failure maps to exit code 1 with a logged cause
+        log.critical("config/settings load failed: %s", exc)
+        return 1
 
-     only_tables = [t.strip() for t in args.tables.split(",")] if args.tables else None
-     load_date = date.today()
+    only_tables = [t.strip() for t in args.tables.split(",")] if args.tables else None
+    load_date = date.today()
 
-     if run_id == "-":
-         run_id = make_run_id(prefix="manual_")
+    if run_id == "-":
+        run_id = make_run_id(prefix="manual_")
 
-     log.info("starting AD extraction (force=%s, tables=%s, run_id=%s)",
-              args.force, only_tables, run_id)
+    log.info("starting AD extraction (force=%s, tables=%s, run_id=%s)",
+            args.force, only_tables, run_id)
 
-     try:
-         manifests, any_failed = extract_all(
-             cfg, settings, load_date, force=args.force, only_tables=only_tables,
-             run_id=run_id, profile="manual",
-         )
-     except (ValueError, KeyError, FileNotFoundError) as exc:
-         log.critical("startup validation failed: %s", exc)
-         return 1
+    try:
+        manifests, any_failed = extract_all(
+            cfg, settings, load_date, force=args.force, only_tables=only_tables,
+            run_id=run_id, profile="manual",
+        )
+    except (ValueError, KeyError, FileNotFoundError) as exc:
+        log.critical("startup validation failed: %s", exc)
+        return 1
 
-     # summary
-     all_tables = [t for m in manifests.values() for t in m["tables"]]
-     extracted = sum(1 for t in all_tables if t["status"] == "extracted")
-     skipped = sum(1 for t in all_tables if t["status"] == "skipped")
-     failed = sum(1 for t in all_tables if t["status"] == "failed")
+    # summary
+    all_tables = [t for m in manifests.values() for t in m["tables"]]
+    extracted = sum(1 for t in all_tables if t["status"] == "extracted")
+    skipped = sum(1 for t in all_tables if t["status"] == "skipped")
+    failed = sum(1 for t in all_tables if t["status"] == "failed")
 
-     log.info(
-         "extraction complete: %d extracted, %d skipped, %d failed",
-         extracted, skipped, failed,
-     )
+    log.info(
+        "extraction complete: %d extracted, %d skipped, %d failed",
+        extracted, skipped, failed,
+    )
 
-     if any_failed:
-         log.warning("Some tables failed - see logs for details")
-         return 1
+    if any_failed:
+        log.warning("Some tables failed - see logs for details")
+        return 1
 
-     return 0
+    return 0
 
 
 if __name__ == "__main__":
