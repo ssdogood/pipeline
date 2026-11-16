@@ -33,6 +33,7 @@ values always fail loudly.
 
 from __future__ import annotations
 
+import math
 import re
 
 from dpl.lib.logger import get_run_logger
@@ -193,38 +194,59 @@ def build_plan(max_parallel_folders: int,
 
 
 def format_plan(plan: dict) -> str:
-    """Render the plan as the operator-facing dry-run block (stdout)."""
+    """Render the plan as the operator-facing dry-run block (stdout).
+
+    Column widths adapt to the longest actual value (floored at the
+    column label) so long connection/folder names can never break
+    alignment; the banner width derives from the table itself.
+    """
+    conns = plan["connections"]
+
+    w_conn = max([len("connection")] + [len(n) for n in conns]) + 2
+    w_type = max([len("type")] + [len(c["type"]) for c in conns.values()]) + 2
+    w_fold = max([len("folder")] + [len(c["folder"]) for c in conns.values()]) + 2
+    w_num = len("backoff") + 2          # right-aligned numeric columns
+
+    header = (
+        f"{'connection':<{w_conn}}{'type':<{w_type}}{'folder':<{w_fold}}"
+        f"{'conc':>{w_num}}{'retries':>{w_num}}{'backoff':>{w_num}}"
+        "  serial_group"
+    )
+    width = (math.floor(len(header) / 2) * 2) + 2
+
     lines = [
-        "==== EXTRACTION PLAN " + "=" * 42,
+        "=" * width,
+        " " * (math.floor(width / 2) - 8)  + "EXTRACTION PLAN",
+        "=" * width,
         (f"max_parallel_folders : {plan['max_parallel_folders']}"
-        "        (settings: extraction.max_parallel_folders)"),
-        ("keepalive_minutes    : see settings (Oracle expire_time;"
-        " keep below firewall idle timeout)"),
+         "  (settings: extraction.max_parallel_folders)"),
+        ("keepalive_minutes    : see settings (driver keepalive: Oracle uses"
+        " expire_time; AD ruling: reconnect on drop - no keepalive)"),
         "",
-        (f"{'connection':<16}{'type':<9}{'folder':<12}"
-        f"{'conc':>5}{'retries':>9}{'backoff':>9}  serial_group"),
+        header,
     ]
-    for name, c in plan["connections"].items():
+    for name, c in conns.items():
         lines.append(
-            f"{name:<16}{c['type']:<9}{c['folder']:<12}"
-            f"{c['table_concurrency']:>5}{c['retries']:>9}"
-            f"{c['retry_backoff_seconds']:>9}  "
-            f"{c.get('serial_group', '-')}")
+            f"{name:<{w_conn}}{c['type']:<{w_type}}{c['folder']:<{w_fold}}"
+            f"{c['table_concurrency']:>{w_num}}{c['retries']:>{w_num}}"
+            f"{c['retry_backoff_seconds']:>{w_num}}"
+            f"  {c.get('serial_group', '-')}"
+        )
     if plan["serial_groups"]:
         lines.append("")
         lines.append("serial groups (members NEVER run in parallel):")
         for g, members in plan["serial_groups"].items():
             lines.append(f"  {g}: {', '.join(members)}"
                          "  -> one chain (config order)")
+    max_conc = max((c["table_concurrency"] for c in conns.values()), default=1)
     lines += [
         "",
         (f"schedulable tasks   : {plan['tasks']} "
-        f"({len(plan['ungrouped'])} free folder(s) + "
-        f"{len(plan['serial_groups'])} chain(s))"),
+         f"({len(plan['ungrouped'])} free folder(s) + "
+         f"{len(plan['serial_groups'])} chain(s))"),
         (f"worst-case sessions : {plan['worst_case_sessions']} "
-        f"(= max_parallel_folders {plan['max_parallel_folders']} x "
-        f"max table_concurrency "
-        f"{max((c['table_concurrency'] for c in plan['connections'].values()), default=1)})"),
-        "=" * 62,
+         f"(= max_parallel_folders {plan['max_parallel_folders']} x "
+         f"max table_concurrency {max_conc})"),
+        "=" * width,
     ]
     return "\n".join(lines)
