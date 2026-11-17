@@ -34,14 +34,14 @@ def test_introspect_task_against_real_oracle():
 
     tables = [t for t in cfg["tables"]
               if cfg["connections"].get(t["connection"], {}).get("type")
-              == gs.SOURCE_TYPE]
+              == "oracle"]
     if not tables:
         pytest.skip("no oracle tables configured")
 
     table = tables[0]
 
     with connect(cfg, table["connection"]) as conn:
-        rows = gs._introspect_task(cfg, table)(conn)
+        rows = gs._introspect_task(cfg, table, gs.oracle_dtype_to_comma_free)(conn)
 
     assert rows, f"no columns introspected for {table['connection']}.{table['name']}"
     assert [r["column_seq"] for r in rows] == \

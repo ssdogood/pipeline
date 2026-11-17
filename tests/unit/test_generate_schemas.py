@@ -96,13 +96,12 @@ def env(monkeypatch):
 
 def patch_connect(monkeypatch, calls: list[str]):
     """Fake connect(): records connection names, returns a stub session."""
-
     def fake_connect(cfg, name, **kwargs):
         calls.append(name)
         return _StubConn(LEGACY_DESC)
-
-    monkeypatch.setattr(gs, "connect", fake_connect)
-    return calls
+    # PT-034: connections dispatch via INTROSPECTORS, not a module
+    # attribute - patch the oracle entry; setitem restores on teardown.
+    monkeypatch.setitem(gs.INTROSPECTORS["oracle"], "connect", fake_connect)
 
 
 def patch_worker(monkeypatch, calls: list[dict],
@@ -156,7 +155,7 @@ def test_one_session_per_connection_and_worker_contract(env, monkeypatch, tmp_pa
     patch_worker(monkeypatch, worker_calls)
 
     rc = gs.generate_schemas("cfg.yaml", str(tmp_path / "master.csv"),
-                             force=True, dry_run=False)
+                                force=True, dry_run=False, source_type="oracle")
 
     assert rc == 0
     # 3 oracle tables on 2 connections -> 2 connect() calls, not 3;
@@ -177,7 +176,8 @@ def test_rows_written_in_config_order_with_per_table_seq(env, monkeypatch, tmp_p
     patch_worker(monkeypatch, [])
 
     out = tmp_path / "master.csv"
-    rc = gs.generate_schemas("cfg.yaml", str(out), force=True, dry_run=False)
+    rc = gs.generate_schemas("cfg.yaml", str(tmp_path / "master.csv"),
+                                    force=True, dry_run=False, source_type="oracle")
     assert rc == 0
 
     lines = _data_lines(out.read_text(encoding="utf-8"))
@@ -199,7 +199,8 @@ def test_failed_table_excluded_exit_code_1(env, monkeypatch, tmp_path):
     patch_worker(monkeypatch, [], failing={"T2"})
 
     out = tmp_path / "master.csv"
-    rc = gs.generate_schemas("cfg.yaml", str(out), force=True, dry_run=False)
+    rc = gs.generate_schemas("cfg.yaml", str(tmp_path / "master.csv"),
+                                    force=True, dry_run=False, source_type="oracle")
 
     assert rc == 1                       # partial failure -> exit 1
     lines = _data_lines(out.read_text(encoding="utf-8"))
@@ -216,7 +217,8 @@ def test_all_failed_returns_1_and_writes_nothing(env, monkeypatch, tmp_path):
     patch_worker(monkeypatch, [], failing={"T1", "T2", "T3"})
 
     out = tmp_path / "master.csv"
-    rc = gs.generate_schemas("cfg.yaml", str(out), force=True, dry_run=False)
+    rc = gs.generate_schemas("cfg.yaml", str(tmp_path / "master.csv"),
+                                    force=True, dry_run=False, source_type="oracle")
 
     assert rc == 1
     assert not out.exists()              # nothing to write - never publish empty
@@ -227,7 +229,8 @@ def test_dry_run_writes_nothing(env, monkeypatch, tmp_path):
     patch_worker(monkeypatch, [])
 
     out = tmp_path / "master.csv"
-    rc = gs.generate_schemas("cfg.yaml", str(out), force=True, dry_run=True)
+    rc = gs.generate_schemas("cfg.yaml", str(tmp_path / "master.csv"),
+                                    force=True, dry_run=True, source_type="oracle")
 
     assert rc == 0
     assert not out.exists()
@@ -238,7 +241,7 @@ def test_task_builds_wrapped_query_and_rows():
     table_cfg = CFG["tables"][0]                     # T1 on app1
     conn = _StubConn(LEGACY_DESC)
 
-    rows = gs._introspect_task(CFG, table_cfg)(conn)
+    rows = gs._introspect_task(CFG, table_cfg, gs.oracle_dtype_to_comma_free)(conn)
 
     # the introspection wrapper is present in the executed SQL
     assert conn.executed == [
@@ -258,7 +261,7 @@ def test_task_builds_wrapped_query_and_rows():
 
 def test_task_raises_on_cursor_error():
     table_cfg = CFG["tables"][0]
-    task = gs._introspect_task(CFG, table_cfg)
+    task = gs._introspect_task(CFG, table_cfg, gs.oracle_dtype_to_comma_free)
 
     class _ExplodingConn(_StubConn):
         def cursor(self):

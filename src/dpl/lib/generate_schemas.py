@@ -1,5 +1,22 @@
 # dpl/lib/generate_schemas.py
-"""Bootstrap schema generator - introspect configured queries, emit master CSV.
+"""Schema generator - introspect configured queries, emit the master CSV.
+
+Generic since PT-034: this module serves ANY registered connector type.
+Type knowledge enters through exactly two seams, both explicit:
+
+  1. INTROSPECTORS (below) - the per-type table mapping a connection
+     type to its connect() and its dtype mapper. Adding a type (mssql,
+     postgres) = adding ONE entry here. A type absent from this table
+     fails LOUDLY for its pipe while other types continue - it never
+     silently skips.
+  2. CONNECTORS (dpl.lib.connectors) - decides WHETHER this module runs
+     for a pipe at all (generator field) via schema_dispatch. This
+     module never re-checks the registry; it trusts its caller.
+
+Operator intent: every connection in the pipe yaml must declare
+`schema: auto|manual`. Validation is aggregated up-front (all offenders
+named in one message, nothing runs until declared). Connections marked
+`manual` are skipped here with a loud info line - a legitimate opt-out.
 
 Usage (from project root):
     python -m dpl.lib.generate_schemas                    # dry-run, show diff
@@ -9,7 +26,8 @@ Usage (from project root):
 
 Exit codes:
     0 - success (new or updated master.csv written, or --dry-run)
-    1 - some tables failed introspection (partial CSV emitted), or --force denied
+    1 - config/declaration failure, some tables failed introspection
+        (partial CSV emitted), or --force denied
 """
 
 from __future__ import annotations
@@ -20,12 +38,13 @@ import logging
 import shutil
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import oracledb
 
-from dpl.lib import pass_mgr
+from dpl.lib import pass_mgr, schema_dispatch
 from dpl.lib.common import (
     SCHEMA_MASTER_COLUMNS,
     _read_registry_csv,
@@ -33,8 +52,9 @@ from dpl.lib.common import (
     load_settings,
     validate_secrets_layout,
 )
+from dpl.lib.connectors import CONNECTORS
 from dpl.lib.logger import get_run_logger, setup_logging
-from dpl.lib.ora_connect import ORACLE_CONFIG_SCHEMA, connect
+from dpl.lib.ora_connect import connect as oracle_connect
 from dpl.lib.session_pool import run_folder_tables
 
 log = get_run_logger("dpl.schema")
@@ -43,7 +63,6 @@ log = get_run_logger("dpl.schema")
 CONFIG_FILE = "config/extractors/oracle_to_stg.yaml"
 SETTINGS_FILE = "config/settings.laptop.yaml"
 OUTPUT_FILE = "config/extractors/schema_master_oracle_to_stg.csv"
-SOURCE_TYPE = "oracle"
 BACKUP_KEEP = 30
 
 # ----------------------------------------------------------- type mapping
@@ -126,15 +145,28 @@ def oracle_dtype_to_comma_free(cursor_description_row: Any,
         )
         return "Utf8"
 
+INTROSPECTORS: dict[str, dict[str, Callable]] = {
+    "oracle": {
+        "connect": oracle_connect,
+        "dtype_mapper": oracle_dtype_to_comma_free,
+    },
+}
 
 # ---------------------------------------------------------------- generator
-def _introspect_task(cfg: dict, table_cfg: dict):
+def _introspect_task(cfg: dict, table_cfg: dict, dtype_mapper: Callable):
     """Build the per-table introspection task for the session worker.
 
     The returned callable takes the LIVE connection from the worker and
     performs exactly ONE attempt. Returns the CSV row dicts on success;
     RAISES on any failure - the worker classifies (transport vs data)
     and retries per the connection's configured knobs.
+
+    Args:
+        cfg: parsed pipe yaml.
+        table_cfg: one entry of the pipe yaml's `tables:` list.
+        dtype_mapper: the type's cursor-description converter, from
+            INTROSPECTORS. Per-type dispatch enters HERE - the query
+            wrapping and cursor protocol below are type-neutral.
     """
     conn_name = table_cfg["connection"]
     folder = cfg["connections"][conn_name]["folder"]
@@ -158,7 +190,7 @@ def _introspect_task(cfg: dict, table_cfg: dict):
                     "table_name": table_name,
                     "column_seq": str(idx),
                     "column_name": col_name,
-                    "dtype": oracle_dtype_to_comma_free(desc_row, col_name),
+                    "dtype": dtype_mapper(desc_row, col_name),
                     "description": "",
                     "policy_flags": "",
                 })
@@ -202,7 +234,6 @@ def read_existing_master(path: Path) -> dict[str, dict[str, str]]:
     return result
 
 
-
 def diff_master(old: dict[str, dict], new: dict[str, dict]) -> dict[str, list[str]]:
     """Compare old/new master, categorize changes.
 
@@ -229,18 +260,67 @@ def diff_master(old: dict[str, dict], new: dict[str, dict]) -> dict[str, list[st
             if old_seq and new_seq and old_seq != new_seq:
                 shifted.append(f"{key} (schema {old[key]['schema']}->{new[key]['schema']})")
 
-    return {"added": added, "removed": removed, "changed": changed, "shifted":shifted}
+    return {"added": added, "removed": removed, "changed": changed, "shifted": shifted}
 
 
 def generate_schemas(config_path: str, output_path: str,
                      force: bool, dry_run: bool,
-                     settings_path: str = SETTINGS_FILE) -> int:
-    """Main generation routine.
+                     settings_path: str = SETTINGS_FILE,
+                     source_type: str | None = None) -> int:
+    """Main generation routine for ONE pipe (single connector type).
 
-    Returns: 0 success, 1 partial failure (some tables skipped).
+    Args:
+        source_type: the pipe's single connection type. Injected by
+            run.py (from Pipe.source_type) and by tests - in that case
+            NO file peek happens and the yaml loader enforces the
+            schema tag. None (manual CLI path): the type is derived
+            by a raw peek into the yaml, with the aggregated
+            fail-loud tag check running BEFORE anything loads.
+
+    Order of operations, each loud:
+      1. type resolution - injected, or peeked (CLI) with aggregated
+         tag validation first;
+      2. introspector lookup - absent type fails loudly, exit 1;
+      3. per-connection processing - manual connections skip loudly,
+         auto connections introspect, table failures are loud and
+         leave the run in exit-1 (partial) state.
+
+    Returns: 0 success, 1 partial failure or declaration error.
     """
+    # ---- resolve the pipe's single connection type
+    if source_type is None:
+        # CLI path: no caller to declare the type - peek the yaml.
+        # Aggregated tag check first: ALL offenders named in one message.
+        import yaml  # local import: peek-only dependency
+        try:
+            with open(config_path, "r", encoding="utf-8") as fh:
+                raw = yaml.safe_load(fh) or {}
+        except OSError as exc:
+            log.critical("cannot read config %s: %s", config_path, exc)
+            return 1
+        conns = raw.get("connections") or {}
+        schema_dispatch.require_schema_tags(conns)
+        types = {str((c or {}).get("type", "")).lower() for c in conns.values()}
+        if len(types) != 1:
+            log.critical(
+                "%s: expected exactly one connection type, found %s - one "
+                "extractor yaml serves one connector type; split the file.",
+                config_path, sorted(types))
+            return 1
+        source_type = types.pop()
+
+    stype = source_type
+
+    intro = INTROSPECTORS.get(stype)
+    if intro is None:
+        log.critical(
+            "no introspector registered for connection type '%s' - "
+            "register it in INTROSPECTORS (dpl/lib/generate_schemas.py) "
+            "or declare schema: manual on its connections.", stype)
+        return 1
+
     log.info("loading config from %s", config_path)
-    cfg = load_config(config_path, ORACLE_CONFIG_SCHEMA)
+    cfg = load_config(config_path, CONNECTORS[stype]["schema"])
     if cfg is None:
         log.critical("Config load failed: %s", config_path)
         return 1
@@ -264,13 +344,41 @@ def generate_schemas(config_path: str, output_path: str,
     validate_secrets_layout()
     pass_mgr.init(pm_env)
 
-    # Gather all tables of our SOURCE_TYPE
-    tables = [
-        t for t in cfg["tables"]
-        if cfg["connections"].get(t["connection"], {}).get("type") == SOURCE_TYPE
-    ]
+    connect_fn = intro["connect"]
+    dtype_mapper = intro["dtype_mapper"]
 
-    log.info("found %d tables of type '%s'", len(tables), SOURCE_TYPE)
+    # ---- gate 2: per-connection screening - manual skip AND foreign-type
+    # exclusion. run.py already refuses mixed-type yamls at startup, so a
+    # foreign type here means a bypassed caller - exclude loudly, never
+    # introspect it. Defense-in-depth, per PT-001-style doctrine.
+    tables = []
+    excluded_foreign: list[str] = []
+    for t in cfg["tables"]:
+        conn_cfg = cfg["connections"].get(t["connection"], {})
+        if conn_cfg.get("schema") == "manual":
+            log.info(
+                "connection '%s': schema=manual - skipping schema "
+                "generation for its tables (hand-curated master).",
+                t["connection"])
+            continue
+        if str(conn_cfg.get("type", "")).lower() != stype:
+            excluded_foreign.append(f"{t['connection']}.{t['name']}")
+            continue
+        tables.append(t)
+
+    if excluded_foreign:
+        log.warning(
+            "EXCLUDED foreign-type table(s) not matching this pipe's "
+            "type '%s': %s - run.py should have refused this config; "
+            "investigate how it reached the generator.",
+            stype, ", ".join(sorted(excluded_foreign)))
+
+    log.info("found %d tables of type '%s'", len(tables), stype)
+    if not tables:
+        log.critical(
+            "no tables left to introspect - every connection declared "
+            "schema: manual (or the yaml declares none). Nothing to do.")
+        return 1
 
     # Group by connection, preserving config order within each group -
     # one session per connection, shared across that connection's tables.
@@ -289,9 +397,10 @@ def generate_schemas(config_path: str, output_path: str,
         backoff = conn_cfg.get("retry_backoff_seconds", 5)
 
         def factory(_cn=conn_name):
-            return connect(cfg, _cn)
+            return connect_fn(cfg, _cn)
 
-        tasks = [(t["name"], _introspect_task(cfg, t)) for t in conn_tables]
+        tasks = [(t["name"], _introspect_task(cfg, t, dtype_mapper))
+                 for t in conn_tables]
 
         outcomes = run_folder_tables(
             conn_name, tasks, factory,
@@ -316,7 +425,7 @@ def generate_schemas(config_path: str, output_path: str,
     for r in all_rows:
         key = f"{r['folder']}.{r['table_name']}.{r['column_name']}".lower()
         new_master[key] = {
-            "dtype": r["dtype"], 
+            "dtype": r["dtype"],
             "description": r["description"],
             "policy_flags": r["policy_flags"],
             "column_seq": r["column_seq"],
@@ -399,7 +508,7 @@ def generate_schemas(config_path: str, output_path: str,
     tmp_path.replace(out_path)                 # atomic same-FS move
 
 
-    log.info("Schema master generated: %d rows, %d table(s)",   
+    log.info("Schema master generated: %d rows, %d table(s)",
              len(all_rows), len({r["table_name"] for r in all_rows}))
     return 1 if failed_tables else 0
 
@@ -428,6 +537,12 @@ def backup_and_rotate(out_path: Path, keep: int = BACKUP_KEEP) -> Path | None:
 
 # ---------------------------------------------------------------------- main
 def main() -> int:
+    """CLI entry - kept Oracle-defaulted for convenient manual runs.
+
+    run.py never uses this path: it calls generate_schemas() directly
+    with the pipe's own config and master path. The --config/--out
+    defaults merely preserve the historical manual workflow.
+    """
     parser = argparse.ArgumentParser(
         description="Bootstrap schema master CSV from configured sources"
     )
