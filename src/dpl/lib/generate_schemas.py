@@ -35,6 +35,7 @@ from dpl.lib.common import (
 )
 from dpl.lib.logger import get_run_logger, setup_logging
 from dpl.lib.ora_connect import ORACLE_CONFIG_SCHEMA, connect
+from dpl.lib.session_pool import run_folder_tables
 
 log = get_run_logger("dpl.schema")
 
@@ -127,60 +128,47 @@ def oracle_dtype_to_comma_free(cursor_description_row: Any,
 
 
 # ---------------------------------------------------------------- generator
-def introspect_table(cfg: dict, table_cfg: dict, connection_name: str) -> list[dict[str, str]] | None:
-    """Introspect one table/query, return list of row dicts for CSV output.
+def _introspect_task(cfg: dict, table_cfg: dict):
+    """Build the per-table introspection task for the session worker.
 
-    Returns None if introspection fails (caller records and continues).
-    Each dict has keys matching SCHEMA_MASTER_COLUMNS.
+    The returned callable takes the LIVE connection from the worker and
+    performs exactly ONE attempt. Returns the CSV row dicts on success;
+    RAISES on any failure - the worker classifies (transport vs data)
+    and retries per the connection's configured knobs.
     """
-    folder = cfg["connections"][connection_name]["folder"]
+    conn_name = table_cfg["connection"]
+    folder = cfg["connections"][conn_name]["folder"]
     table_name = table_cfg["name"]
     query = table_cfg["query"]
     table_key = f"{folder}.{table_name}"
-
-    # Build the introspection query - wrap in SELECT * FROM (...) WHERE 1=0
-    # to get metadata without fetching data
     introspection_query = f"SELECT * FROM ({query}) WHERE 1=0"
 
-    start = time.time()
-    try:
-        with connect(cfg, connection_name) as conn:
-            cur = conn.cursor()
-            try:
-                cur.execute(introspection_query)
-                columns = []
-                desc_rows = cur.description or ()
-                for idx, desc_row in enumerate(desc_rows, 1):
-                    col_name = desc_row[0].lower()
-                    dtype = oracle_dtype_to_comma_free(desc_row, col_name)
-                    columns.append({
-                        "folder": folder,
-                        "connection_name": connection_name,
-                        "schema": table_cfg["schema"],
-                        "table_name": table_name,
-                        "column_seq": str(idx),
-                        "column_name": col_name,
-                        "dtype": dtype,
-                        "description": "",
-                        "policy_flags": "",
-                    })
+    def attempt(conn):
+        start = time.time()
+        cur = conn.cursor()
+        try:
+            cur.execute(introspection_query)
+            columns = []
+            for idx, desc_row in enumerate(cur.description or (), 1):
+                col_name = desc_row[0].lower()
+                columns.append({
+                    "folder": folder,
+                    "connection_name": conn_name,
+                    "schema": table_cfg["schema"],
+                    "table_name": table_name,
+                    "column_seq": str(idx),
+                    "column_name": col_name,
+                    "dtype": oracle_dtype_to_comma_free(desc_row, col_name),
+                    "description": "",
+                    "policy_flags": "",
+                })
+        finally:
+            cur.close()
+        log.info("introspected %d columns from %s (%.2fs)",
+                 len(columns), table_key, time.time() - start)
+        return columns
 
-            finally:
-                cur.close()
-            
-            duration = time.time() - start
-            log.info(
-                "introspected %d columns from %s (%.2fs)",
-                len(columns), table_key, duration
-            )
-            return columns
-
-    except Exception as exc:                        # noqa: BLE001 - per-table introspection boundary: log and move to next table
-        log.error(
-            "INTROSPECTION FAILED for %s.%s (%s): %s",
-            connection_name, table_name, table_key, exc
-        )
-        return None
+    return attempt
 
 
 def read_existing_master(path: Path) -> dict[str, dict[str, str]]:
@@ -284,23 +272,40 @@ def generate_schemas(config_path: str, output_path: str,
 
     log.info("found %d tables of type '%s'", len(tables), SOURCE_TYPE)
 
-    # Collect schema rows
+    # Group by connection, preserving config order within each group -
+    # one session per connection, shared across that connection's tables.
+    groups: dict[str, list[dict]] = {}
+    for t in tables:
+        groups.setdefault(t["connection"], []).append(t)
+    log.info("%d table(s) across %d connection(s)",
+             len(tables), len(groups))
+
     all_rows: list[dict[str, str]] = []
     failed_tables: list[str] = []
 
-    for table_cfg in tables:
-        conn_name = table_cfg["connection"]
-        result = introspect_table(cfg, table_cfg, conn_name)
-        if result is None:
-            failed_tables.append(f"{conn_name}.{table_cfg['name']}")
-        else:
-            all_rows.extend(result)
+    for conn_name, conn_tables in groups.items():
+        conn_cfg = cfg["connections"][conn_name]
+        retries = conn_cfg.get("retries", 2)
+        backoff = conn_cfg.get("retry_backoff_seconds", 5)
 
-    if failed_tables:
-        log.warning("%d table(s) failed introspection - they are omitted:",
-                    len(failed_tables))
-        for ft in failed_tables:
-            log.warning("  - %s", ft)
+        def factory(_cn=conn_name):
+            return connect(cfg, _cn)
+
+        tasks = [(t["name"], _introspect_task(cfg, t)) for t in conn_tables]
+
+        outcomes = run_folder_tables(
+            conn_name, tasks, factory,
+            table_concurrency=1,        # metadata calls: parallelism buys nothing
+            retries=retries,
+            backoff_seconds=backoff)
+
+        for t, oc in zip(conn_tables, outcomes):
+            if oc["status"] == "ok":
+                all_rows.extend(oc["result"])
+            else:
+                failed_tables.append(f"{conn_name}.{t['name']}")
+                log.error("INTROSPECTION FAILED for %s.%s: %s",
+                          conn_name, t["name"], oc["error"])
 
     if not all_rows:
         log.critical("No tables succeeded - nothing to write.")
@@ -394,7 +399,7 @@ def generate_schemas(config_path: str, output_path: str,
     tmp_path.replace(out_path)                 # atomic same-FS move
 
 
-    log.info("Schema master generated: %d rows, %d table(s)",
+    log.info("Schema master generated: %d rows, %d table(s)",   
              len(all_rows), len({r["table_name"] for r in all_rows}))
     return 1 if failed_tables else 0
 

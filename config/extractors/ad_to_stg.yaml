@@ -11,6 +11,9 @@ connections:
     auth: ntlm
     page_size: 500
     folder: ad-atm
+    table_concurrency: 1
+    retries: 2
+    retry_backoff_seconds: 5
     users:
       subd\support:
         credential_ref: ad_atm.subd\support.password
@@ -21,6 +24,9 @@ connections:
     auth: ntlm
     page_size: 500
     folder: ad-main
+    table_concurrency: 1
+    retries: 2
+    retry_backoff_seconds: 5
     users:
       subd\support:
         credential_ref: ad_main.subd\support.password

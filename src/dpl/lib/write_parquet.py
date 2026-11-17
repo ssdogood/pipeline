@@ -310,12 +310,23 @@ class ParquetWriter:
     def __init__(self, settings: dict, source: str, table: str,
                  load_date: date, transforms: dict | None = None,
                  dedup_columns=None,
-                 sort_spec: list[tuple[str, str]] | None = None) -> None:
+                 sort_spec: list[tuple[str, str]] | None = None,
+                 run_id: str | None = None) -> None:
         self.settings = settings
         self.cfg = {"transforms": transforms or {}}   # _build_cleanse_sql reads transforms
         self.source = source
         self.table = table.lower()
         self.load_date = load_date
+
+        # PT-030: optional run context so publish lines carry run_id=/table=
+        # like every other per-table component line. Falls back to the
+        # bare module logger when no run_id is supplied (legacy callers,
+        # tests) - those lines render run_id=- exactly as before.
+        if run_id:
+            self._log = get_run_logger("dpl.writer", run_id=run_id,
+                                       table=self.table)
+        else:
+            self._log = log
 
         # Fail fast on malformed dedup specs - BEFORE any connection or I/O
         if isinstance(dedup_columns, dict) and "mode" in dedup_columns:
@@ -400,8 +411,8 @@ class ParquetWriter:
 
         try:
             if self._con is None:
-                log.info("%s.%s: zero rows, nothing published",
-                         self.source, self.table)
+                self._log.info("%s.%s: zero rows, nothing published",
+                               self.source, self.table)
                 return _finish(self.stats, self._start_wall)
 
             clean_sql = _build_cleanse_sql(self._con, self.cfg, self.parsed)
@@ -451,11 +462,11 @@ class ParquetWriter:
 
             total_mb = sum(p.stat().st_size
                            for p in self.dest_dir.glob("*.parquet")) / 1024**2
-            log.info("%s.%s published: %d rows read, %d rows written, "
-                     "%d part(s)%s, %.1f MB",
-                     self.source, self.table, self._rows_read,
-                     self.stats["rows_written"], len(parts),
-                     ", sorted" if self.sort_active else "", total_mb)
+            self._log.info("%s.%s published: %d rows read, %d rows written, "
+                           "%d part(s)%s, %.1f MB",
+                           self.source, self.table, self._rows_read,
+                           self.stats["rows_written"], len(parts),
+                           ", sorted" if self.sort_active else "", total_mb)
             return _finish(self.stats, self._start_wall)
 
         finally:
@@ -495,7 +506,8 @@ def _finish(stats: dict, start_wall: float) -> dict:
 def write_table(cfg: dict, settings: dict, source: str, table: str,
                 load_date: date, batches: Iterable[pl.DataFrame],
                 dedup_columns=None,
-                sort_spec: list[tuple[str, str]] | None = None) -> dict:
+                sort_spec: list[tuple[str, str]] | None = None,
+                run_id: str | None = None) -> dict:
     """One-shot facade over ParquetWriter: stage, cleanse, publish. -> stats.
 
     Thin glue ONLY - all logic lives in ParquetWriter. `batches` is drained
@@ -506,6 +518,7 @@ def write_table(cfg: dict, settings: dict, source: str, table: str,
         transforms=cfg.get("transforms", {}),
         dedup_columns=dedup_columns,
         sort_spec=sort_spec,
+        run_id=run_id,
     ) as w:
         for df in batches:
             w.append(df)
