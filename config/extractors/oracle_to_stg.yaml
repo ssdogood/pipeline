@@ -36,6 +36,7 @@ connections:
     table_concurrency: 1
     retries: 2
     retry_backoff_seconds: 5
+    serial_group: group_1
     users:
       user_name:
         credential_ref: ora_db.user_name.password
