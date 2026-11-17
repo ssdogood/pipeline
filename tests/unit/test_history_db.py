@@ -122,14 +122,14 @@ def fake_settings(landing_root: Path) -> dict:
 def test_init_creates_all_three_tables(tmp_path: Path) -> None:
     db = tmp_path / "hist.db"
     init_once(db)
-    assert table_names(db) == ["email_sends", "runs", "table_runs"]
+    assert table_names(db) == ["email_sends", "folder_runs", "runs", "table_runs"]
 
 
 def test_init_is_idempotent(tmp_path: Path) -> None:
     db = tmp_path / "hist.db"
     init_once(db)
     init_once(db)                       # re-run must be a no-op, not an error
-    assert table_names(db) == ["email_sends", "runs", "table_runs"]
+    assert table_names(db) == ["email_sends", "folder_runs", "runs", "table_runs"]
 
 
 def test_open_db_sets_wal_and_busy_timeout(tmp_path: Path) -> None:
@@ -304,7 +304,7 @@ def test_init_cli_creates_schema(tmp_path: Path) -> None:
     db = tmp_path / "cli_hist.db"
     rc = cli_main(["--db", str(db)])
     assert rc == 0, "install script must exit 0 on success"
-    assert table_names(db) == ["email_sends", "runs", "table_runs"]
+    assert table_names(db) == ["email_sends", "folder_runs", "runs", "table_runs"]
 
 
 def test_init_cli_exit_codes(tmp_path: Path) -> None:
