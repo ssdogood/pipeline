@@ -5,25 +5,41 @@ SQLite history database - the ONLY database-touching module (ARCH-D1).
 Doctrine (approved 2026-11-10): the string 'sqlite3' may appear in exactly
 ONE source file in the entire pipeline - this one. Every other consumer
 obtains connections, DDL, and error types from here, and never imports
-sqlite3 itself. Enforceable by a one-line grep (see green script, later
-stage). Callers elsewhere get exception types via the exported aliases:
+sqlite3 itself. Callers elsewhere get exception types via the exported
+aliases:
 
     from dpl.lib.history_db import DbError, IntegrityError
 
 Ownership split:
   - THIS module: connections (WAL + busy_timeout), DDL constants, the
-    email_sends write gate, and the db-path rules.
-  - wrapper/update_history.py (stage 3 refactor): manifest-ingestion
-    SQL and its CLI - but its connections come from open_db() here.
+    email_sends write gate, the db-path rules, and the v2 legacy
+    migration (PT-001, approved 2026-11-17).
+  - wrapper/update_history.py: manifest-ingestion SQL and its CLI -
+    but its connections come from open_db() here.
 
 Table creation is NOT done on first open. Schema lifecycle is explicit:
 run the install-time script once per machine/deploy:
 
     python scripts/init_history_db.py [--db PATH]
 
-which applies the idempotent DDL (runs, table_runs, email_sends) and
-switches the database to WAL journal mode. Attempting to write to an
-uninitialized database fails loudly with that instruction.
+which applies the idempotent DDL, performs the one-time legacy rename
+(pre-v2 test databases: runs -> runs_legacy, table_runs ->
+table_runs_legacy, old rows left untouched), and switches the database
+to WAL journal mode. Attempting to write to an uninitialized database
+fails loudly with that instruction.
+
+Schema v2 (PT-001):
+  - runs          : UNCHANGED shape - the wrapper's run-level row
+                    (running stub at start, final status/exit_code).
+  - folder_runs   : NEW - one row per (run_id, folder), i.e. exactly
+                    one manifest file. Summary counts mirror the
+                    envelope's top-level tables_* counts; status
+                    mirrors the envelope, so a paused folder
+                    (PT-014 stub manifest) records 'paused'.
+  - table_runs    : + attempts INTEGER (nullable - pre-0.3.0
+                    manifests have none). status is free text, so a
+                    table-level 'paused' (PT-014) needs no change here.
+  - email_sends   : unchanged.
 
 Concurrency: designed assuming concurrent writers (decision log OQ-2).
 open_db() sets WAL journal mode and a busy_timeout on EVERY connection,
@@ -63,10 +79,9 @@ ENV_SETTINGS = "DPL_SETTINGS"
 DEFAULT_SETTINGS_FILE = "config/settings.laptop.yaml"
 
 # ---------------------------------------------------------------------------
-# DDL - the single source of truth for the schema.
-# runs / table_runs moved VERBATIM from wrapper/update_history.py (stage 3
-# deletes them there). email_sends per architecture design section 6.1.
+# DDL v2 - the single source of truth for the schema.
 # Idempotent: CREATE IF NOT EXISTS, safe on fresh and deployed DBs alike.
+# The one-time LEGACY RENAME happens in init_db(), NOT here.
 # ---------------------------------------------------------------------------
 
 DDL = """
@@ -76,7 +91,20 @@ CREATE TABLE IF NOT EXISTS runs (
     started_at  TEXT NOT NULL,
     finished_at TEXT,               -- max across the run's folder manifests
     status      TEXT NOT NULL,      -- success | partial_failure | failed | running
-    exit_code   INTEGER              -- wrapper-level; NULL until slice 4
+    exit_code   INTEGER              -- wrapper-level
+);
+CREATE TABLE IF NOT EXISTS folder_runs (
+    run_id           TEXT NOT NULL REFERENCES runs(run_id),
+    folder           TEXT NOT NULL,
+    load_date        TEXT,
+    status           TEXT NOT NULL,   -- mirrors envelope status (incl. 'paused' from PT-014 stubs)
+    tables_total     INTEGER,        -- mirrors envelope top-level counts; exact COUNT fallback
+    tables_extracted INTEGER,
+    tables_skipped   INTEGER,
+    tables_failed    INTEGER,
+    exit_code        INTEGER,        -- from envelope wrapper.exit_code (pre-0.3.0: NULL)
+    finished_at      TEXT,
+    PRIMARY KEY (run_id, folder)
 );
 CREATE TABLE IF NOT EXISTS table_runs (
     run_id       TEXT NOT NULL REFERENCES runs(run_id),
@@ -90,6 +118,7 @@ CREATE TABLE IF NOT EXISTS table_runs (
     duration_sec REAL,
     output_path  TEXT,
     error        TEXT,
+    attempts     INTEGER,
     PRIMARY KEY (run_id, folder, table_name)
 );
 CREATE TABLE IF NOT EXISTS email_sends (
@@ -115,6 +144,12 @@ EMAIL_SEND_ROW_KEYS: tuple[str, ...] = (
     "finished_at",
 )
 
+_LEGACY_TABLES = ("runs", "table_runs")
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
 
 # ---------------------------------------------------------------------------
 # Connections (the ONLY sqlite3.connect calls in the pipeline)
@@ -138,17 +173,54 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def init_db(db_path: Path) -> dict[str, Any]:
-    """Apply the idempotent DDL and switch the DB to WAL. Install-time step.
+def _migrate_legacy(conn: sqlite3.Connection, existing: set[str]) -> bool:
+    """One-time v1 -> v2 rename (PT-001 ruling 2026-11-17).
 
-    Safe both on a fresh machine and on a deployed database (adds
-    email_sends without touching existing rows). Returns a summary dict:
-    {"tables": [...], "journal_mode": "wal"}.
+    Trigger: an existing 'table_runs' WITHOUT the 'attempts' column
+    (the exact marker of a v1 schema). Action: rename both v1 tables to
+    <name>_legacy and leave every old row untouched; the fresh DDL then
+    creates the v2 tables and update_history re-ingests from manifest
+    files (files remain the record of record).
+
+    Refuses loudly (RuntimeError, nothing renamed) if any *_legacy name
+    is already taken, so a half-migrated database can never silently
+    lose data. Returns True if a rename happened.
+    """
+    if "table_runs" not in existing:
+        return False
+    if "attempts" in _table_columns(conn, "table_runs"):
+        return False                      # already v2: idempotent re-run
+
+    clashes = [f"{t}_legacy" for t in _LEGACY_TABLES
+               if t in existing and f"{t}_legacy" in existing]
+    if clashes:
+        raise RuntimeError(
+            f"history migration blocked: {clashes} already exist - "
+            f"move or remove them before re-running init")
+    for table in _LEGACY_TABLES:
+        if table in existing:
+            conn.execute(f"ALTER TABLE {table} RENAME TO {table}_legacy")
+            log.info("history v1 '%s' renamed to '%s' (kept, not migrated)",
+                     table, f"{table}_legacy")
+    return True
+
+
+def init_db(db_path: Path) -> dict[str, Any]:
+    """Apply the idempotent DDL, run the one-time legacy rename, set WAL.
+
+    Install-time step. Safe on a fresh machine, on a v1 test database
+    (renames the old tables aside), and on an already-v2 database (no-op).
+    Returns {"tables": [...], "journal_mode": "wal", "migrated": bool}.
     """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     try:
+        existing = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        migrated = _migrate_legacy(conn, existing)
         conn.executescript(DDL)
         conn.commit()
         journal = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
@@ -157,7 +229,8 @@ def init_db(db_path: Path) -> dict[str, Any]:
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "ORDER BY name")
         ]
-        return {"tables": tables, "journal_mode": journal}
+        return {"tables": tables, "journal_mode": journal,
+                "migrated": migrated}
     finally:
         conn.close()
 
@@ -167,22 +240,12 @@ def init_db(db_path: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def default_db_path(settings: dict) -> Path:
-    """Default: <landing_root>/_history/dpl_history.db.
-
-    Same sibling-of-date-dirs pattern as runs_root. Slice 4 will let
-    wrapper.yaml override via db_path_for().
-    """
+    """Default: <landing_root>/_history/dpl_history.db."""
     return Path(settings["paths"]["landing_root"]) / "_history" / "dpl_history.db"
 
 
 def validate_db_path(db_path: Path, settings: dict) -> None:
-    """Reject a DB living inside a landing DATA directory.
-
-    Rule: history must not sit in the data path. The check: the resolved
-    db_path must not lie under a date-named directory
-    (<landing_root>/<YYYY-MM-DD>/...). landing_root itself and non-date
-    siblings (_history/, _runs/) are allowed.
-    """
+    """Reject a DB living inside a landing DATA directory."""
     db_path = Path(db_path).resolve()
     landing = Path(settings["paths"]["landing_root"]).resolve()
     try:
@@ -198,15 +261,9 @@ def validate_db_path(db_path: Path, settings: dict) -> None:
 def resolve_db_path(db_path: Path | str | None = None,
                     *, settings_file: str | None = None) -> Path:
     """Resolve which DB file to use. Precedence (loud about every step):
-
     1. explicit db_path argument (tests, wrapper overrides)
     2. $DPL_HISTORY_DB environment variable
-    3. settings-derived: <landing_root>/_history/dpl_history.db,
-       where settings come from $DPL_SETTINGS or the conventional
-       default settings file, and validate_db_path is enforced.
-
-    Raises instructive ValueError when settings cannot be loaded, so the
-    fix is obvious from the message alone.
+    3. settings-derived path, validated.
     """
     if db_path is not None:
         return Path(db_path)
@@ -234,25 +291,12 @@ def record_email_send(row: dict, *,
                       db_path: Path | str | None = None) -> None:
     """Persist ONE resolved email send as a single email_sends row.
 
-    Contract:
-      - row keys must be EXACTLY EMAIL_SEND_ROW_KEYS (extra or missing
-        keys raise loudly - schema drift cannot slip in silently);
-      - row['created_at'] must be canonical UTC-'Z' (FR-20) - enforced
-        here via require_utc_z, BEFORE any file is touched;
-      - one row per resolved send, plain INSERT: a duplicate send_id
-        raises IntegrityError rather than overwriting history.
-
-    Raises (caller-facing, all importable without sqlite3):
-      ValueError        - bad row keys or non-canonical timestamp
-      IntegrityError    - duplicate send_id
-      RuntimeError      - db exists but schema was never installed
-                          (message points at scripts/init_history_db.py)
-      DbError / OSError - genuine storage failures
-
-    The EMAIL SERVICE must treat every one of these as non-fatal to the
-    send result (failure isolation, FR-17): an email that WAS sent stays
-    'sent' even if this row write fails. That policy lives in the email
-    service, not here - this module reports loudly and honestly.
+    Contract: row keys must be EXACTLY EMAIL_SEND_ROW_KEYS; created_at
+    (and finished_at, when present) must be canonical UTC-'Z' - enforced
+    BEFORE any file is touched; one row per resolved send, plain INSERT -
+    a duplicate send_id raises IntegrityError rather than overwriting.
+    The EMAIL SERVICE must treat every failure here as non-fatal to the
+    send result (FR-17) - that policy lives in the email service, not here.
     """
     missing = [k for k in EMAIL_SEND_ROW_KEYS if k not in row]
     unknown = [k for k in row if k not in EMAIL_SEND_ROW_KEYS]
@@ -260,9 +304,9 @@ def record_email_send(row: dict, *,
         raise ValueError(
             f"email_sends row must contain exactly {EMAIL_SEND_ROW_KEYS}; "
             f"missing: {missing}, unknown: {unknown}")
-    require_utc_z(row["created_at"])  
+    require_utc_z(row["created_at"])
     if row["finished_at"] is not None:
-        require_utc_z(row["finished_at"])    # loud gate BEFORE touching disk
+        require_utc_z(row["finished_at"])
 
     path = Path(db_path) if db_path else resolve_db_path()
     conn = open_db(path)

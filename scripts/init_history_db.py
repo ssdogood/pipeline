@@ -49,6 +49,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"history db ready: {db_path}")
     print(f"  journal mode: {summary['journal_mode']}")
+    if summary.get("migrated"):
+        print("  legacy v1 tables renamed: runs -> runs_legacy, "
+              "table_runs -> table_runs_legacy (kept, not migrated; "
+              "re-ingest with update_history to repopulate v2)")
     print(f"  tables ensured: {', '.join(summary['tables'])}")
     return 0
 
