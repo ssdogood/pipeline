@@ -32,7 +32,12 @@ DEFAULT_BATCH_SIZE = 50_000
 ORACLE_CONFIG_SCHEMA = Schema({
     "connections": {
         str: {  # Dynamic key: Matches 'ora_db', 'postgres_prod', etc.
-             "type": And(str, len, lambda t: t.lower() == "oracle"),
+            "type": And(str, len, lambda t: t.lower() == "oracle"),
+            "schema": And(str, len, lambda v: v in ("auto", "manual")),
+            # PT-034: operator-declared schema ownership, required.
+            # Deliberately CASE-STRICT: "Auto" is rejected HERE at load
+            # (exit 3) rather than deep inside dispatch - the whole
+            # point is catching ambiguity before anything runs.
             Forbidden("username"): object,   # legacy keys are refused, not
             Forbidden("secret"): object,     # ignored - passwords live in
                                              # the pass_mgr vaults only

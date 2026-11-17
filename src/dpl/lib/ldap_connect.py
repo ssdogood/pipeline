@@ -30,6 +30,10 @@ LDAP_CONFIG_SCHEMA = Schema({
     "connections": {
         str: {
             "type": And(str, len, lambda t: t.lower() == "ldap"),
+            "schema": And(str, len, lambda v: v in ("auto", "manual")),
+            # PT-034: operator-declared schema ownership, required.
+            # AD is hand-curated by design -> these connections carry
+            # 'manual' in the yaml.
             "uri": And(str, len),
             Forbidden("username"): object,   # legacy keys refused - the
             Forbidden("secret"): object,     # users-map is the contract now
