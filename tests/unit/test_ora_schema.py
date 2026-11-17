@@ -31,6 +31,7 @@ _HEAD = (
     "connections:\n"
     "  ora_db:\n"
     "    type: oracle\n"
+    "    schema: auto\n"
     "    host: h\n"
     "    port: 1521\n"
     "    service: svc\n"

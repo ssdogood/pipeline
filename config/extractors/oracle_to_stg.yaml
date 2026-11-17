@@ -29,6 +29,7 @@
 connections:
   ora_db:
     type: oracle
+    schema: auto
     host: serv.subd.maind.com
     port: 1523
     service: prd

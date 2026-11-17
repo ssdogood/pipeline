@@ -7,6 +7,7 @@
 connections:
   ad_atm:
     type: ldap
+    schema: manual
     uri: 'ldaps://serv.subd.maind.com:636'
     auth: ntlm
     page_size: 500
@@ -20,6 +21,7 @@ connections:
 
   ad_main:
     type: ldap
+    schema: manual
     uri: 'ldaps://serv.subd.maind.com:636'
     auth: ntlm
     page_size: 500

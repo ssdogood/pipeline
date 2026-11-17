@@ -91,6 +91,7 @@ class Pipe:
     source_type: str   # the ONE shared type across all its connections
     master: str        # schema_master_<name>.csv (naming convention)
     connector: dict    # CONNECTORS[source_type] entry
+    connections: dict  # parsed connections: mapping (name -> cfg) - PT-034 dispatch
 
 
 def _load_run_registry(path: Path = RUN_REGISTRY) -> list[str]:
@@ -168,6 +169,7 @@ def _route_pipe(name: str, extractor_dir: Path) -> Pipe:
         source_type=stype,
         master=str(extractor_dir / f"schema_master_{name}.csv"),
         connector=connector,
+        connections=raw,
     )
 
 
@@ -412,21 +414,29 @@ def main(argv: list[str] | None = None) -> int:
         name = step["name"]
         try:
             if name == "generate_schemas":
-                # One call per REGISTERED pipe that has a generator;
-                # pipes without one (hand-curated masters) are skipped
-                # via the registry, not by branching here.
+                # PT-034: the wrapper stays dumb. All type/matrix knowledge
+                # lives in dpl.lib.schema_dispatch; we obey its Decision.
+                dispatch = importlib.import_module("dpl.lib.schema_dispatch")
                 for pipe in pipes:
-                    gen_path = pipe.connector.get("generator")
-                    if not gen_path:
+                    decision = dispatch.evaluate(
+                        pipe.name, pipe.connector, pipe.connections,
+                        pipe.source_type)
+                    log.info("%s", decision.message)
+                    if decision.action == "skip":
                         continue
-                    gen_mod = importlib.import_module(gen_path)
-                    log.info("generate_schemas: pipe=%s", pipe.name)
+                    if decision.action == "fail":
+                        log.error(
+                            "generate_schemas(%s): pipe failed dispatch - "
+                            "continuing with remaining pipes", pipe.name)
+                        continue
+                    gen_mod = importlib.import_module(decision.generator)
                     rc = gen_mod.generate_schemas(
                         config_path=pipe.path,
                         output_path=pipe.master,
                         force=step.get("force", True),
                         dry_run=False,
-                        settings_path=settings_path)
+                        settings_path=settings_path,
+                        source_type=pipe.source_type)
                     if rc != 0:
                         log.warning(
                             "generate_schemas(%s) returned %s - continuing "
