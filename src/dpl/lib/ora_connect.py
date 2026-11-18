@@ -20,6 +20,7 @@ from schema import And, Forbidden, Optional, Schema
 
 from dpl.lib import pass_mgr
 from dpl.lib.logger import get_run_logger
+from dpl.lib.pause import pause_block_ok
 
 log = get_run_logger("dpl.ora")
 
@@ -51,6 +52,11 @@ ORACLE_CONFIG_SCHEMA = Schema({
             "port": int,
             "service": And(str, len),
             "folder": And(str, len),  # required folder name per connection
+            # PT-014: optional pause block at folder (connection) level;
+            # the quiet boolean hook refuses garbage at yaml load, the
+            # NAMED loud error comes from validate_pause_declarations
+            # in prepare_run (exit 3 either way, nothing runs).
+            Optional("pause"): pause_block_ok,
             Optional(str): object  # Future-proof: allows adding new keys like 'timeout: 30' later
             # NOTE: "folder_validated" is NOT declared here - it is runtime
             # state set top-level by validate_config_folders(), never config.
@@ -67,6 +73,7 @@ ORACLE_CONFIG_SCHEMA = Schema({
             "schema": And(str, len),
             "name": And(str, len),
             "query": And(str, len),
+            Optional("pause"): pause_block_ok,   # PT-014 table-level
             Optional(str): object  # Future-proof
         }
     ],

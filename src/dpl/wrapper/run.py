@@ -169,7 +169,7 @@ def _route_pipe(name: str, extractor_dir: Path) -> Pipe:
         source_type=stype,
         master=str(extractor_dir / f"schema_master_{name}.csv"),
         connector=connector,
-        connections=raw,
+        connections=raw["connections"],
     )
 
 
@@ -267,8 +267,14 @@ def main(argv: list[str] | None = None) -> int:
         description="DPL orchestration wrapper (default profile: full)")
     parser.add_argument("--profile", default="full",
                         help="profile name from wrapper.yaml (default: full)")
-    parser.add_argument("--tables", default=None,
-                        help="comma-separated table filter (testing/targeted)")
+    parser.add_argument(
+        "--tables", default=None,
+        help="comma-separated table names - extract ONLY these "
+             "(default: all tables)")
+    parser.add_argument("--paused-table", action="store_true",
+                        help="with --tables naming paused table(s), "
+                             "lift their TABLE-level pause for this run "
+                             "(folder-level pauses are never liftable)")
     parser.add_argument("--dry-run", action="store_true",
                         help="validate configs and print the extraction "
                              "plan (connections, serial groups, worst-case "
@@ -374,6 +380,13 @@ def main(argv: list[str] | None = None) -> int:
 
     only_tables = ([t.strip() for t in args.tables.split(",")]
                    if args.tables else None)
+    # PT-014: --paused-table modifies --tables selections only; alone
+    # it would change nothing, so refuse it loudly (exit 3, nothing ran).
+    paused_override = bool(args.paused_table)
+    if paused_override and not only_tables:
+        log.error("--paused-table modifies --tables selections only - "
+                  "rerun as: --tables <names> --paused-table")
+        return EXIT_CONFIG
     log.info("wrapper start: profile=%s run_id=%s tables=%s",
              args.profile, run_id, only_tables or "all")
 
@@ -436,7 +449,8 @@ def main(argv: list[str] | None = None) -> int:
                         force=step.get("force", True),
                         dry_run=False,
                         settings_path=settings_path,
-                        source_type=pipe.source_type)
+                        source_type=pipe.source_type,
+                        paused_override=paused_override)
                     if rc != 0:
                         log.warning(
                             "generate_schemas(%s) returned %s - continuing "
@@ -482,7 +496,8 @@ def main(argv: list[str] | None = None) -> int:
                             pipe.connector["extractor"])
                         ctx = ext_mod.prepare_run(
                             cfg, settings, only_tables=only_tables,
-                            run_id=run_id)
+                            run_id=run_id,
+                            paused_override=paused_override)
                     except Exception as exc:                    # noqa: BLE001 - pipe boundary: a bad pipe never kills the healthy ones
                         log.error("pipe %s prepare failed: %s",
                                   pipe.name, exc)

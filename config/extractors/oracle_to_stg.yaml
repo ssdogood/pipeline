@@ -84,5 +84,23 @@ tables:
     schema: ETL
     name: ACCT_OPENING
     query: SELECT * FROM ETL.ACCT_OPENING
+    pause:
+      start: 2026-11-10
+      end: 2026-11-30
+      reason: real world testing
+  
+  - connection: ora_db
+    schema: ETL
+    name: CUST_OPENING
+    query: SELECT * FROM ETL.CUST_OPENING
+    pause:
+      start: 2026-11-10
+      end: ""
+      reason: real world testing
+  
+  - connection: ora_db
+    schema: ETL
+    name: FUND_TRANSFERS
+    query: SELECT * FROM ETL.FUND_TRANSFERS
 
   # add more tables as needed

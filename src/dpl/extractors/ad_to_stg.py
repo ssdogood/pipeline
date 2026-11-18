@@ -2,35 +2,35 @@
 """Active Directory extractor - glue between ldap_connect, writer, and manifests.
 
 Usage:
-     python -m dpl.extractors.ad_to_stg                    # run all, skip if exists
-     python -m dpl.extractors.ad_to_stg --force           # run all, ignore skips
-     python -m dpl.extractors.ad_to_stg --tables subd-users
-     python -m dpl.extractors.ad_to_stg --force --tables subd-users,subd-groups
+    python -m dpl.extractors.ad_to_stg                    # run all, skip if exists
+    python -m dpl.extractors.ad_to_stg --force           # run all, ignore skips
+    python -m dpl.extractors.ad_to_stg --tables subd-users
+    python -m dpl.extractors.ad_to_stg --force --tables subd-users,subd-groups
 
 Manifests: written by extract_all() to settings.paths.runs_root as <runs_root>/<date>/<folder>/_manifest_<run_id>.json (archive location).
 Envelope carries run-level fields (run_id, profile, times, status,
 pending_tables) so history can be rebuilt from files alone. Contract mirrors dpl.extractors.oracle_to_stg exactly.
 
 Declared schema (M3/M5):
-     The master CSV (config/extractors/schema_master_ad_to_stg.csv) is the
-     SINGLE source of truth for column names, order and dtypes. It is loaded
-     once per run, cross-checked against the config YAML, and drives both
-     the LDAP attribute request list and the constructed DataFrame dtypes.
+    The master CSV (config/extractors/schema_master_ad_to_stg.csv) is the
+    SINGLE source of truth for column names, order and dtypes. It is loaded
+    once per run, cross-checked against the config YAML, and drives both
+    the LDAP attribute request list and the constructed DataFrame dtypes.
 
 MV child tables:
-     Columns flagged 'mv=child' in the master's policy_flags are requested
-     from LDAP but NOT written to the parent parquet. Each becomes its own
-     child table '<parent>_<attr>' with columns (objectguid, value), one
-     row per multi-value element. Parent and children are fed from the SAME
-     paged search - one LDAP pass, both always consistent.
+    Columns flagged 'mv=child' in the master's policy_flags are requested
+    from LDAP but NOT written to the parent parquet. Each becomes its own
+    child table '<parent>_<attr>' with columns (objectguid, value), one
+    row per multi-value element. Parent and children are fed from the SAME
+    paged search - one LDAP pass, both always consistent.
 
 AD-specific conventions (differ from Oracle deliberately):
-     - values are CASE-PRESERVED (SMTP prefixes, DNs, display names);
-       transforms are empty - the writer never uppercases AD data.
-     - column names are lowercase; LDAP returns attribute keys in server
-       casing (sAMAccountName, objectGUID), mapped case-insensitively.
-     - LDAP omits empty attributes from entries entirely; absent
-       attributes are filled with None so the declared schema holds.
+    - values are CASE-PRESERVED (SMTP prefixes, DNs, display names);
+    transforms are empty - the writer never uppercases AD data.
+    - column names are lowercase; LDAP returns attribute keys in server
+    casing (sAMAccountName, objectGUID), mapped case-insensitively.
+    - LDAP omits empty attributes from entries entirely; absent
+    attributes are filled with None so the declared schema holds.
 
 Logging: dpl/lib/logger.py - "dpl.ad_to_stg". Every per-table line carries run_id= and table= context, so one table's story can be isolated with grep.
 """
@@ -50,23 +50,31 @@ import polars as pl
 
 from dpl.lib import pass_mgr
 from dpl.lib.common import (
-     FAILURE_STATUSES,
-     landing_dir,
-     load_config,
-     load_schema_master,
-     load_settings,
-     load_table_rules,
-     make_run_id,
-     runs_dir,
-     table_collision_check,
-     validate_config_folders,
-     validate_master_vs_config,
-     validate_rules_references,
-     validate_secrets_layout,
-     write_manifest,
+    FAILURE_STATUSES,
+    landing_dir,
+    load_config,
+    load_schema_master,
+    load_settings,
+    load_table_rules,
+    make_run_id,
+    runs_dir,
+    table_collision_check,
+    validate_config_folders,
+    validate_master_vs_config,
+    validate_rules_references,
+    validate_secrets_layout,
+    write_manifest,
 )
 from dpl.lib.ldap_connect import LDAP_CONFIG_SCHEMA, connect, iter_paged
 from dpl.lib.logger import get_run_logger, setup_logging
+from dpl.lib.pause import (
+    PAUSED,
+    describe,
+    lifted_by_override,
+    manifest_fields,
+    state_for,
+    validate_pause_declarations,
+)
 from dpl.lib.session_pool import run_folder_tables
 from dpl.lib.write_parquet import ParquetWriter
 
@@ -88,30 +96,30 @@ ENTRY_FLUSH = 500
 CHILD_SCHEMA: dict[str, type[pl.DataType]] = {"objectguid": pl.Utf8, "value": pl.Utf8}
 
 _PL_DTYPES = {
-     "utf8": pl.Utf8,
-     "int64": pl.Int64,
-     "float64": pl.Float64,
-     "boolean": pl.Boolean,
-     "date": pl.Date,
+    "utf8": pl.Utf8,
+    "int64": pl.Int64,
+    "float64": pl.Float64,
+    "boolean": pl.Boolean,
+    "date": pl.Date,
 }
 
 
 def _resolve_dtype(dt: str) -> type[pl.DataType]:
-     """Master CSV dtype string -> Polars DataType (unknown -> Utf8)."""
-     return _PL_DTYPES.get(dt.strip().lower(), pl.Utf8)
+    """Master CSV dtype string -> Polars DataType (unknown -> Utf8)."""
+    return _PL_DTYPES.get(dt.strip().lower(), pl.Utf8)
 
 
 def _cell(v: Any) -> str | None:
-     """Normalize one attribute value for a Utf8 column.
+    """Normalize one attribute value for a Utf8 column.
 
-     None stays None; lists (unexpected on a parent single-value column)
-     are pipe-joined rather than crashing; everything else str()'d.
-     """
-     if v is None:
-         return None
-     if isinstance(v, (list, tuple)):
-         return "|".join(str(x) for x in v if x is not None)
-     return str(v)
+    None stays None; lists (unexpected on a parent single-value column)
+    are pipe-joined rather than crashing; everything else str()'d.
+    """
+    if v is None:
+        return None
+    if isinstance(v, (list, tuple)):
+        return "|".join(str(x) for x in v if x is not None)
+    return str(v)
 
 
 def _flag_is_mv_child(fl: Any) -> bool:
@@ -148,82 +156,81 @@ def _mv_columns_for(entry: dict) -> list[str]:
 def _check_exists(settings: dict, cfg: dict, load_date: date,
                    conn_name: str, table_name: str,
                    child_names: list[str]) -> Path | None:
-     """Return the destination dir if parent AND every child is published.
+    """Return the destination dir if parent AND every child is published.
 
-     Children ride with the parent: a partial parent-without-children state
-     does NOT count as done, so a retry repairs the missing half.
-     """
-     folder = cfg["connections"][conn_name]["folder"]
-     dest_dir = landing_dir(settings["paths"]["landing_root"],
-load_date, folder)
-     for name in [table_name] + child_names:
-         table_dir = dest_dir / name.lower()
-         if not any(table_dir.glob(f"{name.lower()}-*.parquet")):
-             return None
-     return dest_dir
+    Children ride with the parent: a partial parent-without-children state
+    does NOT count as done, so a retry repairs the missing half.
+    """
+    folder = cfg["connections"][conn_name]["folder"]
+    dest_dir = landing_dir(settings["paths"]["landing_root"], load_date, folder)
+    for name in [table_name] + child_names:
+        table_dir = dest_dir / name.lower()
+        if not any(table_dir.glob(f"{name.lower()}-*.parquet")):
+            return None
+    return dest_dir
 
 
 def _build_stats(
-     table_cfg: dict,
-     load_date: date,
-     status: str,
-     rows_read: int = 0,
-     rows_written: int = 0,
-     duration_sec: float = 0.0,
-     error: str | None = None,
-     output_path: str | None = None,
-     children: dict[str, int] | None = None,
+    table_cfg: dict,
+    load_date: date,
+    status: str,
+    rows_read: int = 0,
+    rows_written: int = 0,
+    duration_sec: float = 0.0,
+    error: str | None = None,
+    output_path: str | None = None,
+    children: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-     """Assemble a manifest-ready stats entry for one table."""
-     stats: dict[str, Any] = {
-         "connection": table_cfg["connection"],
-         "schema": table_cfg["schema"],
-         "name": table_cfg["name"],
-         "load_date": load_date.isoformat(),
-         "status": status,
-         "rows_read": rows_read,
-         "rows_written": rows_written,
-         "duration_sec": round(duration_sec, 2),
-         "output_path": output_path,
-         "error": error,
-     }
-     if children:
-         stats["child_tables"] = children
-         stats["child_rows_written"] = sum(children.values())
-     return stats
+    """Assemble a manifest-ready stats entry for one table."""
+    stats: dict[str, Any] = {
+        "connection": table_cfg["connection"],
+        "schema": table_cfg["schema"],
+        "name": table_cfg["name"],
+        "load_date": load_date.isoformat(),
+        "status": status,
+        "rows_read": rows_read,
+        "rows_written": rows_written,
+        "duration_sec": round(duration_sec, 2),
+        "output_path": output_path,
+        "error": error,
+    }
+    if children:
+        stats["child_tables"] = children
+        stats["child_rows_written"] = sum(children.values())
+    return stats
 
 
 def _declared_schema_for(schema_master: dict, folder: str,
                           table_name: str) -> tuple[dict[str, type[pl.DataType]], list[str]]:
-     """Resolve the master's dtypes + MV columns for one table.
+    """Resolve the master's dtypes + MV columns for one table.
 
-     Returns (declared_dtypes, mv_child_columns) - the latter drawn from
-     policy_flags, NOT dtype.
-     Raises ValueError when the table is absent from the master.
-     """
-     key = f"{folder}.{table_name}".lower()
-     entry = schema_master.get(key)
-     if entry is None:
-         raise ValueError(
-             f"table '{key}' not in schema master - edit "
-             f"{MASTER_AUTO} and add the table"
-         )
-     declared = {col: _resolve_dtype(dt) for col, dt in entry["columns"].items()}
-     return declared, _mv_columns_for(entry)
+    Returns (declared_dtypes, mv_child_columns) - the latter drawn from
+    policy_flags, NOT dtype.
+    Raises ValueError when the table is absent from the master.
+    """
+    key = f"{folder}.{table_name}".lower()
+    entry = schema_master.get(key)
+    if entry is None:
+        raise ValueError(
+            f"table '{key}' not in schema master - edit "
+            f"{MASTER_AUTO} and add the table"
+        )
+    declared = {col: _resolve_dtype(dt) for col, dt in entry["columns"].items()}
+    return declared, _mv_columns_for(entry)
 
 
 def _rules_for(rules: dict | None, folder: str, table_name: str) -> dict:
-     """Rules entry for one table; empty entry when absent (silent degrade)."""
-     if rules is None:
-         return {"dedup": None, "sort_spec": []}
-     return rules.get(
-         f"{folder}.{table_name}".lower(),
-         {"dedup": None, "sort_spec": []},
-     )
+    """Rules entry for one table; empty entry when absent (silent degrade)."""
+    if rules is None:
+        return {"dedup": None, "sort_spec": []}
+    return rules.get(
+        f"{folder}.{table_name}".lower(),
+        {"dedup": None, "sort_spec": []},
+    )
 
 
 def _utc_now_iso() -> str:
-     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _task_for(
@@ -237,17 +244,21 @@ def _task_for(
     run_id: str,
     pos: int | None = None,
     total: int | None = None,
+    paused_override: bool = False,
 ):
     """Build the per-table task for the folder worker (B1).
 
-    Mirrors oracle_to_stg._task_for exactly. The returned callable takes
-    the LIVE folder-session connection and performs exactly ONE attempt:
-    fresh writers, fresh buffers, fresh paged search. On any failure it
-    RAISES - the health gate classifies, resets the session only on
-    transport-class errors, and retries per the connection's knobs.
-    Declared-schema check runs before the skip check (order preserved
-    from the old code): a table missing from the master fails even if
-    its parquet exists.
+    The returned callable takes the LIVE folder-session connection and
+    performs exactly ONE attempt: fresh writer, fresh generator (the
+    write_parquet retry contract). On any failure it RAISES - the
+    worker's health gate classifies (session vs data), resets the
+    session only when transport broke, and retries per the connection's
+    configured knobs. Skip-check runs first and needs no connection.
+
+    PT-014: paused_override is the --paused-table flag, threaded from
+    the wrapper; False on every cron nightly. All pause intelligence
+    lives in dpl.lib.pause (lifted_by_override) - this extractor only
+    consumes its verdicts.
     """
     table_name = table_cfg["name"]
     search_base = table_cfg["search_base"]
@@ -258,6 +269,20 @@ def _task_for(
 
     tlog = get_run_logger("dpl.ad_to_stg", run_id=run_id, table=table_name)
 
+    # PT-014: resolve pause state for this table. All intelligence
+    # lives in dpl.lib.pause: folder-level block dominates table-level;
+    # --paused-table lifts a table-level pause for THIS run only and
+    # can never lift a folder-level one.
+    paused_state, pause_norm, _was_lifted = lifted_by_override(
+        table_cfg, cfg["connections"].get(conn_name), paused_override)
+    pause_line = (describe(paused_state, pause_norm)
+                  if pause_norm is not None else "")
+    pause_fields = {}
+    if paused_state == PAUSED:
+        # pyrefly narrowing: PAUSED implies a governing block exists
+        assert pause_norm is not None
+        pause_fields = manifest_fields(pause_norm)
+
     def attempt(conn):
         """One attempt on the open session. Returns stats; raises on failure."""
         start = time.time()
@@ -267,6 +292,17 @@ def _task_for(
             # counter is the table's fixed config position; mirrors
             # oracle_to_stg's attempt() exactly.
             tlog.info("[%s %d/%d] extracting...", folder, pos, total)
+
+        # PT-014: pause check runs FIRST - before the declared-schema
+        # resolution, the skip-check, and the force branch. Needs no
+        # connection. Pause outranks profile-force; only --paused-table
+        # lifts it, and only for this manual run (the wrapper's flag
+        # rides the same 'paused_override' path, absent for cron).
+        if paused_state == PAUSED:
+            tlog.info("%s", pause_line)
+            paused_stats = _build_stats(table_cfg, load_date, "paused")
+            paused_stats.update(pause_fields)
+            return paused_stats
 
         # --- declared schema: the master CSV is the authority (M3/M5) ---
         # ValueError here is data-class: no retry, table fails - same
@@ -383,79 +419,113 @@ def _task_for(
 
 
 def prepare_run(
-     cfg: dict,
-     settings: dict,
-     only_tables: list[str] | None = None,
-     run_id: str = "-",
+    cfg: dict,
+    settings: dict,
+    only_tables: list[str] | None = None,
+    run_id: str = "-",
+    paused_override: bool = False,
 ) -> dict[str, Any]:
-     """Run head carved out of extract_all (Phase 4 C1).
+    """Run head carved out of extract_all (Phase 4 C1).
 
-     Mirrors oracle_to_stg.prepare_run: guards, vault init, master and
-     rules load/validation, table selection, folder grouping - the
-     everything-before-any-bind step. The wrapper (C2) calls this
-     once per pipe, then schedules folders via extract_folder.
+    Mirrors oracle_to_stg.prepare_run: guards, vault init, master and
+    rules load/validation, table selection, folder grouping - the
+    everything-before-any-bind step. The wrapper (C2) calls this
+    once per pipe, then schedules folders via extract_folder.
 
-     Returns the run context (started_at, by_folder, schema_master,
-     rules) - same keys as the Oracle extractor, by contract.
-     """
-     rlog = get_run_logger("dpl.ad_to_stg", run_id=run_id)
+    Returns the run context (started_at, by_folder, schema_master,
+    rules) - same keys as the Oracle extractor, by contract.
+    """
+    rlog = get_run_logger("dpl.ad_to_stg", run_id=run_id)
 
-     started_at = _utc_now_iso()
+    started_at = _utc_now_iso()
 
-     # --- guards: fail loudly before opening anything ---
-     validate_config_folders(cfg)
-     table_collision_check(cfg)
-     validate_secrets_layout()
+    # --- guards: fail loudly before opening anything ---
+    validate_config_folders(cfg)
+    table_collision_check(cfg)
+    validate_secrets_layout()
 
-     # Vault init: settings name the pass_mgr environment; idempotent, so
-     # sharing a process with the Oracle extractor is fine.
-     pm_env = (settings.get("pass_mgr") or {}).get("environment")
-     if not pm_env:
-         raise ValueError(
-             "settings file must declare the vault environment, e.g.:\n"
-             "  pass_mgr:\n    environment: laptop")
-     pass_mgr.init(pm_env)
+    # Vault init: settings name the pass_mgr environment; idempotent, so
+    # sharing a process with the Oracle extractor is fine.
+    pm_env = (settings.get("pass_mgr") or {}).get("environment")
+    if not pm_env:
+        raise ValueError(
+            "settings file must declare the vault environment, e.g.:\n"
+            "  pass_mgr:\n    environment: laptop")
+    pass_mgr.init(pm_env)
 
-     # --- master CSV: load once, cross-check against config, then it rules ---
-     schema_master = load_schema_master(MASTER_AUTO)
-     validate_master_vs_config(cfg, schema_master, SOURCE_TYPE)
-     rules = load_table_rules(RULES_CSV)
-     validate_rules_references(schema_master, rules)
+    # --- master CSV: load once, cross-check against config, then it rules ---
+    schema_master = load_schema_master(MASTER_AUTO)
+    validate_master_vs_config(cfg, schema_master, SOURCE_TYPE)
+    rules = load_table_rules(RULES_CSV)
+    validate_rules_references(schema_master, rules)
 
-     rlog.info("schema master loaded: %d table(s)", len(schema_master))
+    rlog.info("schema master loaded: %d table(s)", len(schema_master))
 
-     tables = [
-         t for t in cfg["tables"]
-         if cfg["connections"].get(t["connection"], {}).get("type") == SOURCE_TYPE
-     ]
+    # PT-014: every declared pause block, both levels, loudly
+    # validated here FIRST (named errors; the yaml-load schema already
+    # refused structural garbage - this adds the owner's name).
+    validate_pause_declarations(cfg)
 
-     if only_tables:
-         wanted = set(only_tables)
-         tables = [t for t in tables if t["name"] in wanted]
+    # PT-014: --tables naming paused tables without --paused-table
+    # refuses THOSE tables loudly (the operator remedy is in the
+    # message); unnamed tables proceed untouched.
+    if only_tables:
+        refused = []
+        for t in cfg["tables"]:
+            if t["name"] not in only_tables:
+                continue
+            conn_cfg = cfg["connections"].get(t["connection"])
+            state, _ = state_for(t, conn_cfg)
+            if state == PAUSED:
+                refused.append(t["name"])
+        if refused:
+            rlog.error(
+                "paused table(s) %s requested without --paused-table - "
+                "to extract a paused table, rerun with "
+                "--paused-table (or remove its pause tag)",
+                ", ".join(refused))
+            only_tables = [n for n in only_tables
+                           if n not in set(refused)]
 
-     # group by folder, preserving config order within each group
-     by_folder: dict[str, list[dict[str, Any]]] = {}
-     for t in tables:
-         folder = cfg["connections"][t["connection"]]["folder"]
-         by_folder.setdefault(folder, []).append(t)
+    tables = [
+        t for t in cfg["tables"]
+        if cfg["connections"].get(t["connection"], {}).get("type") == SOURCE_TYPE
+    ]
 
-     return {
-         "started_at": started_at,
-         "by_folder": by_folder,
-         "schema_master": schema_master,
-         "rules": rules,
-     }
+    if only_tables is not None and not only_tables:
+        # PT-014 live-run finding (2026-11-18): refusal can empty the
+        # selection. An empty selection means "extract NOTHING", never
+        # "extract everything" - the type-filter list is the fallback
+        # for NO selection, not for a collapsed one.
+        tables = []
+    elif only_tables:
+        wanted = set(only_tables)
+        tables = [t for t in tables if t["name"] in wanted]
+
+    # group by folder, preserving config order within each group
+    by_folder: dict[str, list[dict[str, Any]]] = {}
+    for t in tables:
+        folder = cfg["connections"][t["connection"]]["folder"]
+        by_folder.setdefault(folder, []).append(t)
+
+    return {
+        "started_at": started_at,
+        "by_folder": by_folder,
+        "schema_master": schema_master,
+        "rules": rules,
+        "paused_override": paused_override,
+    }
 
 
 def extract_folder(
-     ctx: dict[str, Any],
-     cfg: dict,
-     settings: dict,
-     load_date: date,
-     folder: str,
-     force: bool = False,
-     run_id: str = "-",
-     profile: str = "manual",
+    ctx: dict[str, Any],
+    cfg: dict,
+    settings: dict,
+    load_date: date,
+    folder: str,
+    force: bool = False,
+    run_id: str = "-",
+    profile: str = "manual",
 ) -> dict[str, Any]:
     """Extract ONE folder's tables; return its envelope (Phase 4 C1).
 
@@ -488,7 +558,8 @@ def extract_folder(
     tasks = [
         (t["name"], _task_for(cfg, settings, t, load_date, force,
                               ctx["schema_master"], ctx["rules"], run_id,
-                              pos=pos, total=total_tables))
+                              pos=pos, total=total_tables,
+                              paused_override=ctx.get("paused_override", False)))
         for pos, t in enumerate(folder_tables, start=1)
     ]
 
@@ -534,6 +605,8 @@ def extract_folder(
             1 for r in results if r["status"] == "extracted"),
         "tables_skipped": sum(
             1 for r in results if r["status"] == "skipped"),
+        "tables_paused": sum(
+            1 for r in results if r["status"] == "paused"),
         "tables_failed": sum(
             1 for r in results if r["status"] in FAILURE_STATUSES),
     }
@@ -547,45 +620,45 @@ def extract_folder(
 
 
 def extract_all(
-     cfg: dict,
-     settings: dict,
-     load_date: date,
-     force: bool = False,
-     only_tables: list[str] | None = None,
-     run_id: str = "-",
-     profile: str = "manual",
+    cfg: dict,
+    settings: dict,
+    load_date: date,
+    force: bool = False,
+    only_tables: list[str] | None = None,
+    run_id: str = "-",
+    profile: str = "manual",
+    paused_override: bool = False,
 ) -> tuple[dict[str, dict[str, Any]], bool]:
-     """Extract all AD tables; return (manifests_by_folder, any_failed).
+    """Extract all AD tables; return (manifests_by_folder, any_failed).
 
-     Thin shell over prepare_run + extract_folder (Phase 4 C1) - the
-     manual CLI path. The wrapper's merged scheduler (C2) calls the
-     pieces separately. Signature and behavior unchanged.
-     """
-     ctx = prepare_run(cfg, settings, only_tables=only_tables, run_id=run_id)
+    Thin shell over prepare_run + extract_folder (Phase 4 C1) - the
+    manual CLI path. The wrapper's merged scheduler (C2) calls the
+    pieces separately. Signature and behavior unchanged.
+    """
+    ctx = prepare_run(cfg, settings, only_tables=only_tables, run_id=run_id,
+                      paused_override=paused_override)
 
-     manifests: dict[str, dict[str, Any]] = {}
-     for folder in ctx["by_folder"]:
-         manifests[folder] = extract_folder(
-             ctx, cfg, settings, load_date, folder, force=force,
-             run_id=run_id, profile=profile)
+    manifests: dict[str, dict[str, Any]] = {}
+    for folder in ctx["by_folder"]:
+        manifests[folder] = extract_folder(
+            ctx, cfg, settings, load_date, folder, force=force,
+            run_id=run_id, profile=profile)
 
-     any_failed = any(m["status"] == "partial_failure"
-                      for m in manifests.values())
-     return manifests, any_failed
+    any_failed = any(m["status"] == "partial_failure"
+                    for m in manifests.values())
+    return manifests, any_failed
 
 
 def main(run_id: str = "-") -> int:
     parser = argparse.ArgumentParser(description="Active Directory extractor")
-    parser.add_argument("--force", action="store_true",
-                        help="re-extract even if files exist")
-    parser.add_argument("--tables",
-                        help="comma-separated table names to extract")
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="verbose logging")
-    parser.add_argument("-c", "--config", default=CONFIG_FILE,
-                        help="config/extractors/ad_to_stg.yaml")
-    parser.add_argument("--settings", default=SETTINGS_FILE,
-                        help="config/settings.laptop.yaml")
+    parser.add_argument("--force", action="store_true", help="re-extract even if files exist")
+    parser.add_argument("--tables", help="comma-separated table names to extract")
+    parser.add_argument("--paused-table", action="store_true",
+                        help="with --tables naming paused table(s), "
+                             "lift their TABLE-level pause for this run")
+    parser.add_argument("-v", "--verbose", action="store_true", help="verbose logging")
+    parser.add_argument("-c", "--config", default=CONFIG_FILE, help="config/extractors/oracle_to_stg.yaml")
+    parser.add_argument("--settings", default=SETTINGS_FILE, help="config/settings.laptop.yaml")
 
     args = parser.parse_args()
 
@@ -607,6 +680,11 @@ def main(run_id: str = "-") -> int:
         return 1
 
     only_tables = [t.strip() for t in args.tables.split(",")] if args.tables else None
+    paused_override = bool(args.paused_table)
+    if paused_override and not only_tables:
+        log.error("--paused-table modifies --tables selections only - "
+                  "rerun as: --tables <names> --paused-table")
+        return 3
     load_date = date.today()
 
     if run_id == "-":
@@ -618,7 +696,7 @@ def main(run_id: str = "-") -> int:
     try:
         manifests, any_failed = extract_all(
             cfg, settings, load_date, force=args.force, only_tables=only_tables,
-            run_id=run_id, profile="manual",
+            run_id=run_id, profile="manual", paused_override=paused_override,
         )
     except (ValueError, KeyError, FileNotFoundError) as exc:
         log.critical("startup validation failed: %s", exc)
@@ -628,11 +706,12 @@ def main(run_id: str = "-") -> int:
     all_tables = [t for m in manifests.values() for t in m["tables"]]
     extracted = sum(1 for t in all_tables if t["status"] == "extracted")
     skipped = sum(1 for t in all_tables if t["status"] == "skipped")
+    paused = sum(1 for t in all_tables if t["status"] == "paused")
     failed = sum(1 for t in all_tables if t["status"] == "failed")
 
     log.info(
-        "extraction complete: %d extracted, %d skipped, %d failed",
-        extracted, skipped, failed,
+        "extraction complete: %d extracted, %d skipped, %d paused, %d failed",
+        extracted, skipped, paused, failed,
     )
 
     if any_failed:
