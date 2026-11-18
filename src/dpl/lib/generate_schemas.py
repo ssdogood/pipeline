@@ -55,6 +55,7 @@ from dpl.lib.common import (
 from dpl.lib.connectors import CONNECTORS
 from dpl.lib.logger import get_run_logger, setup_logging
 from dpl.lib.ora_connect import connect as oracle_connect
+from dpl.lib.pause import PAUSED, state_for
 from dpl.lib.session_pool import run_folder_tables
 
 log = get_run_logger("dpl.schema")
@@ -266,7 +267,8 @@ def diff_master(old: dict[str, dict], new: dict[str, dict]) -> dict[str, list[st
 def generate_schemas(config_path: str, output_path: str,
                      force: bool, dry_run: bool,
                      settings_path: str = SETTINGS_FILE,
-                     source_type: str | None = None) -> int:
+                     source_type: str | None = None, 
+                     paused_override: bool = False) -> int:
     """Main generation routine for ONE pipe (single connector type).
 
     Args:
@@ -353,6 +355,7 @@ def generate_schemas(config_path: str, output_path: str,
     # introspect it. Defense-in-depth, per PT-001-style doctrine.
     tables = []
     excluded_foreign: list[str] = []
+    paused_count = 0
     for t in cfg["tables"]:
         conn_cfg = cfg["connections"].get(t["connection"], {})
         if conn_cfg.get("schema") == "manual":
@@ -361,6 +364,16 @@ def generate_schemas(config_path: str, output_path: str,
                 "generation for its tables (hand-curated master).",
                 t["connection"])
             continue
+        # PT-014: paused tables skip introspection SILENTLY on scheduled
+        # runs (design 2026-11-18): the pause is already announced loudly
+        # by the extractor's arithmetic lines and manifest/history records;
+        # a third announcement would be noise. Manual --paused-table runs
+        # pass paused_override=True, so the table gets FULL service here.
+        if not paused_override:
+            _st, _norm = state_for(t, cfg["connections"].get(t["connection"]))
+            if _st == PAUSED:
+                paused_count += 1
+                continue
         if str(conn_cfg.get("type", "")).lower() != stype:
             excluded_foreign.append(f"{t['connection']}.{t['name']}")
             continue
@@ -375,6 +388,14 @@ def generate_schemas(config_path: str, output_path: str,
 
     log.info("found %d tables of type '%s'", len(tables), stype)
     if not tables:
+        # PT-014: a pipe where EVERY table is paused is a healthy,
+        # expected state - keep the master unchanged, open no
+        # connection, exit 0 quietly ("no complaints" ruling,
+        # 2026-11-18). All-manual remains the old loud exit 1.
+        if paused_count and paused_count == len(cfg["tables"]):
+            log.info("all %d table(s) paused - master left unchanged, "
+                     "no connection opened", paused_count)
+            return 0
         log.critical(
             "no tables left to introspect - every connection declared "
             "schema: manual (or the yaml declares none). Nothing to do.")
@@ -563,8 +584,9 @@ def main() -> int:
         help="show diff without writing"
     )
     parser.add_argument(
-        "--settings", default=SETTINGS_FILE,
-        help=f"path to settings yaml (default: {SETTINGS_FILE})"
+        "--paused-table", action="store_true",
+        help="PT-014: introspect paused tables too (manual pull of a "
+             "paused table needs fresh schema truth)"
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true",
@@ -582,7 +604,8 @@ def main() -> int:
              args.dry_run, args.force)
 
     return generate_schemas(args.config, args.out, args.force, args.dry_run,
-                            settings_path=args.settings)
+                            settings_path=args.settings,
+                            paused_override=args.paused_table)
 
 
 if __name__ == "__main__":

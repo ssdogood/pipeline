@@ -18,6 +18,7 @@ from schema import And, Forbidden, Optional, Schema
 
 from dpl.lib import pass_mgr
 from dpl.lib.logger import get_run_logger
+from dpl.lib.pause import pause_block_ok
 
 log = get_run_logger("dpl.ldap")
 
@@ -46,6 +47,7 @@ LDAP_CONFIG_SCHEMA = Schema({
             Optional("auth", default="ntlm"): And(str, len),
             Optional("page_size", default=500): And(int, lambda n: n > 0),
             "folder": And(str, len),
+            Optional("pause"): pause_block_ok,   # PT-014 folder-level
             Optional(str): object
         }
     },
@@ -59,6 +61,7 @@ LDAP_CONFIG_SCHEMA = Schema({
             "name": And(str, len),
             "search_base": And(str, len),
             "filter": And(str, len),
+            Optional("pause"): pause_block_ok,   # PT-014 table-level
             Optional(str): object
         }
     ],

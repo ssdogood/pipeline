@@ -62,6 +62,14 @@ from dpl.lib.ora_connect import (
     iter_batches,
     resolve_dtype,
 )
+from dpl.lib.pause import (
+    PAUSED,
+    describe,
+    lifted_by_override,
+    manifest_fields,
+    state_for,
+    validate_pause_declarations,
+)
 from dpl.lib.session_pool import run_folder_tables
 from dpl.lib.write_parquet import ParquetWriter
 
@@ -174,6 +182,7 @@ def _task_for(
     run_id: str,
     pos: int | None = None,
     total: int | None = None,
+    paused_override: bool = False,
 ):
     """Build the per-table task for the folder worker (B1).
 
@@ -183,6 +192,11 @@ def _task_for(
     worker's health gate classifies (session vs data), resets the
     session only when transport broke, and retries per the connection's
     configured knobs. Skip-check runs first and needs no connection.
+
+    PT-014: paused_override is the --paused-table flag, threaded from
+    the wrapper; False on every cron nightly. All pause intelligence
+    lives in dpl.lib.pause (lifted_by_override) - this extractor only
+    consumes its verdicts.
     """
     table_name = table_cfg["name"]
     query = table_cfg["query"]
@@ -191,6 +205,20 @@ def _task_for(
     batch_rows = settings.get("polars", {}).get("batch_rows", 50_000)
     strict_cast = settings.get("polars", {}).get("strict_cast", True)
     tlog = get_run_logger("dpl.oracle_to_stg", run_id=run_id, table=table_name)
+
+    # PT-014: resolve pause state for this table. All intelligence
+    # lives in dpl.lib.pause: folder-level block dominates table-level;
+    # --paused-table lifts a table-level pause for THIS run only and
+    # can never lift a folder-level one.
+    paused_state, pause_norm, _was_lifted = lifted_by_override(
+        table_cfg, cfg["connections"].get(conn_name), paused_override)
+    pause_line = (describe(paused_state, pause_norm)
+                  if pause_norm is not None else "")
+    pause_fields = {}
+    if paused_state == PAUSED:
+        # pyrefly narrowing: PAUSED implies a governing block exists
+        assert pause_norm is not None
+        pause_fields = manifest_fields(pause_norm)
 
     def attempt(conn):
         """One attempt on the open session. Returns stats; raises on failure."""
@@ -202,6 +230,17 @@ def _task_for(
             # each table; the counter is the table's fixed config
             # position, stable across retries and interleaved lanes.
             tlog.info("[%s %d/%d] extracting...", folder, pos, total)
+
+        # PT-014: pause check runs FIRST - before the skip-check and
+        # before the force branch can touch it. Needs no connection.
+        # Pause outranks profile-force; only --paused-table lifts it,
+        # and only for this manual run (the wrapper's flag rides the
+        # same 'paused_override' path, absent for every cron nightly).
+        if paused_state == PAUSED:
+            tlog.info("%s", pause_line)
+            paused_stats = _build_stats(table_cfg, load_date, "paused")
+            paused_stats.update(pause_fields)
+            return paused_stats
 
         if not force:
             existing_dir = _check_exists(settings, cfg, load_date,
@@ -257,6 +296,7 @@ def prepare_run(
     settings: dict,
     only_tables: list[str] | None = None,
     run_id: str = "-",
+    paused_override: bool = False,
 ) -> dict[str, Any]:
     """Run head carved out of extract_all (Phase 4 C1).
 
@@ -301,12 +341,44 @@ def prepare_run(
 
     rlog.info("schema master loaded: %d table(s)", len(schema_master))
 
+    # PT-014: every declared pause block, both levels, loudly
+    # validated here (named errors; the yaml-load schema already
+    # refused structural garbage - this adds the owner's name).
+    validate_pause_declarations(cfg)
+
+    # PT-014: --tables naming paused tables without --paused-table
+    # refuses THOSE tables loudly (the operator remedy is in the
+    # message); unnamed tables proceed untouched.
+    if only_tables:
+        refused = []
+        for t in cfg["tables"]:
+            if t["name"] not in only_tables:
+                continue
+            conn_cfg = cfg["connections"].get(t["connection"])
+            state, _ = state_for(t, conn_cfg)
+            if state == PAUSED:
+                refused.append(t["name"])
+        if refused:
+            rlog.error(
+                "paused table(s) %s requested without --paused-table - "
+                "to extract a paused table, rerun with "
+                "--paused-table (or remove its pause tag)",
+                ", ".join(refused))
+            only_tables = [n for n in only_tables
+                           if n not in set(refused)]
+
     tables = [
         t for t in cfg["tables"]
         if cfg["connections"].get(t["connection"], {}).get("type") == SOURCE_TYPE
     ]
 
-    if only_tables:
+    if only_tables is not None and not only_tables:
+        # PT-014 live-run finding (2026-11-18): refusal can empty the
+        # selection. An empty selection means "extract NOTHING", never
+        # "extract everything" - the type-filter list is the fallback
+        # for NO selection, not for a collapsed one.
+        tables = []
+    elif only_tables:
         wanted = set(only_tables)
         tables = [t for t in tables if t["name"] in wanted]
 
@@ -321,6 +393,7 @@ def prepare_run(
         "by_folder": by_folder,
         "schema_master": schema_master,
         "rules": rules,
+        "paused_override": paused_override,
     }
 
 
@@ -367,7 +440,8 @@ def extract_folder(
     tasks = [
         (t["name"], _task_for(cfg, settings, t, load_date, force,
                               ctx["schema_master"], ctx["rules"], run_id,
-                              pos=pos, total=total_tables))
+                              pos=pos, total=total_tables,
+                              paused_override=ctx.get("paused_override", False)))
         for pos, t in enumerate(folder_tables, start=1)
     ]
 
@@ -418,6 +492,8 @@ def extract_folder(
             1 for r in results if r["status"] == "extracted"),
         "tables_skipped": sum(
             1 for r in results if r["status"] == "skipped"),
+        "tables_paused": sum(
+            1 for r in results if r["status"] == "paused"),
         "tables_failed": sum(
             1 for r in results if r["status"] in FAILURE_STATUSES),
     }
@@ -439,6 +515,7 @@ def extract_all(
     only_tables: list[str] | None = None,
     run_id: str = "-",
     profile: str = "manual",
+    paused_override: bool = False,
 ) -> tuple[dict[str, dict[str, Any]], bool]:
     """Extract all Oracle tables; return (manifests_by_folder, any_failed).
 
@@ -448,7 +525,8 @@ def extract_all(
     raise exactly as before; table failures are recorded, never
     raised; any_failed reflects any folder's partial_failure.
     """
-    ctx = prepare_run(cfg, settings, only_tables=only_tables, run_id=run_id)
+    ctx = prepare_run(cfg, settings, only_tables=only_tables, run_id=run_id,
+                      paused_override=paused_override)
 
     manifests: dict[str, dict[str, Any]] = {}
     for folder in ctx["by_folder"]:
@@ -465,6 +543,9 @@ def main(run_id: str = "-") -> int:
     parser = argparse.ArgumentParser(description="Oracle ETL extractor")
     parser.add_argument("--force", action="store_true", help="re-extract even if files exist")
     parser.add_argument("--tables", help="comma-separated table names to extract")
+    parser.add_argument("--paused-table", action="store_true",
+                        help="with --tables naming paused table(s), "
+                             "lift their TABLE-level pause for this run")
     parser.add_argument("-v", "--verbose", action="store_true", help="verbose logging")
     parser.add_argument("-c", "--config", default=CONFIG_FILE, help="config/extractors/oracle_to_stg.yaml")
     parser.add_argument("--settings", default=SETTINGS_FILE, help="config/settings.laptop.yaml")
@@ -489,6 +570,11 @@ def main(run_id: str = "-") -> int:
         return 1
 
     only_tables = [t.strip() for t in args.tables.split(",")] if args.tables else None
+    paused_override = bool(args.paused_table)
+    if paused_override and not only_tables:
+        log.error("--paused-table modifies --tables selections only - "
+                  "rerun as: --tables <names> --paused-table")
+        return 3
     load_date = date.today()
 
     # manual CLI run: derive a run_id (the wrapper passes ITS own in later,
@@ -504,7 +590,7 @@ def main(run_id: str = "-") -> int:
     try:
         manifests, any_failed = extract_all(
             cfg, settings, load_date, force=args.force, only_tables=only_tables,
-            run_id=run_id, profile="manual",
+            run_id=run_id, profile="manual", paused_override=paused_override,
         )
     except (ValueError, KeyError, FileNotFoundError) as exc:
         log.critical("startup validation failed: %s", exc)
@@ -514,11 +600,12 @@ def main(run_id: str = "-") -> int:
     all_tables = [t for m in manifests.values() for t in m["tables"]]
     extracted = sum(1 for t in all_tables if t["status"] == "extracted")
     skipped = sum(1 for t in all_tables if t["status"] == "skipped")
+    paused = sum(1 for t in all_tables if t["status"] == "paused")
     failed = sum(1 for t in all_tables if t["status"] == "failed")
 
     log.info(
-        "extraction complete: %d extracted, %d skipped, %d failed",
-        extracted, skipped, failed,
+        "extraction complete: %d extracted, %d skipped, %d paused, %d failed",
+        extracted, skipped, paused, failed,
     )
 
     if any_failed:
