@@ -280,3 +280,31 @@ def test_declarations_name_the_connection():
            "tables": []}
     with pytest.raises(ValueError, match="connection 'ora_db'"):
         validate_pause_declarations(cfg)
+
+# ── office-test finding 2026-11-19: bare end dates were read as blank ──
+
+def test_bare_end_date_respected():
+    block = {"start": "2026-11-01", "end": date(2026, 11, 18),
+             "reason": "bare yaml end"}
+    norm = validate_pause_block(block)
+    assert norm["end"] == date(2026, 11, 18)
+
+def test_bare_end_date_expires_loudly():
+    norm = validate_pause_block({"start": "2026-11-01",
+                                 "end": date(2026, 11, 18),
+                                 "reason": "bare yaml end"})
+    assert evaluate(norm, date(2026, 11, 19)) == EXPIRED
+
+def test_bare_end_date_future_shows_days_left():
+    norm = validate_pause_block({"start": "2026-11-10",
+                                 "end": date(2026, 11, 30),
+                                 "reason": "bare yaml end"})
+    line = describe(PAUSED, norm, today=date(2026, 11, 19))
+    assert "day(s) left until 2026-11-30" in line
+
+def test_blank_end_still_indefinite_in_every_spelling():
+    for blank in (None, "", "   "):
+        norm = validate_pause_block({"start": "2026-11-01",
+                                     "end": blank, "reason": "t"})
+        assert norm["end"] is None
+        assert evaluate(norm, date(2026, 12, 31)) == PAUSED
