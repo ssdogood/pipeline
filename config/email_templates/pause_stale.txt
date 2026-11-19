@@ -1,0 +1,13 @@
+DPL stale-pause digest - pause tags needing operator attention.
+
+Run ID:        ${run_id}
+Threshold:     ${stale_threshold} day(s)
+Stale pauses:  ${stale_count}
+
+${stale_lines}
+
+A stale pause is either an indefinite (blank-end) pause older than the
+threshold, or an expired tag nobody removed. Remove or extend the tags
+in the extractor yaml configs; expired tags nag in every run log until
+then.
+Full log: grep "run_id=${run_id}" logs/dpl_pipeline.log

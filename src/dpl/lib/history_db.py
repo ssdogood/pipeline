@@ -28,6 +28,15 @@ table_runs_legacy, old rows left untouched), and switches the database
 to WAL journal mode. Attempting to write to an uninitialized database
 fails loudly with that instruction.
 
+Schema v2.1 (PT-014 Commit 2, 2026-11-19):
+  - table_runs  : + pause_start, pause_end, pause_reason, days_elapsed
+                  (all nullable; NULL for every non-paused row and for
+                  re-ingested pre-PT-014 manifests - files stay the
+                  record of record either way).
+  - folder_runs : + tables_paused (mirrors the envelope count).
+  Applied by init_db() as additive ALTER TABLE, in place and lossless -
+  unlike the v1 rename, old rows simply keep their NULLs.
+
 Schema v2 (PT-001):
   - runs          : UNCHANGED shape - the wrapper's run-level row
                     (running stub at start, final status/exit_code).
@@ -89,8 +98,8 @@ CREATE TABLE IF NOT EXISTS runs (
     run_id      TEXT PRIMARY KEY,
     profile     TEXT NOT NULL,
     started_at  TEXT NOT NULL,
-    finished_at TEXT,               -- max across the run's folder manifests
-    status      TEXT NOT NULL,      -- success | partial_failure | failed | running
+    finished_at TEXT,                -- max across the run's folder manifests
+    status      TEXT NOT NULL,       -- success | partial_failure | failed | running
     exit_code   INTEGER              -- wrapper-level
 );
 CREATE TABLE IF NOT EXISTS folder_runs (
@@ -98,10 +107,11 @@ CREATE TABLE IF NOT EXISTS folder_runs (
     folder           TEXT NOT NULL,
     load_date        TEXT,
     status           TEXT NOT NULL,   -- mirrors envelope status (incl. 'paused' from PT-014 stubs)
-    tables_total     INTEGER,        -- mirrors envelope top-level counts; exact COUNT fallback
+    tables_total     INTEGER,         -- mirrors envelope top-level counts; exact COUNT fallback
     tables_extracted INTEGER,
     tables_skipped   INTEGER,
     tables_failed    INTEGER,
+    tables_paused    INTEGER,        -- v2.1 (PT-014): mirrors envelope count
     exit_code        INTEGER,        -- from envelope wrapper.exit_code (pre-0.3.0: NULL)
     finished_at      TEXT,
     PRIMARY KEY (run_id, folder)
@@ -119,6 +129,10 @@ CREATE TABLE IF NOT EXISTS table_runs (
     output_path  TEXT,
     error        TEXT,
     attempts     INTEGER,
+    pause_start  TEXT,               -- v2.1 (PT-014): manifest pause fields
+    pause_end    TEXT,               -- (NULL when the table was not paused)
+    pause_reason TEXT,
+    days_elapsed INTEGER,
     PRIMARY KEY (run_id, folder, table_name)
 );
 CREATE TABLE IF NOT EXISTS email_sends (
@@ -205,6 +219,53 @@ def _migrate_legacy(conn: sqlite3.Connection, existing: set[str]) -> bool:
     return True
 
 
+def _migrate_v2_1(conn: sqlite3.Connection) -> bool:
+    """Additive v2 -> v2.1 upgrade (PT-014 Commit 2, 2026-11-19).
+
+    Runs in init_db() AFTER the DDL: CREATE IF NOT EXISTS never adds
+    columns to an existing table, so a deployed v2 database gets its
+    pause columns here. Lossless and in place - plain ALTER TABLE
+    ... ADD COLUMN; existing rows keep their NULLs (the contrast with
+    the v1 rename is deliberate: that migration preserved rows by
+    renaming, this one preserves them by not touching them).
+
+    Marker: 'table_runs' exists but lacks 'pause_reason'. Every added
+    column is individually idempotent (checked, skipped when present),
+    so a half-upgraded database re-runs to completion and a v2.1
+    database is a clean no-op. Returns True when any column was added.
+    """
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    if "table_runs" not in tables:
+        return False          # fresh DB: the v2.1 DDL already has them
+    if "pause_reason" in _table_columns(conn, "table_runs") \
+            and "tables_paused" in _table_columns(conn, "folder_runs"):
+        return False          # already v2.1: idempotent re-run
+
+    additions: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+        ("table_runs", (
+            ("pause_start", "TEXT"),
+            ("pause_end", "TEXT"),
+            ("pause_reason", "TEXT"),
+            ("days_elapsed", "INTEGER"),
+        )),
+        ("folder_runs", (
+            ("tables_paused", "INTEGER"),
+        )),
+    )
+    added = False
+    for table, cols in additions:
+        if table not in tables:
+            continue          # nothing to alter (DDL creates v2.1 shape)
+        present = _table_columns(conn, table)
+        for col, decl in cols:
+            if col not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                log.info("history v2.1: %s gained column %s", table, col)
+                added = True
+    return added
+
+
 def init_db(db_path: Path) -> dict[str, Any]:
     """Apply the idempotent DDL, run the one-time legacy rename, set WAL.
 
@@ -222,6 +283,8 @@ def init_db(db_path: Path) -> dict[str, Any]:
         }
         migrated = _migrate_legacy(conn, existing)
         conn.executescript(DDL)
+        # v2.1 upgrade AFTER the DDL (see _migrate_v2_1 docstring)
+        upgraded = _migrate_v2_1(conn)
         conn.commit()
         journal = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
         tables = [
@@ -230,7 +293,7 @@ def init_db(db_path: Path) -> dict[str, Any]:
                 "ORDER BY name")
         ]
         return {"tables": tables, "journal_mode": journal,
-                "migrated": migrated}
+                "migrated": migrated, "upgraded_v2_1": upgraded}
     finally:
         conn.close()
 

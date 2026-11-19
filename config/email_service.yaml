@@ -111,3 +111,18 @@ callers:
     use_html: true
     data:
       subject: "[dpl] run FAILED - operator attention required"
+
+  # ── EVENT: pause_stale (PT-014 Commit 2) ───────────────────────
+  # TIER 2 (opt-in). Fires at most once per run, ONLY when at least
+  # one pause sits stale past pause.stale_days. Data keys: run_id,
+  # stale_threshold, stale_count, stale_lines.
+  # Recipients: regular ops recipients plus any dedicated pause-ops
+  # alias - just add it to `to:`; no separate config knob exists.
+  # MAIL BUDGET: 1/run.
+  pause_stale:
+    enabled: true
+    to: [ops@yourdomain.org]              # CHANGE-ME (+ pause-ops alias)
+    template: pause_stale.txt
+    use_html: true                        # twin: pause_stale.html
+    data:
+      subject: "[dpl] stale pause digest"

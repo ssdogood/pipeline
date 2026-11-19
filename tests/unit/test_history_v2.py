@@ -12,6 +12,22 @@ import pytest
 from dpl.lib.history_db import DDL, init_db, open_db
 from dpl.wrapper.update_history import ingest_manifest
 
+#: strip every v2.1 pause column from the production DDL. Trailing
+#: `-- comment` after the comma is tolerated (a comment never saves a
+#: column from the strip).
+_STRIP_V2_1_COLS = re.compile(
+    r"^[ \t]+(?:pause_start[ \t]+TEXT"
+    r"|pause_end[ \t]+TEXT"
+    r"|pause_reason[ \t]+TEXT"
+    r"|days_elapsed[ \t]+INTEGER"
+    r"|tables_paused[ \t]+INTEGER)"
+    r",([ \t]*--[^\n]*)?[ \t]*$\n?",
+    flags=re.MULTILINE)
+
+#: strip v1's marker column (table_runs.attempts) - comment-tolerant too.
+_STRIP_ATTEMPTS = re.compile(
+    r"^[ \t]+attempts[ \t]+INTEGER,([ \t]*--[^\n]*)?[ \t]*$\n?",
+    flags=re.MULTILINE)
 
 def _v1_ddl() -> str:
     """The v1 schema: production DDL minus the table_runs.attempts line.
@@ -22,8 +38,11 @@ def _v1_ddl() -> str:
     in email_sends does NOT match - the character after 'attempts' must
     be whitespace here.
     """
-    return re.sub(r"^[ \t]+attempts[ \t]+INTEGER,[ \t]*$\n?", "", DDL,
-                  flags=re.MULTILINE)
+    # v2.1 additions are subtracted too: the helper must always yield
+    # the AUTHENTIC v1 shape, whatever the production DDL has grown.
+    # Trailing DDL comments are tolerated after the comma (some pause
+    # lines carry them) - a comment never saves a column from the strip.
+    return _STRIP_ATTEMPTS.sub("", _STRIP_V2_1_COLS.sub("", DDL))
 
 
 def _envelope(run_id="run_1", folder="stg", status="success",
@@ -241,3 +260,85 @@ def test_migration_refuses_on_legacy_collision(tmp_path):
     conn.close()
     with pytest.raises(RuntimeError):
         init_db(db_path)
+
+
+
+# ── v2.1 (PT-014 Commit 2): pause columns, in-place upgrade ────────────
+
+def _v2_ddl() -> str:
+    """Authentic v2: production DDL minus the v2.1 pause additions."""
+    return _STRIP_V2_1_COLS.sub("", DDL)
+
+
+def test_migration_upgrades_v2_in_place(tmp_path):
+    db_path = tmp_path / "v2.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(_v2_ddl())
+    conn.commit()
+    conn.close()
+    summary = init_db(db_path)
+    assert summary["migrated"] is False
+    assert summary["upgraded_v2_1"] is True
+    cols = {r[1] for r in _rows(db_path, "PRAGMA table_info(table_runs)")}
+    assert {"pause_start", "pause_end", "pause_reason",
+            "days_elapsed"} <= cols
+    fcols = {r[1] for r in _rows(db_path, "PRAGMA table_info(folder_runs)")}
+    assert "tables_paused" in fcols
+
+
+def test_v2_1_upgrade_idempotent(tmp_path):
+    db_path = tmp_path / "v2.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(_v2_ddl())
+    conn.commit()
+    conn.close()
+    init_db(db_path)
+    summary = init_db(db_path)                 # second run: clean no-op
+    assert summary["migrated"] is False
+    assert summary["upgraded_v2_1"] is False
+
+
+def test_paused_table_fields_roundtrip(db):
+    t = _table("T_PAUSE", "paused")
+    t.update({"pause_start": "2026-11-10", "pause_end": "2026-11-30",
+              "pause_reason": "year-end close", "days_elapsed": 3})
+    _ingest(db, _envelope(tables=[t]))
+    row = _rows(db, "SELECT status, pause_start, pause_end, pause_reason, "
+                    "days_elapsed FROM table_runs")[0]
+    assert row == ("paused", "2026-11-10", "2026-11-30",
+                   "year-end close", 3)
+
+
+def test_unpaused_table_has_null_pause_fields(db):
+    _ingest(db, _envelope(tables=[_table()]))
+    row = _rows(db, "SELECT pause_start, pause_end, pause_reason, "
+                    "days_elapsed FROM table_runs")[0]
+    assert row == (None, None, None, None)
+
+
+def test_five_key_envelope_mirrors_including_paused(db):
+    _ingest(db, _envelope(tables=[_table("A"), _table("P", "paused")],
+                          counts={"tables_total": 2,
+                                  "tables_extracted": 1,
+                                  "tables_skipped": 0,
+                                  "tables_failed": 0,
+                                  "tables_paused": 1},
+                          wrapper={"exit_code": 0}))
+    row = _rows(db, "SELECT tables_total, tables_extracted, "
+                    "tables_skipped, tables_failed, tables_paused "
+                    "FROM folder_runs")[0]
+    assert row == (2, 1, 0, 0, 1)
+
+
+def test_four_key_envelope_mirrors_four_and_computes_paused(db):
+    """Old v0.3.0 envelopes: the four declared counts WIN (mirror
+    ruling preserved) AND tables_paused lands as a true computed 0."""
+    _ingest(db, _envelope(tables=[_table("A")],
+                          counts={"tables_total": 5,
+                                  "tables_extracted": 4,
+                                  "tables_skipped": 0,
+                                  "tables_failed": 1}))
+    row = _rows(db, "SELECT tables_total, tables_extracted, "
+                    "tables_skipped, tables_failed, tables_paused "
+                    "FROM folder_runs")[0]
+    assert row == (5, 4, 0, 1, 0)

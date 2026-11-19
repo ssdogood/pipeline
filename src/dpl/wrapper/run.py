@@ -648,6 +648,33 @@ def main(argv: list[str] | None = None) -> int:
             history_failed = True
             exit_code = EXIT_HISTORY
 
+    # ── PT-014 Commit 2: stale-pause digest (once per run) ─────────
+    # Pure scan -> payload; fires ONLY when something is stale. Pipe
+    # configs are re-read here (cheap, no connections): by this point
+    # the extract step has already loudly rejected any config fault,
+    # so a scanner failure would mean the yaml changed mid-run - logged
+    # and never fatal (FR-17: notifications can't touch the exit code).
+    try:
+        from dpl.lib.pause_digest import digest_payload, stale_pause_entries
+        stale_days = (settings.get("pause") or {}).get("stale_days", 14)
+        pipe_cfgs: dict[str, dict] = {}
+        for p in pipes:
+            c = load_config(p.path, p.connector["schema"])
+            if c is not None:
+                pipe_cfgs[p.name] = c
+        payload = digest_payload(
+            stale_pause_entries(pipe_cfgs, stale_days), stale_days)
+        if payload:
+            log.info("pause digest: %d stale pause(s), threshold %d "
+                     "day(s)", payload["stale_count"], stale_days)
+            payload["run_id"] = run_id
+            _notify("pause_stale", run_id, payload)
+        else:
+            log.debug("pause digest: nothing stale at threshold %d "
+                      "day(s)", stale_days)
+    except Exception as exc:               # noqa: BLE001 - never fatal
+        log.error("pause digest could not be evaluated: %s", exc)
+
     # ── Email events: fire after final state is known, before exit ──
     # Exactly one terminal event per run. Tier protection for
     # run_failed lives in config.py (enabled: false -> load error).

@@ -1,0 +1,21 @@
+<html>
+<body style="font-family: -apple-system, Segoe UI, sans-serif; color: #1a1a1a; margin: 24px;">
+  <h2 style="margin: 0 0 4px 0;">DPL stale-pause digest</h2>
+  <p style="margin: 0 0 16px 0; color: #666;">Pause tags needing operator attention.</p>
+  <table cellpadding="6" style="border-collapse: collapse; margin-bottom: 16px;">
+    <tr><td style="color: #666;">Run ID</td><td><code>${run_id}</code></td></tr>
+    <tr><td style="color: #666;">Threshold</td><td>${stale_threshold} day(s)</td></tr>
+    <tr><td style="color: #666;">Stale pauses</td><td><strong>${stale_count}</strong></td></tr>
+  </table>
+  <div style="background: #fff7e6; border: 1px solid #e6c98a; border-radius: 6px;
+              padding: 12px; white-space: pre-wrap; font-family: Menlo, monospace;
+              font-size: 13px;">${stale_lines}</div>
+  <p style="margin-top: 16px; color: #666; font-size: 13px;">
+    A stale pause is either an indefinite (blank-end) pause older than the
+    threshold, or an expired tag nobody removed. Remove or extend the tags
+    in the extractor yaml configs; expired tags nag in every run log until
+    then.<br>
+    Full log: grep &quot;run_id=${run_id}&quot; logs/dpl_pipeline.log
+  </p>
+</body>
+</html>

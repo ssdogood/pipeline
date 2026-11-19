@@ -159,3 +159,10 @@ writer:
 extraction:
   max_parallel_folders: 1
   keepalive_minutes: 10
+
+# --- Pause staleness digest (PT-014 Commit 2) -------------------------------
+# stale_days: a pause older than this (aged from start for blank-end
+# 'indefinite' pauses, from end for lingering 'expired' tags) enters
+# the once-per-night pause_stale digest email. Optional key; default 14.
+pause:
+  stale_days: 14
