@@ -87,8 +87,16 @@ def validate_pause_block(block: object,
     start = _parse_day(block["start"], owner, "start")
 
     end_raw = block["end"]
-    end: date | None = None          # blank = indefinite
-    if isinstance(end_raw, str) and end_raw.strip():
+    # blank = indefinite: yaml `end:` (None), empty string, whitespace.
+    # EVERYTHING else goes through _parse_day - which accepts both bare
+    # yaml dates (autotyped) and quoted strings. The old isinstance-str
+    # gate silently turned bare dates into "indefinite" - the PT-014
+    # office-test finding (2026-11-19): a dated end must never lie.
+    blank = end_raw is None or (isinstance(end_raw, str)
+                                and not end_raw.strip())
+    if blank:
+        end = None
+    else:
         end = _parse_day(end_raw, owner, "end")
         if end < start:
             raise ValueError(
