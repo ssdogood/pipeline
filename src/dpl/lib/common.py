@@ -95,6 +95,13 @@ SETTINGS_SCHEMA = Schema({
     Optional("extraction"): {
         Optional("max_parallel_folders"): And(int, lambda n: n >= 1),
         Optional("keepalive_minutes"): And(int, lambda n: n >= 1),
+    },
+    # PT-014 Commit 2: stale-pause digest threshold. Absent block ->
+    # default 14 (warn-and-continue, the extraction: safe-upgrade rule);
+    # present but invalid -> loud config failure.
+    Optional("pause"): {
+        Optional("stale_days", default=14): And(int, lambda n: n >= 1),
+        Optional(str): object,
     }
 })
 

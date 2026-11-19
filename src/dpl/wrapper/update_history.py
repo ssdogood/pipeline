@@ -20,13 +20,15 @@ SCHEMA v2 INGEST (PT-001):
   - table_runs  : + attempts (NULL for pre-0.3.0 manifests)
 
 Count mirroring (ruling 2026-11-17, key placement verified from the
-real v0.3.0 manifest): the four counts live at the ENVELOPE TOP LEVEL
-(tables_total, tables_extracted, tables_skipped, tables_failed) - NOT
-in a nested summary block. Mirror them when ALL FOUR are present;
+real v0.3.0 manifest): the counts live at the ENVELOPE TOP LEVEL
+(tables_total, tables_extracted, tables_skipped, tables_failed and,
+since v2.1/PT-014, tables_paused) - NOT in a nested summary block.
+Mirror them when ALL PRESENT are expected - see _summary_counts;
 otherwise compute exact counts from tables[]. All-or-nothing, so
-partial numbers can never land. Unknown/unmodelled statuses (e.g. a
-future 'paused') count only toward tables_total - never mis-filed as
-extracted/skipped/failed.
+partial numbers can never land. (v2.1) A tables_paused count is
+mirrored only when the DB carries the column AND the envelope has
+all five keys; older four-key envelopes fall back to computed
+counts, with 'paused' its own bucket at last.
 
 OWNERSHIP SPLIT (stage 3 refactor, 2026-11-10): dpl.lib.history_db is
 the ONLY module touching sqlite3. This module KEEPS its ingest SQL and
@@ -53,16 +55,24 @@ from dpl.lib.history_db import (
 log = get_run_logger("dpl.history")
 
 #: table_runs column order used by the INSERT below - single source here
+#: (v2.1/PT-014: the four pause fields ride along; NULL whenever the
+#: table was not paused or the manifest predates PT-014)
 TABLE_RUN_COLUMNS: tuple[str, ...] = (
     "run_id", "folder", "table_name", "connection", "schema", "status",
     "rows_read", "rows_written", "duration_sec", "output_path", "error",
-    "attempts",
+    "attempts", "pause_start", "pause_end", "pause_reason", "days_elapsed",
 )
 
-#: the four envelope-level count keys mirrored into folder_runs
-_COUNT_KEYS: tuple[str, ...] = (
+#: the four original envelope-level count keys mirrored into folder_runs
+#: - all-or-nothing exactly as ruled 2026-11-17 (encoded in
+#: tests/unit/test_history_v2.py; v0.3.0-era four-key manifests must
+#: keep mirroring throughout the 90-day retention window).
+_FOUR_COUNT_KEYS: tuple[str, ...] = (
     "tables_total", "tables_extracted", "tables_skipped", "tables_failed",
 )
+#: v2.1/PT-014 addition: mirrored when the envelope carries it, else
+#: computed - an old envelope yields a true 0, never NULL.
+_PAUSED_COUNT_KEY = "tables_paused"
 
 
 def discover_manifests(runs_root: str | Path, days: int = 90
@@ -92,17 +102,28 @@ def discover_manifests(runs_root: str | Path, days: int = 90
 
 
 def _summary_counts(env: dict) -> dict[str, int]:
-    """Mirror the envelope's top-level counts when all four are present;
-    else compute exact counts from tables[].
+    """Mirror envelope-level counts; compute what the envelope lacks.
 
-    All-or-nothing: a partially populated set of count keys is treated
-    as absent (half-merged numbers can never land).
+    The original four keys stay all-or-nothing (ruling 2026-11-17,
+    encoded in test_history_v2.py): mirror when ALL FOUR are present,
+    else compute from tables[]. tables_paused (v2.1) is independent:
+    mirrored when the envelope carries it, computed otherwise - an
+    old four-key envelope records a true computed 0, never NULL.
     """
-    picked = {k: env[k] for k in _COUNT_KEYS if isinstance(env.get(k), int)}
-    if len(picked) == len(_COUNT_KEYS):
-        return picked
-
     tables = env.get("tables", [])
+    computed_paused = sum(
+        1 for t in tables if t.get("status") == "paused")
+
+    picked = {k: env[k] for k in _FOUR_COUNT_KEYS
+              if isinstance(env.get(k), int)}
+    if len(picked) == len(_FOUR_COUNT_KEYS):
+        paused = env.get(_PAUSED_COUNT_KEY)
+        return {
+            **picked,
+            _PAUSED_COUNT_KEY:
+                paused if isinstance(paused, int) else computed_paused,
+        }
+
     return {
         "tables_total": len(tables),
         "tables_extracted": sum(
@@ -111,6 +132,7 @@ def _summary_counts(env: dict) -> dict[str, int]:
             1 for t in tables if t.get("status") == "skipped"),
         "tables_failed": sum(
             1 for t in tables if t.get("status") == "failed"),
+        "tables_paused": computed_paused,
     }
 
 
@@ -142,15 +164,15 @@ def ingest_manifest(conn, mpath: Path) -> None:
     counts = _summary_counts(env)
     conn.execute(
         """INSERT OR REPLACE INTO folder_runs
-           (run_id, folder, load_date, status,
-            tables_total, tables_extracted, tables_skipped, tables_failed,
-            exit_code, finished_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (run_id, folder, load_date, status,
+        tables_total, tables_extracted, tables_skipped, tables_failed,
+        tables_paused, exit_code, finished_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (env["run_id"], env["folder"], env.get("load_date"),
          env.get("status", "unknown"),
          counts["tables_total"], counts["tables_extracted"],
          counts["tables_skipped"], counts["tables_failed"],
-         wrapper_exit, env.get("finished_at")))
+         counts["tables_paused"], wrapper_exit, env.get("finished_at")))
 
     # --- table_runs: explicit columns (no positional-VALUES trap) ---
     placeholders = ", ".join("?" * len(TABLE_RUN_COLUMNS))
@@ -163,7 +185,9 @@ def ingest_manifest(conn, mpath: Path) -> None:
              t.get("connection"), t.get("schema"), t["status"],
              t.get("rows_read"), t.get("rows_written"),
              t.get("duration_sec"), t.get("output_path"),
-             t.get("error"), t.get("attempts")))
+             t.get("error"), t.get("attempts"),
+             t.get("pause_start"), t.get("pause_end"),
+             t.get("pause_reason"), t.get("days_elapsed")))
 
 
 def existing_identities(conn) -> set[tuple[str, str, str]]:

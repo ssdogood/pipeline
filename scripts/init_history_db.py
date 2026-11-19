@@ -51,8 +51,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  journal mode: {summary['journal_mode']}")
     if summary.get("migrated"):
         print("  legacy v1 tables renamed: runs -> runs_legacy, "
-              "table_runs -> table_runs_legacy (kept, not migrated; "
+              "table_runs -> runs_legacy (kept, not migrated; "
               "re-ingest with update_history to repopulate v2)")
+    if summary.get("upgraded_v2_1"):
+        print("  v2 -> v2.1: pause columns added in place "
+              "(table_runs: pause_start, pause_end, pause_reason, "
+              "days_elapsed; folder_runs: tables_paused)")
     print(f"  tables ensured: {', '.join(summary['tables'])}")
     return 0
 
