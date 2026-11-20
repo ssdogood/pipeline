@@ -2,7 +2,7 @@
 """Wrapper entry point: python -m dpl.wrapper.run [--profile NAME] [--tables a,b]
 
 Runs from project root only (relative config paths, like every other
-module). No args -> profile 'full'.
+module). No args -> profile 'inc'.
 
 WHICH PIPES RUN is configured, never discovered-from-disk:
     config/run.yaml lists the pipes (yaml stems in config/extractors/)
@@ -264,9 +264,9 @@ def _folder_owners(ready: list[tuple[Any, Any, dict, dict]]
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m wrapper.run",
-        description="DPL orchestration wrapper (default profile: full)")
-    parser.add_argument("--profile", default="full",
-                        help="profile name from wrapper.yaml (default: full)")
+        description="DPL orchestration wrapper (default profile: inc)")
+    parser.add_argument("--profile", default="inc",
+                        help="profile name from wrapper.yaml (default: inc)")
     parser.add_argument(
         "--tables", default=None,
         help="comma-separated table names - extract ONLY these "
