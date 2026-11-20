@@ -48,62 +48,116 @@ def _valid_folder_segment(folder: str) -> str:
         raise SchemaError("folder cannot be a URL")
     return folder
 
-# ------------------------------------------------------------------- schemas
-SETTINGS_SCHEMA = Schema({
-    Optional("polars"): {
-        Optional("batch_rows", default=50000): And(int, lambda n: n > 0),
-        Optional("strict_cast", default=True): bool,
-        Optional(str): object
-    },
-    # Which pass_mgr.<environment>.yaml the vault layer reads at runtime.
-    # Optional in the schema (minimal test fixtures stay loadable) but the
-    # extractors REQUIRE it - missing key = clean refusal at startup.
-    Optional("pass_mgr"): {
-        "environment": And(str, len),
-        Optional(str): object
-    },
-    "paths": {                          # mandatory per settings.yaml docs
-        "landing_root": And(str, len),
-        "scratch_root": And(str, len),
-        # runs_root: manifest archive root. Optional; the derived default
-        # (<landing_root>/_runs) is applied by normalize_settings() AFTER
-        # validation - it needs landing_root, which the schema doesn't
-        # see at validate time. A misspelled sibling key is NOT this key:
-        # it falls into Optional(str) and is ignored (known limitation,
-        # see settings.yaml DESIGN RULES note 3).
-        Optional("runs_root"): And(str, len),
-        Optional("history_db"): And(str, len),
-        Optional(str): object
-    },
-    "duckdb": {                         # mandatory: memory_limit is required
-        "memory_limit": And(str, lambda s: len(s.strip()) > 0),  # e.g. "10GB"
-        Optional("threads"): And(int, lambda n: n > 0),
-        Optional(str): object
-    },
-    Optional("writer"): {              # section optional: every child has a default
-        Optional("compression", default="zstd"): And(
-            str, lambda s: s.lower() in VALID_COMPRESSIONS
-        ),
-        Optional("compression_level"): And(
-            int, lambda n: 1 <= n <= 22,  # DuckDB 1.4.5 documented range
-            error="compression_level must be 1–22 for zstd (DuckDB 1.4.5 default: 3)"
-        ),
-        Optional("max_file_mb", default=512): And(int, lambda n: n > 0),
-        Optional("keep_scratch_on_success", default=False): bool,
-        Optional(str): object
-    },
-    Optional("extraction"): {
-        Optional("max_parallel_connections"): And(int, lambda n: n >= 1),
-        Optional("keepalive_minutes"): And(int, lambda n: n >= 1),
-    },
-    # PT-014 Commit 2: stale-pause digest threshold. Absent block ->
-    # default 14 (warn-and-continue, the extraction: safe-upgrade rule);
-    # present but invalid -> loud config failure.
-    Optional("pause"): {
-        Optional("stale_days", default=14): And(int, lambda n: n >= 1),
-        Optional(str): object,
-    }
-})
+# --------------------------------------------------- settings knob registry
+# PT-040 Phase 2: the strict registry-based schema. Every legal knob is
+# declared in dpl/lib/knob_registry.py; unknown keys at ANY level refuse
+# loudly naming the file, section and key - the old design rule
+# "unknown keys are tolerated" (silently ignored typos) is DEAD by
+# design decision 2026-11-20.
+
+def build_settings_schema() -> Schema:
+    """Compile the knob registry into a strict schema (no catch-alls).
+
+    The schema library cannot name the offending key on unknown-key
+    refusals (it reports a generic validation failure), so strictness
+    is enforced in TWO layers:
+      1. THIS schema validates known knobs' types/ranges/defaults -
+         the old protection, preserved exactly;
+      2. load_settings() pre-passes the raw yaml against the registry
+         (validate_unknown_knobs) so unknown keys get a refusal naming
+         file, section and key - the new protection.
+    """
+    from dpl.lib.knob_registry import (
+        SETTINGS_KNOBS,
+    )
+
+    def knob_validator(spec: dict) -> And:
+        t = spec["type"]
+        if t == "zstd_level":                       # special: int 1-22
+            return And(int, lambda n: 1 <= n <= 22)
+        checks = [t]
+        if spec.get("positive"):
+            checks.append(lambda n: n > 0)
+        if "min" in spec:
+            m = spec["min"]
+            checks.append(lambda n: n >= m)
+        if "choices" in spec:
+            c = spec["choices"]
+            checks.append(lambda s: s in c)
+        if spec.get("nonempty"):
+            checks.append(lambda s: isinstance(s, str) and len(s.strip()) > 0)
+        return And(*checks)
+
+    schema_dict: dict = {}
+    for section, knobs in SETTINGS_KNOBS.items():
+        section_items: dict = {}
+        for name, spec in knobs.items():
+            if spec.get("required"):
+                section_items[name] = knob_validator(spec)
+            else:
+                kw = {}
+                if "default" in spec:
+                    kw["default"] = spec["default"]
+                section_items[Optional(name, **kw)] = knob_validator(spec)
+        # A section whose knobs are ALL optional may itself be ABSENT
+        # (callers read via .get(section, {}) and apply defaults there -
+        # e.g. pause_digest). A section with a required knob (paths,
+        # duckdb) must be present. Mirrors the retired hand-written
+        # schema exactly.
+        if any(spec.get("required") for spec in knobs.values()):
+            schema_dict[section] = section_items
+        else:
+            schema_dict[Optional(section)] = section_items
+    return Schema(schema_dict)
+
+
+SETTINGS_SCHEMA = build_settings_schema()
+
+# ------------------------------------------------------- unknown-knob guard
+def validate_unknown_knobs(raw: dict, source: str) -> None:
+    """Pre-pass: refuse anything the registry doesn't know, loudly.
+
+    Runs BEFORE schema validation so the refusal can name the exact
+    file, section and key - the schema library alone would produce a
+    generic message. Also delivers the tombstone refusal for retired
+    sections (e.g. pass_mgr -> moved to the environment folder).
+    """
+    from dpl.lib.knob_registry import (
+        RETIRED_SETTINGS_SECTIONS,
+        SETTINGS_KNOBS,
+    )
+
+    if not isinstance(raw, dict):
+        return  # schema layer will refuse non-mappings in its own words
+
+    for section, value in raw.items():
+        if section in RETIRED_SETTINGS_SECTIONS:
+            raise ValueError(
+                f"{source}: RETIRED section '{section}': "
+                f"{RETIRED_SETTINGS_SECTIONS[section]}"
+            )
+        if section not in SETTINGS_KNOBS:
+            known = ", ".join(sorted(
+                list(SETTINGS_KNOBS) + list(RETIRED_SETTINGS_SECTIONS)))
+            raise ValueError(
+                f"{source}: unknown settings section '{section}'. "
+                f"Legal sections: {known}. "
+                f"New knobs are born in dpl/lib/knob_registry.py."
+            )
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"{source}: section '{section}' must be a mapping of "
+                f"knobs, got {type(value).__name__}"
+            )
+        for knob in value:
+            if knob not in SETTINGS_KNOBS[section]:
+                legal = ", ".join(sorted(SETTINGS_KNOBS[section]))
+                raise ValueError(
+                    f"{source}: unknown knob '{knob}' in section "
+                    f"'{section}'. Legal knobs: {legal}. "
+                    f"Check spelling or register the knob in "
+                    f"dpl/lib/knob_registry.py first."
+                )
 
 def normalize_settings(settings: dict) -> dict | None:
     """Post-validation fix-ups. Currently: derive runs_root default.
@@ -666,7 +720,22 @@ def load_settings(path: str) -> dict | None:
 
     Mandatory path argument - no guessing or defaults. Applies the
     runs_root derived default after schema validation.
+
+    PT-040 Phase 2: unknown knobs refuse LOUDLY here (registry
+    pre-pass) - a typo'd key never survives to confuse a run silently.
+    Missing/unparsable files still return None (logged by load_config)
+    - same behaviour as before; only the unknown-key case changed.
     """
+    try:
+        with open(path, "r") as fh:
+            raw = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError):
+        # missing/unparsable: let load_config deliver its own logged
+        # error and None, exactly as before
+        settings = load_config(path, SETTINGS_SCHEMA)
+        return normalize_settings(settings) if settings else settings
+    if isinstance(raw, dict):
+        validate_unknown_knobs(raw, path)   # raises loudly - house pattern
     settings = load_config(path, SETTINGS_SCHEMA)
     return normalize_settings(settings) if settings else settings
 
