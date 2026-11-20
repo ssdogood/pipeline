@@ -1,5 +1,5 @@
 # dpl/wrapper/run.py
-"""Wrapper entry point: python -m dpl.wrapper.run [--profile NAME] [--tables a,b]
+"""Wrapper entry point: python -m dpl.wrapper.run [--profile NAME] [--tables a,b] [--connection NAME]
 
 Runs from project root only (relative config paths, like every other
 module). No args -> profile 'inc'.
@@ -261,6 +261,20 @@ def _folder_owners(ready: list[tuple[Any, Any, dict, dict]]
             for summary in conns.values()}
 
 
+def _validate_connection_name(pipes: list[Pipe], name: str) -> str | None:
+    """PT-039: --connection must name a connection declared on at
+    least one REGISTERED pipe. Returns None when valid; a loud
+    one-line error naming the remedy otherwise (caller converts to
+    exit 3). Pure - unit-tested in test_prepare_selection.py."""
+    holders = [p.name for p in pipes if name in (p.connections or {})]
+    if not holders:
+        return (f"connection '{name}' is not declared on any "
+                f"registered pipe (checked: "
+                f"{', '.join(p.name for p in pipes) or 'none'}) - fix "
+                f"the name or register its pipe in config/run.yaml")
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m wrapper.run",
@@ -275,6 +289,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="with --tables naming paused table(s), "
                              "lift their TABLE-level pause for this run "
                              "(folder-level pauses are never liftable)")
+    parser.add_argument("--connection", default=None,
+                        help="run ONLY this connection's tables "
+                             "(combine with --tables for intersection; "
+                             "naming a paused connection without "
+                             "--paused-table is refused)")
     parser.add_argument("--dry-run", action="store_true",
                         help="validate configs and print the extraction "
                              "plan (connections, serial groups, worst-case "
@@ -380,15 +399,29 @@ def main(argv: list[str] | None = None) -> int:
 
     only_tables = ([t.strip() for t in args.tables.split(",")]
                    if args.tables else None)
-    # PT-014: --paused-table modifies --tables selections only; alone
-    # it would change nothing, so refuse it loudly (exit 3, nothing ran).
+    only_connection = args.connection
+    # PT-014/PT-039: --paused-table modifies a SELECTION (--tables or
+    # --connection); alone it would change nothing, so refuse it
+    # loudly (exit 3, nothing ran).
     paused_override = bool(args.paused_table)
-    if paused_override and not only_tables:
-        log.error("--paused-table modifies --tables selections only - "
-                  "rerun as: --tables <names> --paused-table")
+    if paused_override and not (only_tables or only_connection):
+        log.error("--paused-table modifies --tables/--connection "
+                  "selections only - rerun as: --tables <names> "
+                  "--paused-table (or --connection <name> "
+                  "--paused-table)")
         return EXIT_CONFIG
-    log.info("wrapper start: profile=%s run_id=%s tables=%s",
-             args.profile, run_id, only_tables or "all")
+    # PT-039: connection name validated against ALL registered pipes
+    # up front - a typo is a config error (exit 3), never a silent
+    # zero-table night.
+    if only_connection is not None:
+        err = _validate_connection_name(pipes, only_connection)
+        if err:
+            log.error("%s", err)
+            return EXIT_CONFIG
+    log.info("wrapper start: profile=%s run_id=%s tables=%s "
+             "connection=%s",
+             args.profile, run_id, only_tables or "all",
+             only_connection or "all")
 
     # Tier-3 event (dormant by default; config-governed)
     _notify("run_started", run_id, {
@@ -497,7 +530,8 @@ def main(argv: list[str] | None = None) -> int:
                         ctx = ext_mod.prepare_run(
                             cfg, settings, only_tables=only_tables,
                             run_id=run_id,
-                            paused_override=paused_override)
+                            paused_override=paused_override,
+                            only_connection=only_connection)
                     except Exception as exc:                    # noqa: BLE001 - pipe boundary: a bad pipe never kills the healthy ones
                         log.error("pipe %s prepare failed: %s",
                                   pipe.name, exc)
