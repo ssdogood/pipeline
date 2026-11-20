@@ -14,6 +14,7 @@ from dpl.lib.pause import (
     describe,
     effective_block,
     evaluate,
+    lifted_by_override,
     manifest_fields,
     pause_block_ok,
     staleness,
@@ -308,3 +309,54 @@ def test_blank_end_still_indefinite_in_every_spelling():
                                      "end": blank, "reason": "t"})
         assert norm["end"] is None
         assert evaluate(norm, date(2026, 12, 31)) == PAUSED
+
+# ── PT-036: --paused-table override matrix (lifted_by_override) ──
+
+_CONN_ACTIVE = {"type": "oracle"}
+
+
+def _paused_since_yesterday(reason: str = "lift me") -> dict:
+    """Window guaranteed PAUSED on the real date.today() the function
+    reads internally - no clock freezing, no flake risk."""
+    return {"pause": {"start": date.today() - timedelta(days=1),
+                      "end": None, "reason": reason}}
+
+
+def test_lift_no_pause_is_active_both_switch_states():
+    for ov in (False, True):
+        assert lifted_by_override({"name": "T"}, _CONN_ACTIVE, ov) \
+            == (ACTIVE, None, False)
+
+
+def test_lift_applies_table_level_with_switch():
+    tc = {"name": "T", **_paused_since_yesterday()}
+    state, norm, was_lifted = lifted_by_override(tc, _CONN_ACTIVE, True)
+    assert (state, was_lifted) == (ACTIVE, True)
+    assert norm is not None and norm["reason"] == "lift me"
+
+
+def test_lift_withheld_without_switch():
+    tc = {"name": "T", **_paused_since_yesterday()}
+    state, _norm, was_lifted = lifted_by_override(tc, _CONN_ACTIVE, False)
+    assert (state, was_lifted) == (PAUSED, False)
+
+
+def test_lift_never_applies_folder_level():
+    tc = {"name": "T", **_paused_since_yesterday("table block")}
+    fc = {"type": "oracle", **_paused_since_yesterday("folder block")}
+    state, _norm, was_lifted = lifted_by_override(tc, fc, True)
+    assert (state, was_lifted) == (PAUSED, False)
+
+
+def test_lift_only_touches_paused_state():
+    armed = {"pause": {"start": date.today() + timedelta(days=2),
+                       "end": None, "reason": "armed"}}
+    state, _n, lifted = lifted_by_override({"name": "T", **armed},
+                                           _CONN_ACTIVE, True)
+    assert (state, lifted) == (ARMED, False)
+    expired = {"pause": {"start": date.today() - timedelta(days=10),
+                         "end": date.today() - timedelta(days=5),
+                         "reason": "gone"}}
+    state, _n, lifted = lifted_by_override({"name": "T", **expired},
+                                           _CONN_ACTIVE, True)
+    assert (state, lifted) == (EXPIRED, False)
