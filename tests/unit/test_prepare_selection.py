@@ -112,3 +112,75 @@ def test_ad_mirror_same_contract(neutral, settings):
     ctx = adx.prepare_run(cfg, settings, only_tables=["subd-users"],
                           paused_override=True)
     assert _names(ctx) == ["subd-users"]                # fix: proceeds
+
+# ── PT-039: --connection scoping (design locked 2026-11-20) ──
+
+def test_connection_scopes_to_member_tables(neutral, settings):
+    ctx = orx.prepare_run(_cfg(), settings, only_connection="ora_db")
+    assert _names(ctx) == ["T1", "T2", "T3"]
+
+def test_connection_refuses_outsider_named_table(neutral, settings):
+    ctx = orx.prepare_run(_cfg(), settings,
+                          only_tables=["T1", "GHOST"],
+                          only_connection="ora_db")
+    assert _names(ctx) == ["T1"]
+
+def test_connection_all_outsiders_collapse(neutral, settings):
+    ctx = orx.prepare_run(_cfg(), settings, only_tables=["GHOST"],
+                          only_connection="ora_db")
+    assert ctx["by_folder"] == {}
+
+def test_connection_folder_pause_refused(neutral, settings):
+    """PT-039 pause symmetry: naming a paused connection without the
+    switch refuses loudly and yields ZERO jobs - never the pipe."""
+    ctx = orx.prepare_run(_cfg(pause=_EVERGREEN), settings,
+                          only_connection="ora_db")
+    assert ctx["by_folder"] == {}
+
+def test_connection_folder_pause_override_proceeds(neutral, settings):
+    """With the switch the selection proceeds; the folder-still-governs
+    verdict belongs to the attempt layer (lifted_by_override)."""
+    ctx = orx.prepare_run(_cfg(pause=_EVERGREEN), settings,
+                          only_connection="ora_db",
+                          paused_override=True)
+    assert _names(ctx) == ["T1", "T2", "T3"]
+
+def test_connection_absent_on_this_pipe_is_quiet(neutral, settings):
+    """Valid on another pipe (wrapper checked) - this one contributes
+    nothing, without complaint."""
+    ctx = orx.prepare_run(_cfg(), settings,
+                          only_connection="somewhere_else")
+    assert ctx["by_folder"] == {}
+
+def test_ad_connection_scope_mirror(neutral, settings):
+    conns: dict = {"ad_main": {"type": "ldap", "folder": "ad-main",
+                                "page_size": 5},
+                   "ad_other": {"type": "ldap", "folder": "ad-other",
+                                "page_size": 5}}
+    tables: list = []
+    for cname, name in (("ad_main", "subd-users"),
+                        ("ad_other", "subd-groups")):
+        tables.append({"connection": cname, "schema": "AD",
+                       "name": name, "search_base": "ou=x",
+                       "filter": "(objectClass=*)"})
+    ctx = adx.prepare_run({"connections": conns, "tables": tables},
+                          settings, only_connection="ad_other")
+    assert _names(ctx) == ["subd-groups"]
+
+def test_wrapper_connection_name_validation():
+    from dpl.wrapper import run as wrap
+    pipes = [
+        wrap.Pipe(name="oracle_to_stg", path="x.yaml",
+                  source_type="oracle", master="m.csv",
+                  connector={},
+                  connections={"ora_db": {"folder": "stg"}}),
+        wrap.Pipe(name="ad_to_stg", path="y.yaml",
+                  source_type="ldap", master="n.csv",
+                  connector={},
+                  connections={"ad_main": {"folder": "ad-main"}}),
+    ]
+    assert wrap._validate_connection_name(pipes, "ora_db") is None
+    assert wrap._validate_connection_name(pipes, "ad_main") is None
+    err = wrap._validate_connection_name(pipes, "ora_db_typo")
+    assert err is not None and "ora_db_typo" in err \
+        and "oracle_to_stg" in err

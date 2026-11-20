@@ -424,6 +424,7 @@ def prepare_run(
     only_tables: list[str] | None = None,
     run_id: str = "-",
     paused_override: bool = False,
+    only_connection: str | None = None,
 ) -> dict[str, Any]:
     """Run head carved out of extract_all (Phase 4 C1).
 
@@ -495,6 +496,49 @@ def prepare_run(
         t for t in cfg["tables"]
         if cfg["connections"].get(t["connection"], {}).get("type") == SOURCE_TYPE
     ]
+
+    # PT-039 (2026-11-20): --connection scoping, threaded from the
+    # wrapper. Locked design: (a) INTERSECTION with --tables - a named
+    # table NOT on the connection is refused loudly (typo) and
+    # excluded; (b) a connection carrying a LIVE folder-level pause,
+    # named without --paused-table, is refused loudly (same remedy
+    # line as the --tables rule); (c) a refused connection means ZERO
+    # jobs - the 2026-11-18 collapse rule, never the whole pipe. A
+    # connection name this pipe simply doesn't have contributes
+    # nothing quietly (the wrapper validated it against ALL pipes).
+    if only_connection is not None:
+        conn_cfg = cfg["connections"].get(only_connection)
+        if conn_cfg is None:
+            tables = []
+        else:
+            refused_conn = False
+            if not paused_override:
+                state, _ = state_for(None, conn_cfg)
+                if state == PAUSED:
+                    rlog.error(
+                        "connection '%s' is paused and requested "
+                        "without --paused-table - to extract it, rerun "
+                        "with --paused-table (or remove its pause tag)",
+                        only_connection)
+                    refused_conn = True
+            if refused_conn:
+                tables = []
+            else:
+                if only_tables:
+                    members = {t["name"] for t in cfg["tables"]
+                               if t["connection"] == only_connection}
+                    outsiders = [n for n in only_tables
+                                 if n not in members]
+                    if outsiders:
+                        rlog.error(
+                            "table(s) %s are not on connection '%s' - "
+                            "check the name(s) (typo?) or drop "
+                            "--connection",
+                            ", ".join(outsiders), only_connection)
+                        only_tables = [n for n in only_tables
+                                       if n in members]
+                tables = [t for t in tables
+                          if t["connection"] == only_connection]
 
     if only_tables is not None and not only_tables:
         # PT-014 live-run finding (2026-11-18): refusal can empty the
