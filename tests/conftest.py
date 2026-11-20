@@ -224,7 +224,7 @@ class TempProject:
 
     def write_config_default(
         self,
-        environment: str = "laptop",
+        environment: str = "development",
         default_method: str = "sops",
         secrets: dict | None = None,
     ) -> Path:

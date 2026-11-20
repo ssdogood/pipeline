@@ -722,8 +722,8 @@ def cmd_list(env_dir) -> None:
     tree = decrypt_fernet_tree(key_file, encrypted_file)
     names = sorted(flatten(tree))
     if not names:
-        print(f"(no fernet vault for '{env}' yet, or it is empty - "
-              f"run: ./vault.sh scan {env})")
+        print(f"(no fernet vault in '{env_dir}' yet, or it is empty - "
+              f"run: ./vault.sh scan)")
         return
     for name in names:
         print(name)
@@ -758,7 +758,7 @@ def cmd_scan(env_dir, dry_run: bool = False) -> None:
               "count as stale. The secrets: mapping in the config is left "
               "unchanged (load_config requires a non-empty mapping).")
 
-    sync_secret_mapping(env, required_paths, dry_run=dry_run)
+    sync_secret_mapping(env_dir, required_paths, dry_run=dry_run)
 
     existing_tree = decrypt_fernet_tree(fernet_key, fernet_vault)
     existing_paths = set(flatten(existing_tree).keys())
@@ -805,7 +805,7 @@ def cmd_scan(env_dir, dry_run: bool = False) -> None:
 
     if dry_run:
         print("\n[DRY RUN] No changes will be made.")
-        print(f"To proceed, run: ./vault.sh scan {env}")
+        print("To proceed, run: ./vault.sh scan")
         return
 
     # Interactive collection (nothing written yet)
