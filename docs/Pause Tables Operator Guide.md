@@ -90,11 +90,13 @@ Every run logs the **arithmetic** for every declared pause:
 3. **Nags until cleaned.** While EXPIRED, every run logs the day-count WARNING above.
    Delete the tag when the nag appears (that is its purpose).
 
-If a blank-`end` (indefinite) pause sits **past the staleness threshold**
-(settings knob `pause.stale_days`, default 14), the nightly run sends one
-**digest email** listing every stale pause with its reason and day count. One email per
-day, one line per pause — not one email per pause. *(Digest email lands with Commit 2;
-the threshold and per-day digest behavior are part of the locked design.)*
+If a pause sits **past the staleness threshold** (settings knob
+`pause.stale_days`, default 14), the nightly run sends one **digest email** listing
+every stale pause with its reason and day count. Two kinds go stale: **indefinite**
+(blank-end) pauses aged from their start date, and **expired** tags nobody removed,
+aged from their end date. One email per day, one line per pause — not one email per
+pause; no stale pauses means no email at all. Recipients are the `pause_stale` caller's
+`to:` list in `config/email_service.yaml` (live since Commit 2, 2026-11-19).
 
 ---
 
@@ -207,6 +209,4 @@ the table resumes nightly extraction; the WARNING nag reminds you to delete the 
 | Resume after `end` | nothing — it self-expires; then delete the tag when nagged |
 | Pull a paused table once | `--tables NAME --paused-table` (table-level only) |
 | List all live pauses | check manifest/history `paused` status + reason fields |
-| Change stale-indefinite alert age | settings knob `pause.stale_days` (default 14) |
-
-*File to save:* `docs/Pause Tables - Operator Guide.md` — committed with the feature.
+| Change stale-pause digest age | settings knob `pause.stale_days` (default 14) — ages indefinite pauses from start, lingering expired tags from end |
