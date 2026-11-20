@@ -210,8 +210,15 @@ class TempProject:
     # -- config ----------------------------------------------------------
 
     def write_config(self, environment: str, config: dict) -> Path:
-        path = self.root / "config" / f"pass_mgr.{environment}.yaml"
-        path.parent.mkdir(parents=True, exist_ok=True)
+        """PT-040 4a layout: config/<environment>/pass_mgr.yaml.
+
+        The environment word labels the SCRATCH folder only; the file
+        never carries it in its name. Production POLICY in tests is
+        driven by the folder being literally named 'production'.
+        """
+        env_dir = self.root / "config" / environment
+        env_dir.mkdir(parents=True, exist_ok=True)
+        path = env_dir / "pass_mgr.yaml"
         path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
         return path
 

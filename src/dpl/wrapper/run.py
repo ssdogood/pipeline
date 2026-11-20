@@ -56,6 +56,7 @@ from dpl.lib.common import (
     validate_secrets_layout,
 )
 from dpl.lib.connectors import CONNECTORS
+from dpl.lib.environment import format_banner, resolve_environment
 from dpl.lib.extraction_config import (
     build_plan,
     format_plan,
@@ -311,6 +312,17 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------------
     # Tier 1: validate ALL configs before any step runs -> exit 3
     # ------------------------------------------------------------------
+    # PT-040 4a: resolve the ACTIVE environment first - Tier 1 config
+    # validation includes the environment itself. Refusals (missing
+    # selector, invalid vocabulary word, missing env folder) exit 3
+    # before anything else loads.
+    try:
+        env = resolve_environment()
+        log.info("%s", format_banner(env))
+    except ValueError as e:
+        log.error("environment resolution failed - aborting: %s", e)
+        return EXIT_CONFIG
+
     settings_path = args.settings or _settings_path_from_env()
     wcfg = load_wrapper_config(WRAPCFG_PATH)
     settings = load_settings(settings_path)
@@ -372,18 +384,13 @@ def main(argv: list[str] | None = None) -> int:
         log.error("%s", e)
         return EXIT_CONFIG
 
-    # Vault-backed logins: settings must name the pass_mgr environment;
+    # Vault-backed logins (PT-040 4a): the vault config comes from the
+    # ACTIVE environment folder - resolved, never named by config.
     # init here so every extractor inherits it (idempotent per process).
-    pm_env = (settings.get("pass_mgr") or {}).get("environment")
-    if not pm_env:
-        log.error(
-            "settings file %s must declare the vault environment, e.g.\n"
-            "  pass_mgr:\n    environment: laptop", settings_path)
-        return EXIT_CONFIG
     try:
         validate_secrets_layout()
         from dpl.lib import pass_mgr
-        pass_mgr.init(pm_env)
+        pass_mgr.init(env.folder / "pass_mgr.yaml")
     except (ValueError, FileNotFoundError) as e:
         log.error("vault unavailable - aborting: %s", e)
         return EXIT_CONFIG

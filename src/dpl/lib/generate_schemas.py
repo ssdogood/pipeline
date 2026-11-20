@@ -53,6 +53,7 @@ from dpl.lib.common import (
     validate_secrets_layout,
 )
 from dpl.lib.connectors import CONNECTORS
+from dpl.lib.environment import resolve_environment
 from dpl.lib.logger import get_run_logger, setup_logging
 from dpl.lib.ora_connect import connect as oracle_connect
 from dpl.lib.pause import PAUSED, state_for
@@ -337,14 +338,9 @@ def generate_schemas(config_path: str, output_path: str,
     if settings is None:
         log.critical("settings load failed: %s", settings_path)
         return 1
-    pm_env = (settings.get("pass_mgr") or {}).get("environment")
-    if not pm_env:
-        log.critical(
-            "settings file %s must declare the vault environment, e.g.:\n"
-            "  pass_mgr:\n    environment: laptop", settings_path)
-        return 1
     validate_secrets_layout()
-    pass_mgr.init(pm_env)
+    # PT-040 4a: the vault config comes from the ACTIVE environment folder.
+    pass_mgr.init(resolve_environment().folder / "pass_mgr.yaml")
 
     connect_fn = intro["connect"]
     dtype_mapper = intro["dtype_mapper"]

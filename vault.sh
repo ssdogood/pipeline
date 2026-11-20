@@ -2,9 +2,10 @@
 #
 # vault.sh - in-memory vault operations for pass_mgr.
 #
-# Usage:
-#   ./vault.sh list  <env>              # print secret names (never values)
-#   ./vault.sh scan  <env> [--dry-run]  # sync vault to match config files
+# Usage (PT-040 4a - NO environment argument; discovery reads
+#        config/environment.yaml):
+#   ./vault.sh list                     # print secret names (never values)
+#   ./vault.sh scan  [--dry-run]        # sync vault to match config files
 #
 # Policies enforced:
 #   - decrypted plaintext exists only in memory, never written to disk

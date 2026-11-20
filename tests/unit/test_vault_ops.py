@@ -60,11 +60,14 @@ def tmp_project(tmp_path, monkeypatch):
 
 def write_extractor(tmp_project, filename, connections: dict) -> None:
     p = tmp_project / "config" / "extractors" / filename
+    p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(yaml.safe_dump({"connections": connections}), encoding="utf-8")
 
 
 def write_pass_cfg(tmp_project, env: str, secrets: list) -> None:
-    p = tmp_project / "config" / f"pass_mgr.{env}.yaml"
+    """PT-040 4a: the config lives at <env-folder>/pass_mgr.yaml."""
+    p = tmp_project / "config" / env / "pass_mgr.yaml"
+    p.parent.mkdir(parents=True, exist_ok=True)
     body = ("# header comment - must survive\n"
             "version: 1\n"
             "default_method: sops\n"
@@ -77,10 +80,28 @@ def write_pass_cfg(tmp_project, env: str, secrets: list) -> None:
     p.write_text(body, encoding="utf-8")
 
 
+def _env_dir(tmp_project, env: str) -> "Path":
+    """Active-env-folder handle for a scratch environment directory."""
+    return tmp_project / "config" / env
+
+
 # ------------------------------------------------------------ arg parsing ---
 
 class TestArgumentParsing:
-    """The --dry-run-as-env bug and the missing-env bugs, bottled."""
+    """PT-040 4a contract: NO environment argument exists. The active
+    environment folder is discovered from config/environment.yaml
+    (monkeypatched here to a scratch folder). These tests bottle the
+    new rules: flags anywhere, no positionals, loud usage otherwise."""
+
+    @pytest.fixture(autouse=True)
+    def _scratch_env(self, tmp_project, monkeypatch):
+        """Give the scratch tree a discoverable active env folder."""
+        env_dir = tmp_project / "config" / "laptop"
+        env_dir.mkdir(parents=True, exist_ok=True)
+        (env_dir / "pass_mgr.yaml").write_text(
+            "version: 1\n", encoding="utf-8")
+        monkeypatch.setattr(vault_ops, "find_active_env_dir",
+                            lambda _cfg_dir: env_dir)
 
     def _run(self, *args):
         return vault_ops.main(["vault.sh", *args])
@@ -90,34 +111,33 @@ class TestArgumentParsing:
         assert "usage:" in capsys.readouterr().err
 
     def test_unknown_command(self, capsys):
-        assert self._run("frobnicate", "laptop") == 2
+        assert self._run("frobnicate") == 2
 
-    def test_list_without_env_is_usage_error(self, capsys):
-        assert self._run("list") == 2
-        err = capsys.readouterr().err
-        assert "needs an environment" in err
+    def test_list_takes_no_arguments(self, capsys):
+        assert self._run("list", "laptop") == 2
+        assert "takes no arguments" in capsys.readouterr().err
 
-    def test_scan_without_env_is_usage_error(self, capsys):
-        assert self._run("scan") == 2
-        err = capsys.readouterr().err          # <- the missing line
-        assert "needs an environment" in err
-        assert "scan laptop --dry-run" in err
+    def test_scan_takes_no_positionals(self, capsys):
+        assert self._run("scan", "laptop") == 2
+        assert "no positional arguments" in capsys.readouterr().err
 
-    def test_dry_run_alone_is_not_an_environment(self, capsys):
-        # The original bug: 'scan --dry-run' treated the flag as env.
-        assert self._run("scan", "--dry-run") == 2
-        assert "needs an environment" in capsys.readouterr().err
+    def test_legacy_env_arg_is_refused_not_interpreted(self, capsys):
+        # The retired CLI shape ('scan laptop --dry-run') must now be a
+        # clean usage error - NEVER interpreted as an environment.
+        assert self._run("scan", "laptop", "--dry-run") == 2
 
     def test_flag_order_is_free(self, tmp_project, monkeypatch, capsys):
         seen = {}
         monkeypatch.setattr(vault_ops, "cmd_scan",
-                            lambda env, dry_run=False:
-                            seen.update(env=env, dry_run=dry_run))
-        self._run("--dry-run", "scan", "laptop")
-        assert seen == {"env": "laptop", "dry_run": True}
+                            lambda env_dir, dry_run=False:
+                            seen.update(env_dir=env_dir, dry_run=dry_run))
+        rc = self._run("--dry-run", "scan")
+        assert rc == 0
+        assert seen["dry_run"] is True
+        assert str(seen["env_dir"]).endswith("config/laptop")
 
     def test_unknown_flag_rejected(self, capsys):
-        assert self._run("scan", "laptop", "--force") == 2
+        assert self._run("scan", "--force") == 2
         assert "unknown option" in capsys.readouterr().err
 
 
@@ -204,49 +224,50 @@ class TestSecretMappingSync:
     def test_sync_adds_missing_and_removes_stale(self, tmp_project, monkeypatch):
         write_pass_cfg(tmp_project, "laptop", ["ghost.secret"])
         monkeypatch.setattr("builtins.input", lambda _: "y")
-        vault_ops.sync_secret_mapping("laptop", {"a.b.password"}, dry_run=False)
+        vault_ops.sync_secret_mapping(_env_dir(tmp_project, "laptop"), {"a.b.password"}, dry_run=False)
 
         cfg = yaml.safe_load(
-            (tmp_project / "config" / "pass_mgr.laptop.yaml").read_text())
+            (tmp_project / "config" / "laptop" / "pass_mgr.yaml").read_text())
         assert set(cfg["secrets"].keys()) == {"a.b.password"}
         # ghost.secret removed, a.b.password added
 
     def test_sync_preserves_content_above_sections(self, tmp_project, monkeypatch):
         write_pass_cfg(tmp_project, "laptop", [])
         monkeypatch.setattr("builtins.input", lambda _: "y")
-        vault_ops.sync_secret_mapping("laptop", {"n.v"}, dry_run=False)
+        vault_ops.sync_secret_mapping(_env_dir(tmp_project, "laptop"), {"n.v"}, dry_run=False)
 
-        text = (tmp_project / "config" / "pass_mgr.laptop.yaml").read_text()
+        text = (tmp_project / "config" / "laptop" / "pass_mgr.yaml").read_text()
         assert "# header comment - must survive" in text
         assert "default_method: sops" in text
         assert "methods:" in text
 
     def test_sync_declined_leaves_file_untouched(self, tmp_project, monkeypatch):
         write_pass_cfg(tmp_project, "laptop", ["ghost.secret"])
-        before = (tmp_project / "config" / "pass_mgr.laptop.yaml").read_text()
+        before = (tmp_project / "config" / "laptop" / "pass_mgr.yaml").read_text()
         monkeypatch.setattr("builtins.input", lambda _: "n")
-        vault_ops.sync_secret_mapping("laptop", {"a.b.password"}, dry_run=False)
-        after = (tmp_project / "config" / "pass_mgr.laptop.yaml").read_text()
+        vault_ops.sync_secret_mapping(_env_dir(tmp_project, "laptop"), {"a.b.password"}, dry_run=False)
+        after = (tmp_project / "config" / "laptop" / "pass_mgr.yaml").read_text()
         assert before == after
 
     def test_sync_dry_run_touches_nothing(self, tmp_project):
         write_pass_cfg(tmp_project, "laptop", ["ghost.secret"])
-        before = (tmp_project / "config" / "pass_mgr.laptop.yaml").read_text()
-        vault_ops.sync_secret_mapping("laptop", {"a.b.password"}, dry_run=True)
-        assert (tmp_project / "config" / "pass_mgr.laptop.yaml").read_text() \
+        before = (tmp_project / "config" / "laptop" / "pass_mgr.yaml").read_text()
+        vault_ops.sync_secret_mapping(_env_dir(tmp_project, "laptop"), {"a.b.password"}, dry_run=True)
+        assert (tmp_project / "config" / "laptop" / "pass_mgr.yaml").read_text() \
             == before
 
     def test_sync_silent_when_already_canonical(self, tmp_project, capsys):
         write_pass_cfg(tmp_project, "laptop", ["a.b.password"])
-        vault_ops.sync_secret_mapping("laptop", {"a.b.password"}, dry_run=False)
+        vault_ops.sync_secret_mapping(_env_dir(tmp_project, "laptop"), {"a.b.password"}, dry_run=False)
         out = capsys.readouterr().out
         assert "CROSS-CHECK" not in out  # no noise when nothing to do
 
     def test_sync_appends_mapping_when_none_exists(self, tmp_project, monkeypatch):
-        p = tmp_project / "config" / "pass_mgr.laptop.yaml"
+        p = tmp_project / "config" / "laptop" / "pass_mgr.yaml"
+        p.parent.mkdir(parents=True, exist_ok=True)   # env folder must exist first
         p.write_text("version: 1\ndefault_method: sops\n", encoding="utf-8")
         monkeypatch.setattr("builtins.input", lambda _: "y")
-        vault_ops.sync_secret_mapping("laptop", {"x.y"}, dry_run=False)
+        vault_ops.sync_secret_mapping(_env_dir(tmp_project, "laptop"), {"x.y"}, dry_run=False)
         cfg = yaml.safe_load(p.read_text())
         assert set(cfg["secrets"].keys()) == {"x.y"}
 
@@ -255,9 +276,9 @@ class TestSecretMappingSync:
         write_pass_cfg(tmp_project, "laptop", [])
         monkeypatch.setattr("builtins.input", lambda _: "y")
         weird = {"ad.subd-support.password", "a'b.password"}
-        vault_ops.sync_secret_mapping("laptop", weird, dry_run=False)
+        vault_ops.sync_secret_mapping(_env_dir(tmp_project, "laptop"), weird, dry_run=False)
         cfg = yaml.safe_load(
-            (tmp_project / "config" / "pass_mgr.laptop.yaml").read_text())
+            (tmp_project / "config" / "laptop" / "pass_mgr.yaml").read_text())
         assert set(cfg["secrets"].keys()) == weird
 
 

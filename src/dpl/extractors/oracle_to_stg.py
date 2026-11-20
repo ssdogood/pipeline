@@ -54,6 +54,7 @@ from dpl.lib.common import (
     validate_secrets_layout,
     write_manifest,
 )
+from dpl.lib.environment import resolve_environment
 from dpl.lib.logger import get_run_logger, setup_logging
 from dpl.lib.ora_connect import (
     ORACLE_CONFIG_SCHEMA,
@@ -323,16 +324,10 @@ def prepare_run(
     # secrets/ holds vault files only - refuse before any connection.
     validate_secrets_layout()
 
-    # Vault init: settings names the pass_mgr environment; init is
-    # idempotent, so the wrapper calling oracle then ldap is fine.
-    pm_env = (settings.get("pass_mgr") or {}).get("environment")
-    if not pm_env:
-        raise ValueError(
-            "settings file must declare the vault environment, e.g.:\n"
-            "  pass_mgr:\n"
-            "    environment: laptop\n"
-            "add it to config/settings.laptop.yaml")
-    pass_mgr.init(pm_env)
+    # Vault init (PT-040 4a): the vault config comes from the ACTIVE
+    # environment folder; init is idempotent, so the wrapper calling
+    # oracle then ldap is fine.
+    pass_mgr.init(resolve_environment().folder / "pass_mgr.yaml")
 
     # --- master CSV: load once, cross-check against config, then it rules ---
     schema_master = load_schema_master(MASTER_AUTO)

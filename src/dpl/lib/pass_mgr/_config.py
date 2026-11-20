@@ -1,12 +1,18 @@
 """
-pass_mgr configuration - loading and validation of per-environment config.
+pass_mgr configuration - loading and validation of the ACTIVE
+environment's vault config.
 
-Exactly two config files exist, both in PROJECT_ROOT/config/:
-    pass_mgr.laptop.yaml
-    pass_mgr.prod.yaml
+PT-040 4a: the environment word is retired from the vault's API and
+filenames. The active environment folder (resolved once by
+dpl.lib.environment at startup) supplies the path:
+<env-folder>/pass_mgr.yaml. The file carries no environment in its
+name - its environment comes from WHERE it sits, never its name.
 
-The environment is always an explicit parameter ('laptop' or 'prod');
-nothing is inferred from hostnames or cwd.
+Exactly one pass_mgr config exists per environment, and exactly one
+environment is active per machine (the resolver guarantees this), so
+the config path is always unambiguous. Production policy is tier-
+driven: the caller passes is_production=True only when the resolved
+tier is 'production'.
 
 Validation philosophy (mirrors the rest of the pipeline): fail loudly at
 load time, with error messages that name the offending file, key, and
@@ -30,11 +36,8 @@ from ._errors import (
 # Constants
 # --------------------------------------------------------------------------
 
-#: Valid environment identifiers. Config file name is derived from these.
-ENVIRONMENTS = ("laptop", "prod")
-
-#: Environment identifier that triggers production policy enforcement.
-PRODUCTION_ENVIRONMENT = "prod"
+#: Filename the vault config must have inside the active env folder.
+PASS_MGR_FILENAME = "pass_mgr.yaml"
 
 #: Config schema version understood by this loader. Anything else is a
 #: hard error - see design doc §3, reserved for v2 key rotation.
@@ -64,9 +67,12 @@ KEY_PATH_LABELS = frozenset({"sops.age_key_file", "fernet.key_file"})
 
 @dataclass(frozen=True)
 class PassMgrConfig:
-    """Immutable, validated view of a pass_mgr environment config."""
+    """Immutable, validated view of the active environment's vault config."""
 
-    environment: str
+    #: Active environment folder (e.g. config/development). Carries no
+    #: environment WORD - it is the resolved folder Path from
+    #: dpl.lib.environment; error messages may display it.
+    env_folder: Path
     is_production: bool
     default_method: str
     #: Raw per-method config sections keyed by method id, exactly as they
@@ -87,8 +93,9 @@ class PassMgrConfig:
             return self.secret_methods[secret_name]
         except KeyError:
             raise PassMgrConfigError(
-                f"pass_mgr: secret '{secret_name}' is not defined in the "
-                f"{self.environment} config. Check the `secrets` mapping."
+                f"pass_mgr: secret '{secret_name}' is not defined in "
+                f"{self.env_folder / PASS_MGR_FILENAME}. Check the "
+                f"`secrets` mapping."
             ) from None
 
 
@@ -96,14 +103,26 @@ class PassMgrConfig:
 # Loading
 # --------------------------------------------------------------------------
 
-def load_config(environment: str, project_root: Path | None = None) -> PassMgrConfig:
-    """Load and validate the pass_mgr config for `environment`.
+def load_config(env_folder: str | Path, project_root: Path | None = None,
+                *, is_production: bool | None = None) -> PassMgrConfig:
+    """Load and validate the ACTIVE environment's vault config.
+
+    PT-040 4a: the environment word is gone from the API. Callers pass
+    the resolved environment FOLDER; the config file is
+    <env_folder>/pass_mgr.yaml - its environment comes from where it
+    sits, never its name.
 
     Args:
-        environment: 'laptop' or 'prod'. Never inferred implicitly.
+        env_folder: the active environment folder (typically
+            ResolvedEnvironment.folder from dpl.lib.environment).
         project_root: root of the pipeline tree. Defaults to the parent of
             this package's parent (i.e. src/dpl/ -> project root). Override
             in tests.
+        is_production: production policy switch. When None (default),
+            derived from the folder name - TRUE only when the folder is
+            literally named 'production' (the resolver's fixed vocabulary
+            guarantees the shape; this derivation is defensive only and
+            would require breaking the resolver's validation to lie).
 
     Returns:
         A fully validated PassMgrConfig.
@@ -114,20 +133,19 @@ def load_config(environment: str, project_root: Path | None = None) -> PassMgrCo
         PassMgrProductionPolicyError: an insecure method is referenced
             anywhere in the production config.
     """
-    if environment not in ENVIRONMENTS:
-        raise PassMgrConfigError(
-            f"pass_mgr: unknown environment '{environment}'. "
-            f"Expected one of: {', '.join(ENVIRONMENTS)}."
-        )
-
     root = _resolve_project_root(project_root)
-    config_path = root / "config" / f"pass_mgr.{environment}.yaml"
+    folder = Path(env_folder)
+    config_path = folder / PASS_MGR_FILENAME
+
+    if is_production is None:
+        is_production = folder.name == "production"
 
     if not config_path.is_file():
         raise PassMgrConfigError(
-            f"pass_mgr: config file not found: {config_path}. "
-            f"Environments are named explicitly; create the file or fix "
-            f"the environment name passed to load_config()."
+            f"pass_mgr: config file not found: {config_path}. The active "
+            f"environment folder must contain pass_mgr.yaml - copy "
+            f"config/_templates/ and fill in the placeholders, or fix "
+            f"config/environment.yaml."
         )
 
     try:
@@ -143,7 +161,7 @@ def load_config(environment: str, project_root: Path | None = None) -> PassMgrCo
             f"mapping at top level, got {type(raw).__name__}."
         )
 
-    return _validate(raw, environment, config_path, root)
+    return _validate(raw, config_path, root, is_production=is_production)
 
 
 # --------------------------------------------------------------------------
@@ -159,11 +177,14 @@ def _resolve_project_root(project_root: Path | None) -> Path:
 
 def _validate(
     raw: dict[str, Any],
-    environment: str,
     config_path: Path,
     root: Path,
+    *,
+    is_production: bool = False,
 ) -> PassMgrConfig:
-    is_production = environment == PRODUCTION_ENVIRONMENT
+    # 4a: production policy is tier-driven - the caller derives it from
+    # the resolved environment (vocabulary-checked upstream), never from
+    # a filename word.
 
     # --- top-level shape -------------------------------------------------
     unknown_keys = set(raw) - ALLOWED_TOP_LEVEL_KEYS
@@ -260,7 +281,7 @@ def _validate(
         )
 
     return PassMgrConfig(
-        environment=environment,
+        env_folder=config_path.parent,
         is_production=is_production,
         default_method=default_method,
         method_sections=dict(methods),
