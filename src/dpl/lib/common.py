@@ -93,7 +93,7 @@ SETTINGS_SCHEMA = Schema({
         Optional(str): object
     },
     Optional("extraction"): {
-        Optional("max_parallel_folders"): And(int, lambda n: n >= 1),
+        Optional("max_parallel_connections"): And(int, lambda n: n >= 1),
         Optional("keepalive_minutes"): And(int, lambda n: n >= 1),
     },
     # PT-014 Commit 2: stale-pause digest threshold. Absent block ->

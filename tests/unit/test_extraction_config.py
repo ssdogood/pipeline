@@ -26,7 +26,7 @@ def _cfg(**over):
 
 
 def _settings(**over):
-    block = {"max_parallel_folders": 4, "keepalive_minutes": 10}
+    block = {"max_parallel_connections": 4, "keepalive_minutes": 10}
     block.update(over)
     return {"extraction": block}
 
@@ -35,7 +35,7 @@ def _settings(**over):
 
 def test_global_defaults_when_block_missing():
     assert validate_global_extraction({}) == {
-        "max_parallel_folders": 1, "keepalive_minutes": 10}
+        "max_parallel_connections": 1, "keepalive_minutes": 10}
 
 
 def test_global_missing_block_warns(caplog):
@@ -45,14 +45,14 @@ def test_global_missing_block_warns(caplog):
 
 def test_global_explicit_values_roundtrip():
     assert validate_global_extraction(_settings(
-        max_parallel_folders=2, keepalive_minutes=15)) == {
-        "max_parallel_folders": 2, "keepalive_minutes": 15}
+        max_parallel_connections=2, keepalive_minutes=15)) == {
+        "max_parallel_connections": 2, "keepalive_minutes": 15}
 
 
 @pytest.mark.parametrize("bad", [0, -1, True, "4", 2.5, None])
-def test_global_bad_max_parallel_folders_fails_loud(bad):
-    with pytest.raises(ValueError, match="max_parallel_folders"):
-        validate_global_extraction(_settings(max_parallel_folders=bad))
+def test_global_bad_max_parallel_connections_fails_loud(bad):
+    with pytest.raises(ValueError, match="max_parallel_connections"):
+        validate_global_extraction(_settings(max_parallel_connections=bad))
 
 
 @pytest.mark.parametrize("bad", [0, -1, True, "10", None])
@@ -184,6 +184,18 @@ def test_single_member_group_is_one_task():
 
 def test_format_plan_operator_block_mentions_keys():
     text = format_plan(build_plan(4, _three_conns()))
-    for needle in ("max_parallel_folders", "box_a", "worst-case sessions",
+    for needle in ("max_parallel_connections", "box_a", "worst-case sessions",
                    "schedulable tasks", "NEVER run in parallel"):
         assert needle in text
+
+
+# ── PT-041: the retired key must refuse loudly, never silently ──
+
+def test_retired_max_parallel_folders_refused_loud():
+    """The old spelling falling back to default(1) silently on every
+    deployed settings file is the exact failure this rename refuses
+    to allow. The error names the successor key."""
+    with pytest.raises(ValueError, match="max_parallel_connections"):
+        validate_global_extraction(
+            {"extraction": {"max_parallel_folders": 4,
+                            "keepalive_minutes": 10}})

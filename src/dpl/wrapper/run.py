@@ -357,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
                 pipe_conns.append(
                     (pipe.name, validate_pipe_connections(pipe.name, cfg)))
             print(format_plan(build_plan(
-                gk["max_parallel_folders"],
+                gk["max_parallel_connections"],
                 _namespaced_connections(pipe_conns))))
             log.info("dry run: plan valid - nothing was executed")
         except ValueError as e:
@@ -549,7 +549,7 @@ def main(argv: list[str] | None = None) -> int:
                         work_folders.update(ctx["by_folder"])
 
                     plan = build_plan(
-                        gk["max_parallel_folders"],
+                        gk["max_parallel_connections"],
                         _namespaced_connections(
                             [(p.name, c) for p, _pc, c, _px in ready],
                             work_folders))
@@ -571,12 +571,12 @@ def main(argv: list[str] | None = None) -> int:
 
                     log.info("extract: %d folder job(s), max_parallel=%d "
                              "(worst-case sessions=%d)", plan["tasks"],
-                             gk["max_parallel_folders"],
+                             gk["max_parallel_connections"],
                              plan["worst_case_sessions"])
 
                     outcomes = run_jobs(
                         jobs_from_plan(plan, make_task),
-                        gk["max_parallel_folders"])
+                        gk["max_parallel_connections"])
 
                     for folder, (status, value) in outcomes.items():
                         if status == "ok":

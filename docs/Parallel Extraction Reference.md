@@ -10,16 +10,16 @@
 Extraction runs on two levels of concurrency:
 
 ```
-Tier 1 — FOLDERS in parallel      (ThreadPoolExecutor, capped by max_parallel_folders)
+Tier 1 — CONNECTIONS in parallel      (ThreadPoolExecutor, capped by max_parallel_connections)
    └─ Tier 2 — TABLES within a folder   (1–2 session lanes per folder, checkout-queue model)
 ```
 
-- **Folders** are the unit of scheduling: one connection per folder, extracted independently. Up to `max_parallel_folders` folders are in flight at once.
+- **Folders** are the unit of scheduling: one connection per folder, extracted independently. Up to `max_parallel_connections` folders are in flight at once.
 - **Within a folder**, tables flow through 1–2 long-lived sessions ("lanes") sharing one queue — described in the companion *Connection Pool & Session Management* document.
 
 Both tiers use plain threads, not async: extraction is I/O-bound (socket waits release the GIL), so a bounded thread pool is the right tool.
 
-**Hard session ceiling:** worst-case simultaneous sessions = `max_parallel_folders × max(table_concurrency)`. The ceiling is approved infrastructure capacity (8 = 4 × 2); `table_concurrency` values above 2 are **rejected at validation**, not merely discouraged, so no configuration can ever exceed it.
+**Hard session ceiling:** worst-case simultaneous sessions = `max_parallel_connections × max(table_concurrency)`. The ceiling is approved infrastructure capacity (8 = 4 × 2); `table_concurrency` values above 2 are **rejected at validation**, not merely discouraged, so no configuration can ever exceed it.
 
 ---
 
@@ -27,14 +27,14 @@ Both tiers use plain threads, not async: extraction is I/O-bound (socket waits r
 
 | Knob | Lives in | Meaning |
 |---|---|---|
-| `max_parallel_folders` | `settings.yaml: extraction:` | folders in flight simultaneously |
+| `max_parallel_connections` | `settings.yaml: extraction:` | folders in flight simultaneously |
 | `keepalive_minutes` | `settings.yaml: extraction:` | Oracle expire_time refresh (see pool doc) |
 | `table_concurrency` | extractor YAML, per connection | lanes per folder: 1 or 2 |
 | `retries` | extractor YAML, per connection | retry attempts on session-class failures |
 | `retry_backoff_seconds` | extractor YAML, per connection | pause before a retry |
 | `serial_group` | extractor YAML, per connection | membership in a never-parallel chain |
 
-**Safe-upgrade rule:** a settings file *without* an `extraction:` block yields `max_parallel_folders=1` — byte-for-byte today's sequential behavior — plus a loud warning to set the block explicitly. Operating defaults live in the shipped settings file, never hidden in code. The connector config schemas accept unknown keys by design, so `extraction_config` is the **sole enforcement point**: absent keys fall back to defaults; present-but-invalid values abort the run, naming the pipe, connection, key, and allowed range (booleans are never accepted as ints).
+**Safe-upgrade rule:** a settings file *without* an `extraction:` block yields `max_parallel_connections=1` — byte-for-byte today's sequential behavior — plus a loud warning to set the block explicitly. Operating defaults live in the shipped settings file, never hidden in code. The connector config schemas accept unknown keys by design, so `extraction_config` is the **sole enforcement point**: absent keys fall back to defaults; present-but-invalid values abort the run, naming the pipe, connection, key, and allowed range (booleans are never accepted as ints).
 
 ---
 
@@ -82,6 +82,6 @@ The outcome contract of a scheduled job: `{folder: ("ok", task_result) | ("faile
 
 ## 7. Summary for operators
 
-If you read nothing else: the nightly run may open at most `max_parallel_folders × table_concurrency` database sessions at once (currently 8). Servers grouped with `serial_group` are never touched in parallel. Any folder or table can fail without taking the run down — failures are visible in logs, manifests, and the history DB, each with attempt counts and error text. Adding parallelism is a settings-file change (`extraction:` block); removing it is deleting the block, which safely degrades to the sequential v0.1 behavior.
+If you read nothing else: the nightly run may open at most `max_parallel_connections × table_concurrency` database sessions at once (currently 8). Servers grouped with `serial_group` are never touched in parallel. Any folder or table can fail without taking the run down — failures are visible in logs, manifests, and the history DB, each with attempt counts and error text. Adding parallelism is a settings-file change (`extraction:` block); removing it is deleting the block, which safely degrades to the sequential v0.1 behavior.
 
 Related reading: *Connection Pool & Session Management* (sessions, classification, retries) and the extractor module docstrings in `oracle_to_stg.py` / `ad_to_stg.py`.

@@ -53,7 +53,7 @@ def _recorder(order: list, name: str):
 def _plan():
     """Mirror of a validated plan: one free folder + one 2-member chain."""
     return {
-        "max_parallel_folders": 2,
+        "max_parallel_connections": 2,
         "connections": {
             "ora_db": {"type": "oracle", "folder": "etl",
                        "table_concurrency": 1},

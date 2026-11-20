@@ -4,7 +4,7 @@
 Phase 1 of the parallel-extraction design (design v3, LOCKED). This module
 owns everything configuration-shaped about parallel extraction:
 
-  - global knobs         settings: extraction.max_parallel_folders,
+  - global knobs         settings: extraction.max_parallel_connections,
                                    extraction.keepalive_minutes
   - per-connection knobs extractor yaml, per connection:
                          table_concurrency, retries,
@@ -23,12 +23,13 @@ a GLOBAL namespace across all pipe yamls - a coupling between an Oracle
 folder and an MSSQL folder on the same box is expressed across files.
 
 Safe-upgrade rule: a settings file WITHOUT an extraction: block yields
-max_parallel_folders=1 - byte-for-byte today's sequential behavior - plus
+max_parallel_connections=1 - byte-for-byte today's sequential behavior - plus
 a loud warning to set the block explicitly. The agreed operating defaults
-(max_parallel_folders 4) live in the shipped settings file, never hidden
-in code. Absent per-connection keys fall back to the agreed defaults
-(concurrency 1, retries 2, backoff 5, group unset); PRESENT-but-invalid
-values always fail loudly.
+(max_parallel_connections 4) live in the shipped settings file, never hidden
+in code. The connector config schemas accept unknown keys by design, 
+so `extraction_config` is the sole enforcement point (concurrency 1, 
+retries 2, backoff 5, group unset); PRESENT-but-invalid values always 
+fail loudly.
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ log = get_run_logger("dpl.extraction_config")
 
 # Code-level defaults are the SAFE ones; the shipped settings file
 # expresses the agreed operating point explicitly (see settings snippet).
-GLOBAL_DEFAULTS = {"max_parallel_folders": 1, "keepalive_minutes": 10}
+GLOBAL_DEFAULTS = {"max_parallel_connections": 1, "keepalive_minutes": 10}
 CONN_DEFAULTS = {
     "table_concurrency": 1,
     "retries": 2,
@@ -74,17 +75,28 @@ def validate_global_extraction(settings: dict) -> dict:
     if not isinstance(block, dict):
         log.warning(
             "settings has no 'extraction:' block - running SEQUENTIAL "
-            "(max_parallel_folders=%d). To enable folder parallelism add:",
-            GLOBAL_DEFAULTS["max_parallel_folders"],
+            "(max_parallel_connections=%d). To enable connection "
+            "parallelism add:",
+            GLOBAL_DEFAULTS["max_parallel_connections"],
         )
-        log.warning("  extraction:\n    max_parallel_folders: 4")
+        log.warning("  extraction:\n    max_parallel_connections: 4")
         return dict(GLOBAL_DEFAULTS)
 
     ctx = "settings: extraction"
+    # PT-041: retired key LOUDLY refused - unknown keys are tolerated
+    # by schema design, so a silent rename would silently fall back to
+    # the default (1) on every deployed settings file. The refusal
+    # names the successor so the operator's fix is one edit.
+    if "max_parallel_folders" in block:
+        raise ValueError(
+            f"{ctx}: 'max_parallel_folders' is retired - rename it to "
+            f"'max_parallel_connections' (same meaning; folders are "
+            f"1:1 with connections)")
     return {
-        "max_parallel_folders": _int_ge(
-            block.get("max_parallel_folders", GLOBAL_DEFAULTS["max_parallel_folders"]),
-            "max_parallel_folders", ctx, 1),
+        "max_parallel_connections": _int_ge(
+            block.get("max_parallel_connections",
+                      GLOBAL_DEFAULTS["max_parallel_connections"]),
+            "max_parallel_connections", ctx, 1),
         "keepalive_minutes": _int_ge(
             block.get("keepalive_minutes", GLOBAL_DEFAULTS["keepalive_minutes"]),
             "keepalive_minutes", ctx, 1),
@@ -95,7 +107,7 @@ def validate_global_extraction(settings: dict) -> dict:
 def _table_concurrency(value: object, ctx: str) -> int:
     """table_concurrency must be an int 1 or 2 - a HARD session ceiling.
 
-    Worst-case sessions = max_parallel_folders x table_concurrency,
+    Worst-case sessions = max_parallel_connections x table_concurrency,
     capped at 4 x 2 = 8 (the ceiling approved for infrastructure).
     Values above 2 are rejected here, not merely discouraged: the
     ceiling lives in validation, so no config can ever exceed it.
@@ -104,7 +116,7 @@ def _table_concurrency(value: object, ctx: str) -> int:
             or value not in (1, 2):
         raise ValueError(
             f"{ctx}: 'table_concurrency' must be 1 or 2 "
-            f"(hard session ceiling: max_parallel_folders x 2), got {value!r}")
+            f"(hard session ceiling: max_parallel_connections x 2), got {value!r}")
     return value
 
 def validate_connection(pipe_name: str, conn_name: str,
@@ -151,7 +163,7 @@ def validate_pipe_connections(pipe_name: str, cfg: dict) -> dict[str, dict]:
 
 
 # ------------------------------------------------------------------- plan ---
-def build_plan(max_parallel_folders: int,
+def build_plan(max_parallel_connections: int,
                connections: dict[str, dict]) -> dict:
     """Fold validated connections into the schedulable plan.
 
@@ -160,7 +172,7 @@ def build_plan(max_parallel_folders: int,
       already enforces uniqueness inside a pipe; this is the cross-pipe
       check - the namespace only the wrapper sees.)
     - Connections sharing serial_group are reported as ONE chain task.
-    - worst_case_sessions = max_parallel_folders x max(table_concurrency):
+    - worst_case_sessions = max_parallel_connections x max(table_concurrency):
       the number we can state to infrastructure as the hard ceiling.
     """
     folders: list[str] = []
@@ -184,12 +196,12 @@ def build_plan(max_parallel_folders: int,
     max_conc = max((c["table_concurrency"] for c in connections.values()),
                    default=1)
     return {
-        "max_parallel_folders": max_parallel_folders,
+        "max_parallel_connections": max_parallel_connections,
         "connections": connections,
         "serial_groups": groups,
         "ungrouped": ungrouped,
         "tasks": len(ungrouped) + len(groups),
-        "worst_case_sessions": max_parallel_folders * max_conc,
+        "worst_case_sessions": max_parallel_connections * max_conc,
     }
 
 
@@ -218,8 +230,8 @@ def format_plan(plan: dict) -> str:
         "=" * width,
         " " * (math.floor(width / 2) - 8)  + "EXTRACTION PLAN",
         "=" * width,
-        (f"max_parallel_folders : {plan['max_parallel_folders']}"
-         "  (settings: extraction.max_parallel_folders)"),
+        (f"max_parallel_connections : {plan['max_parallel_connections']}"
+         "  (settings: extraction.max_parallel_connections)"),
         ("keepalive_minutes    : see settings (driver keepalive: Oracle uses"
         " expire_time; AD ruling: reconnect on drop - no keepalive)"),
         "",
@@ -245,7 +257,7 @@ def format_plan(plan: dict) -> str:
          f"({len(plan['ungrouped'])} free folder(s) + "
          f"{len(plan['serial_groups'])} chain(s))"),
         (f"worst-case sessions : {plan['worst_case_sessions']} "
-         f"(= max_parallel_folders {plan['max_parallel_folders']} x "
+         f"(= max_parallel_connections {plan['max_parallel_connections']} x "
          f"max table_concurrency {max_conc})"),
         "=" * width,
     ]
