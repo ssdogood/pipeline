@@ -468,8 +468,12 @@ def prepare_run(
 
     # PT-014: --tables naming paused tables without --paused-table
     # refuses THOSE tables loudly (the operator remedy is in the
-    # message); unnamed tables proceed untouched.
-    if only_tables:
+    # message); unnamed tables proceed untouched. PT-036 fix
+    # (2026-11-20): with --paused-table given the refusal must NOT
+    # fire - the operator already chose the remedy the message
+    # prescribes; the lift verdict itself (including folder-level
+    # never-liftable) belongs to the attempt layer.
+    if only_tables and not paused_override:
         refused = []
         for t in cfg["tables"]:
             if t["name"] not in only_tables:

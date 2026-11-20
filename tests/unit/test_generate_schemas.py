@@ -275,3 +275,94 @@ def test_task_raises_on_cursor_error():
 
     with pytest.raises(RuntimeError, match="ORA-00942"):
         task(_ExplodingConn(LEGACY_DESC))
+
+# ── PT-036: paused tables skip introspection (PT-014 complement) ──
+
+_EVERGREEN = {"start": "1970-01-01", "end": "2999-12-31",
+              "reason": "paused for test"}
+
+
+def _pg_cfg(paused_conns=(), paused_tables=()):
+    """Fresh CFG literal (no shared-state mutation) with chosen pauses.
+    Window start 1970 / end 2999 => PAUSED on any real today()."""
+    conns = {
+        "app1": {"type": "oracle", "folder": "f1", "retries": 3,
+                 "retry_backoff_seconds": 7},
+        "app2": {"type": "oracle", "folder": "f2"},
+        "ldap_src": {"type": "ldap", "folder": "fx"},
+    }
+    tables = []
+    for conn, schema, name, q in [
+        ("app1", "ETL", "T1", "SELECT ACCT_ID FROM ETL.T1"),
+        ("app1", "ETL", "T2", "SELECT ACCT_ID FROM ETL.T2"),
+        ("app2", "HR", "T3", "SELECT ACCT_ID FROM HR.T3"),
+        ("ldap_src", "AD", "T4", "not-an-oracle-table"),
+    ]:
+        t: dict = {"connection": conn, "schema": schema, "name": name,
+                   "query": q}
+        if conn in paused_conns or name in paused_tables:
+            t["pause"] = dict(_EVERGREEN)
+        tables.append(t)
+    return {"connections": conns, "tables": tables}
+
+
+def test_generator_silently_skips_paused_tables(env, monkeypatch, tmp_path):
+    monkeypatch.setattr(gs, "load_config",
+                        lambda *a, **k: _pg_cfg(paused_conns=("app1",)))
+    connects: list[str] = []
+    worker_calls: list[dict] = []
+    patch_connect(monkeypatch, connects)
+    patch_worker(monkeypatch, worker_calls)
+
+    out = tmp_path / "master.csv"
+    rc = gs.generate_schemas("cfg.yaml", str(out), force=True,
+                             dry_run=False, source_type="oracle")
+
+    assert rc == 0
+    assert connects == ["app2"]     # app1 fully paused -> NO session
+    assert worker_calls == [
+        {"label": "app2", "tables": ["T3"], "table_concurrency": 1,
+         "retries": 2, "backoff_seconds": 5},
+    ]
+    csv_text = out.read_text(encoding="utf-8")
+    assert "T3" in csv_text and "T1" not in csv_text and "T2" not in csv_text
+
+
+def test_generator_all_paused_exit_zero_no_connection(env, monkeypatch,
+                                                      tmp_path):
+    monkeypatch.setattr(gs, "load_config",
+                        lambda *a, **k: _pg_cfg(paused_conns=("app1",
+                                                              "app2",
+                                                              "ldap_src")))
+    connects: list[str] = []
+    worker_calls: list[dict] = []
+    patch_connect(monkeypatch, connects)
+    patch_worker(monkeypatch, worker_calls)
+
+    out = tmp_path / "master.csv"
+    rc = gs.generate_schemas("cfg.yaml", str(out), force=True,
+                             dry_run=False, source_type="oracle")
+
+    assert rc == 0                    # the "no complaints" ruling
+    assert connects == []              # NO connection opened at all
+    assert worker_calls == []
+    assert not out.exists()            # master left untouched
+
+
+def test_generator_override_introspects_paused_tables(env, monkeypatch,
+                                                      tmp_path):
+    monkeypatch.setattr(gs, "load_config",
+                        lambda *a, **k: _pg_cfg(paused_conns=("app1",)))
+    connects: list[str] = []
+    worker_calls: list[dict] = []
+    patch_connect(monkeypatch, connects)
+    patch_worker(monkeypatch, worker_calls)
+
+    out = tmp_path / "master.csv"
+    rc = gs.generate_schemas("cfg.yaml", str(out), force=True,
+                             dry_run=False, source_type="oracle",
+                             paused_override=True)
+
+    assert rc == 0
+    assert sorted(connects) == ["app1", "app2"]   # full service restored
+    assert [c["label"] for c in worker_calls] == ["app1", "app2"]
