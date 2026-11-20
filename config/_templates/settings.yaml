@@ -1,0 +1,87 @@
+# ==============================================================================
+# SETTINGS - BLANK SKELETON (_templates/)
+# ------------------------------------------------------------------------------
+# This template documents EVERY legal knob of settings.yaml. It lives in an
+# ENVIRONMENT FOLDER (config/<environment>/settings.yaml) - the environment
+# word appears nowhere in file names or content; a file belongs to whichever
+# environment folder it sits in.
+#
+# DESIGN RULES (supersede the old settings.laptop.yaml header):
+#   1. Every knob is registered in src/dpl/lib/knob_registry.py - a knob is
+#      born THERE first, then documented here. A knob documented here but
+#      unregistered (or vice versa) FAILS THE TEST SUITE (parity tests).
+#   2. Validation is strict: an unknown key refuses loudly naming the file,
+#      section and key. Misspelled knobs can no longer be silently ignored.
+#   3. REPLACE_ME_* values must be replaced before the environment works;
+#      leftovers fail visibly at connect/run time.
+#
+# Sections marked (required) MUST be present. Every knob below is legal.
+# ==============================================================================
+
+# --- polars (optional section) -------------------------------------------------
+# Rows per fetch/Polars batch in flight. 50k rows x ~10 cols is tens of MB -
+# comfortable. Larger = faster fetch, more RAM; halve on wide-table memory
+# pressure. Also: strict_cast=true fails a table LOUDLY on dtype overflow;
+# false is the emergency silent-coerce valve (any run using false is logged).
+polars:
+  batch_rows: 50000
+  strict_cast: true
+
+# --- paths (REQUIRED) ----------------------------------------------------------
+# landing_root : final published data: <root>/<date>/<folder>/<table>/
+#                + per-folder manifests at <root>/<date>/_manifest_<folder>.json
+#                Pruned by retention (wrapper-level), date-dirs only.
+# scratch_root : transient area (DuckDB spill + staged Parquet parts).
+#                MUST be on the SAME filesystem/volume as landing_root -
+#                the atomic publish (rename) only works within one volume.
+# runs_root    : manifest archive root. OMIT it (recommended) -> derived
+#                automatically as <landing_root>/_runs.
+# history_db   : SQLite history DB path. Must NOT sit inside a landing
+#                date-dir. <landing_root>/_history/dpl_history.db is standard.
+paths:
+  landing_root: REPLACE_ME_STAGING_PATH
+  scratch_root: REPLACE_ME_SCRATCH_PATH
+  # runs_root: omit in real environments (auto-derived); shown here only
+  # to document the knob. Uncomment + set only for a non-default location.
+  # runs_root: data/staging/_runs
+  # history_db: standard layout is <landing_root>/_history/dpl_history.db.
+  # Replace ME - a skeleton must not presuppose your filesystem.
+  history_db: REPLACE_ME_HISTORY_DB_PATH
+
+# --- duckdb (REQUIRED) ---------------------------------------------------------
+# memory_limit: hard cap per table write, e.g. "16GB"; beyond it DuckDB
+#               pages to scratch_root (graceful, not a crash). Leave ~50%
+#               of machine RAM for OS/other processes.
+# threads     : DuckDB scan/agg/write parallelism. Omit -> all cores.
+#               Cap (e.g. 4) when concurrent extractors run.
+duckdb:
+  memory_limit: REPLACE_ME_E_G_16GB
+  threads: 4
+
+# --- writer (optional section) -------------------------------------------------
+# compression           : zstd (recommended) | snappy
+# compression_level     : 1 (fastest, largest) .. 22 (slowest, smallest);
+#                         omit and DuckDB applies its own default (3).
+# max_file_mb           : part-split threshold; uniform part numbering either
+#                         way. Default 512.
+# keep_scratch_on_success: debugging only - never true on a live tier.
+writer:
+  compression: zstd
+  compression_level: 3
+  max_file_mb: 512
+  keep_scratch_on_success: false
+
+# --- extraction (optional section) ---------------------------------------------
+# max_parallel_connections: how many connection folders extract simultaneously
+#                          (1 = sequential). Renamed from max_parallel_folders.
+# keepalive_minutes       : Oracle expire_time probe interval; keep BELOW the
+#                           network firewall idle timeout.
+extraction:
+  max_parallel_connections: 1
+  keepalive_minutes: 10
+
+# --- pause (optional section) --------------------------------------------------
+# stale_days: pause older than this enters the once-per-night stale-pause
+#             digest email. Default 14.
+pause:
+  stale_days: 14

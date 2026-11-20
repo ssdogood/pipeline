@@ -1,0 +1,21 @@
+# ==============================================================================
+# PASS_MGR (VAULT) CONFIG - MINIMAL RUNNABLE EXAMPLE (_example/)
+# ------------------------------------------------------------------------------
+# Demonstrates a structurally valid vault config. The example uses FAKE
+# paths on purpose: the parity test asserts the STRUCTURE validates, and a
+# real boot against it refuses at vault resolution (fake paths are not
+# real credentials, so nothing sensitive can ever load from here).
+# ==============================================================================
+
+version: 1
+default_method: fernet
+
+methods:
+  fernet:
+    key_file: secrets/example-fernet.key
+    encrypted_file: secrets/example-secrets.enc
+  sops:
+    binary: REPLACE_ME_PATH_TO_SOPS_BINARY
+    manifest: REPLACE_ME_PATH_TO_SOPS_MANIFEST_YAML
+    age_key_file: REPLACE_ME_PATH_TO_AGE_KEY
+    encrypted_file: REPLACE_ME_PATH_TO_SOPS_ENCRYPTED_YAML

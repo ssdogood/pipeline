@@ -165,13 +165,16 @@ def validate_knob_registry() -> None:
     """
     allowed_keys = {"type", "required", "default", "description",
                     "positive", "min", "choices", "nonempty"}
+    # SECTION-LEVEL retirement check FIRST (bug found 2026-11-20: the
+    # old knob-level overlap compared knob names against retired
+    # SECTION names and never fired for a retired section itself).
+    overlap = set(SETTINGS_KNOBS) & set(RETIRED_SETTINGS_SECTIONS)
+    if overlap:
+        raise ValueError(f"registry: section(s) {sorted(overlap)} are both "
+                         f"live and retired - fix the registry")
     for section, knobs in SETTINGS_KNOBS.items():
         if not isinstance(section, str) or not section:
             raise ValueError(f"registry: bad section name {section!r}")
-        overlap = set(knobs) & set(RETIRED_SETTINGS_SECTIONS)
-        if overlap:
-            raise ValueError(f"registry: section(s) {overlap} are both "
-                             f"live and retired - fix the registry")
         for knob, spec in knobs.items():
             extra = set(spec) - allowed_keys
             if extra:

@@ -1,0 +1,18 @@
+# ==============================================================================
+# RUN REGISTRY - BLANK SKELETON (_templates/)
+# ------------------------------------------------------------------------------
+# Which pipes the wrapper executes, IN THIS ORDER. A pipe = one yaml in
+# config/<environment>/extractor/ (or 'extractors/') - registration name =
+# the yaml's stem. Unregistered yamls sit ignored (logged, never run).
+#
+#   Add a pipe:     drop the yaml in the environment's extractors/ dir,
+#                   add its stem below.
+#   Disable a pipe: delete its line (the yaml stays; nothing runs).
+#
+# Loud validation BEFORE anything runs: a registered name with no yaml,
+# a duplicate registration, or an unregistered connection type each abort
+# with a named error (exit 3).
+# ==============================================================================
+
+pipes:
+  - REPLACE_ME_PIPE_NAME        # e.g. oracle_to_stg, ad_to_stg

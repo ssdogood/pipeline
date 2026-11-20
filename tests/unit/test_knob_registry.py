@@ -145,3 +145,77 @@ def test_version_skew_refusal_mentions_registration(tmp_path):
     with pytest.raises(ValueError) as ei:
         load_settings(_write_settings(tmp_path, payload))
     assert "knob_registry" in str(ei.value)
+
+
+# ---------------------------------------------------------------- registry self-check refusals
+# validate_knob_registry() guards against DEVELOPER error (a malformed
+# registry must die before any settings file reads it). Its refusal
+# branches deserve coverage exactly like everything else.
+#
+# MUTATION-SAFETY NOTE (bug found 2026-11-20): the restore pattern must
+# be a DEEP copy. dict(SETTINGS_KNOBS) shares nested spec dicts, so a
+# test injecting a key into a nested spec poisons the registry for
+# every later test while the top-level restore looks fine. Always
+# copy.deepcopy here.
+
+import copy as _copy
+
+
+def _mutated_registry(mutate) -> None:
+    """Run validate_knob_registry() against a mutated deep copy of the
+    registry, then restore the pristine one - guaranteed."""
+    from dpl.lib import knob_registry as kr
+    original = _copy.deepcopy(kr.SETTINGS_KNOBS)
+    try:
+        mutate(kr.SETTINGS_KNOBS)
+        kr.validate_knob_registry()   # must NOT raise for a valid registry
+    finally:
+        kr.SETTINGS_KNOBS.clear()
+        kr.SETTINGS_KNOBS.update(original)
+
+
+def test_self_check_accepts_pristine_registry():
+    from dpl.lib.knob_registry import validate_knob_registry
+    validate_knob_registry()          # None = well-formed; no assertion needed
+
+
+def test_self_check_rejects_bad_section_name():
+    from dpl.lib import knob_registry as kr
+
+    def poison(registry):
+        registry[""] = {}
+    with pytest.raises(ValueError, match="bad section name"):
+        _mutated_registry(poison)
+    # restore proof: self-check passes again afterwards
+    kr.validate_knob_registry()
+
+
+def test_self_check_rejects_unknown_spec_key():
+    def poison(registry):
+        registry["duckdb"]["memory_limit"]["range"] = "1-4"
+    with pytest.raises(ValueError, match="unknown spec key"):
+        _mutated_registry(poison)
+
+
+def test_self_check_rejects_required_knob_with_default():
+    def poison(registry):
+        registry["duckdb"]["memory_limit"]["default"] = "16GB"
+    with pytest.raises(ValueError, match="cannot carry a default"):
+        _mutated_registry(poison)
+
+
+def test_self_check_rejects_section_both_live_and_retired():
+    def poison(registry):
+        registry["pass_mgr"] = {"environment": {"type": str}}
+    with pytest.raises(ValueError, match="both live and retired"):
+        _mutated_registry(poison)
+
+
+def test_mutation_leaves_registry_pristine_afterwards():
+    """Regression lock for the shallow-copy poisoning bug: after any
+    mutation test, the registry must pass the self-check unchanged."""
+    from dpl.lib import knob_registry as kr
+    from dpl.lib.knob_registry import validate_knob_registry
+    snapshot_before = _copy.deepcopy(kr.SETTINGS_KNOBS)
+    validate_knob_registry()
+    assert kr.SETTINGS_KNOBS == snapshot_before

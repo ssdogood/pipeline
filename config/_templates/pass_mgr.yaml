@@ -1,0 +1,30 @@
+# ==============================================================================
+# PASS_MGR (VAULT) CONFIG - BLANK SKELETON (_templates/)
+# ------------------------------------------------------------------------------
+# Lives in an ENVIRONMENT FOLDER (config/<environment>/pass_mgr.yaml).
+# The environment word appears NOWHERE in this file's name or content -
+# the file belongs to whichever environment folder it sits in.
+#
+# Loaded by the vault layer (lib/pass_mgr) with ALL fields REQUIRED;
+# unknown keys refuse loudly. Copy, replace every REPLACE_ME_*, delete
+# nothing - then validate with the config validator command.
+# ==============================================================================
+
+version: 1
+
+# Vault lookup strategy: fernet (local encrypted file) or sops (age-key
+# encrypted yaml). Dev machines typically use fernet; shared tiers use
+# whichever method the tier's key custody supports.
+default_method: REPLACE_ME_FERNET_OR_SOPS
+
+methods:
+
+  fernet:
+    key_file: REPLACE_ME_PATH_TO_FERNET_KEY
+    encrypted_file: REPLACE_ME_PATH_TO_ENCRYPTED_SECRETS
+
+  sops:
+    binary: REPLACE_ME_PATH_TO_SOPS_BINARY
+    manifest: REPLACE_ME_PATH_TO_SOPS_MANIFEST_YAML
+    age_key_file: REPLACE_ME_PATH_TO_AGE_KEY
+    encrypted_file: REPLACE_ME_PATH_TO_SOPS_ENCRYPTED_YAML
