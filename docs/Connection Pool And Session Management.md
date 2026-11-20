@@ -126,7 +126,7 @@ Diagnostic fingerprints worth knowing:
 ```yaml
 # settings (global) — the extractor reads keepalive from here
 extraction:
-  max_parallel_folders: 4      # see Parallel Extraction doc
+  max_parallel_connections: 4      # see Parallel Extraction doc
   keepalive_minutes: 10       # Oracle expire_time; keep below firewall idle timeout
 
 # extractor config (per connection)
