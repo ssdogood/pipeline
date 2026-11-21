@@ -47,8 +47,9 @@ dev = [
 ]
 
 [project.scripts]
-dpl-run = "dpl.wrapper.run:main"
-dpl-update-history = "dpl.wrapper.update_history:main"
+dpl = "dpl.cli:main"
+dpl-run = "dpl.cli:run_shim"
+dpl-update-history = "dpl.cli:update_history_shim"
 
 [tool.setuptools.packages.find]
 where = ["src"]
