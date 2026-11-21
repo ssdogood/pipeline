@@ -2,7 +2,7 @@
 """In-memory vault operations for pass_mgr (PT-040 4a: env-agnostic).
 
 No environment argument: the ACTIVE environment folder is discovered
-from config/environment.yaml (or DPL_ENV_FOLDER), and pass_mgr.yaml
+from config/environment.yaml - the one and only declaration - and pass_mgr.yaml
 is read from inside that folder.
 
 
@@ -65,8 +65,17 @@ from cryptography.fernet import Fernet, InvalidToken
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
-EXTRACTORS_DIR = PROJECT_ROOT / "config" / "extractors"
-SMTP_CREDENTIALS_DIR = PROJECT_ROOT / "config" / "smtp"
+# PT-040 4e: extractor yamls + smtp credentials are PER-ENVIRONMENT.
+# The paths below are computed lazily (functions, not constants) because
+# the env folder resolves from config/environment.yaml at runtime.
+def _extractors_dir():
+    from dpl.lib.environment import resolve_environment
+    return resolve_environment().folder / "extractors"
+
+
+def _smtp_credentials_dir():
+    from dpl.lib.environment import resolve_environment
+    return resolve_environment().folder / "smtp"
 SECRETS_DIR = PROJECT_ROOT / "secrets"
 BACKUP_DIR = SECRETS_DIR / "backups"
 LOG_FILE = SECRETS_DIR / "logs" / "dpl_pass_mgr.log"
@@ -120,52 +129,33 @@ def log_action(action: str, details: str) -> None:
 
 
 def find_active_env_dir(config_dir):
-    """Locate the active environment folder next to this script's config/.
+    """Locate the active environment folder - SELECTOR-ONLY.
 
-    PT-040 4a: no environment argument. Discovery checks, in order:
-      1. DPL_ENV_FOLDER env var (escape hatch for exotic layouts)
-      2. config/environment.yaml -> read the word, use folder of that name
-      3. exactly one directory under config/ that is not a known
-         non-environment dir (_templates, _example) and holds pass_mgr.yaml
-    Fails loudly naming what it looked for.
+    PT-040 4e (user decision 2026-11-20): the environment is declared
+    and controlled at ONE and ONLY ONE place - config/environment.yaml.
+    No env-var bypass, no guess-from-directory-shape fallback. If the
+    selector is missing, unreadable, or names a folder that does not
+    exist: LOUD REFUSAL, no moving forward.
     """
-    non_env = {"_templates", "_example"}
     d = config_dir
 
-    var = os.environ.get("DPL_ENV_FOLDER")
-    if var:
-        cand = Path(var)
-        if not cand.is_dir():
-            fail(f"DPL_ENV_FOLDER={var} does not exist")
-        return cand.resolve()
-
     sel = d / "environment.yaml"
-    if sel.is_file():
-        try:
-            data = yaml.safe_load(sel.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError as e:
-            fail(f"{sel}: invalid YAML: {e}")
-        word = (data.get("environment") or "").strip() if isinstance(data, dict) else ""
-        if not word:
-            fail(f"{sel}: missing or empty 'environment' key")
-        cand = d / word
-        if not cand.is_dir():
-            fail(f"{sel} names environment '{word}' but folder {cand} is missing")
-        return cand.resolve()
-
-    candidates = sorted(
-        p for p in d.iterdir()
-        if p.is_dir() and p.name not in non_env and (p / "pass_mgr.yaml").is_file()
-    )
-    if len(candidates) == 1:
-        return candidates[0].resolve()
-    if not candidates:
-        fail(f"no environment folder found under {d} "
-             f"(looked for a subfolder containing pass_mgr.yaml; "
-             f"expected from config/environment.yaml)")
-    fail(f"multiple candidate environment folders under {d}: "
-         f"{[c.name for c in candidates]} - set DPL_ENV_FOLDER or fix "
-         f"config/environment.yaml")
+    if not sel.is_file():
+        fail(f"{sel} not found - the environment MUST be declared there "
+             f"(one place only: environment: development|test|production); "
+             f"the vault tool never guesses")
+    try:
+        data = yaml.safe_load(sel.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        fail(f"{sel}: invalid YAML: {e}")
+    word = (data.get("environment") or "").strip() if isinstance(data, dict) else ""
+    if not word:
+        fail(f"{sel}: missing or empty 'environment' key "
+             f"(one place only: environment: development|test|production)")
+    cand = d / word
+    if not cand.is_dir():
+        fail(f"{sel} names environment '{word}' but folder {cand} is missing")
+    return cand.resolve()
 
 
 def load_env_config(env_dir: Path) -> dict:
@@ -316,14 +306,14 @@ def discover_credential_refs() -> list:
     with no managed password. Commenting out a credential_ref retires it.
     """
     refs = []
-    if not EXTRACTORS_DIR.is_dir():
-        log_action("SCAN", f"extractors directory not found at {EXTRACTORS_DIR}")
+    if not _extractors_dir().is_dir():
+        log_action("SCAN", f"extractors directory not found at {_extractors_dir()}")
         return refs
-    cfg_files = sorted(EXTRACTORS_DIR.glob("*.yaml"))
+    cfg_files = sorted(_extractors_dir().glob("*.yaml"))
     # SMTP credentials live in their own folder (NOT an extractor);
     # same connections/users/credential_ref shape as extractor files.
-    if SMTP_CREDENTIALS_DIR.is_dir():
-        cfg_files += sorted(SMTP_CREDENTIALS_DIR.glob("*.yaml"))
+    if _smtp_credentials_dir().is_dir():
+        cfg_files += sorted(_smtp_credentials_dir().glob("*.yaml"))
     for cfg_file in cfg_files:
         try:
             cfg = yaml.safe_load(cfg_file.read_text(encoding="utf-8"))

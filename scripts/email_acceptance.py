@@ -27,9 +27,12 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from dpl.lib.email_service.api import send_email
 from dpl.lib.email_service.config import load_email_config
 from dpl.lib.email_service.mask import mask_address
+
+# PT-040 4e: per-environment email config.
+from dpl.lib.environment import resolve_environment
 from dpl.lib.history_db import init_db, open_db
 
-CONFIG_PATH = PROJECT_ROOT / "config" / "email_service.yaml"
+CONFIG_PATH = resolve_environment().folder / "email_service.yaml"
 CALLER = "selftest"
 
 

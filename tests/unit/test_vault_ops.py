@@ -48,10 +48,16 @@ def tmp_project(tmp_path, monkeypatch):
 
     monkeypatch.setattr(vault_ops, "PROJECT_ROOT", pr)
     monkeypatch.setattr(vault_ops, "CONFIG_DIR", pr / "config")
-    monkeypatch.setattr(vault_ops, "EXTRACTORS_DIR", pr / "config" / "extractors")
-    (pr / "config" / "smtp").mkdir(parents=True)
-    monkeypatch.setattr(vault_ops, "SMTP_CREDENTIALS_DIR",
-                        pr / "config" / "smtp")
+    # PT-040 4e: extractor + smtp dirs are resolver-driven FUNCTIONS now
+    # (lazy, local imports) - patch the functions directly; each returns
+    # its scratch env-folder subdir.
+    env_dir = pr / "config" / "development"
+    (env_dir / "extractors").mkdir(parents=True, exist_ok=True)
+    (env_dir / "smtp").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(vault_ops, "_extractors_dir",
+                        lambda: env_dir / "extractors")
+    monkeypatch.setattr(vault_ops, "_smtp_credentials_dir",
+                        lambda: env_dir / "smtp")
     monkeypatch.setattr(vault_ops, "SECRETS_DIR", pr / "secrets")
     monkeypatch.setattr(vault_ops, "BACKUP_DIR", pr / "secrets" / "backups")
     monkeypatch.setattr(vault_ops, "LOG_FILE", pr / "secrets" / "logs" / "x.log")
@@ -59,7 +65,9 @@ def tmp_project(tmp_path, monkeypatch):
 
 
 def write_extractor(tmp_project, filename, connections: dict) -> None:
-    p = tmp_project / "config" / "extractors" / filename
+    # PT-040 4e: extractors live in the ENV FOLDER - same location the
+    # patched _extractors_dir() reads from.
+    p = tmp_project / "config" / "development" / "extractors" / filename
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(yaml.safe_dump({"connections": connections}), encoding="utf-8")
 
@@ -212,7 +220,7 @@ class TestDiscovery:
         assert len(refs) == 1
 
     def test_missing_extractors_dir(self, tmp_project):
-        vault_ops.EXTRACTORS_DIR.rmdir()
+        (tmp_project / "config" / "development" / "extractors").rmdir()
         assert vault_ops.discover_credential_refs() == []
 
 
@@ -328,11 +336,14 @@ Covers the five sync guarantees plus a full tool-side round trip:
 # --------------------------------------------------------------- scaffolding --
 
 def install_project(monkeypatch, tmp_path):
-    """Point every vault_ops path constant at a throwaway tree."""
+    """Point every vault_ops path constant at a throwaway tree.
+
+    PT-040 4e: EXTRACTORS_DIR/SMTP_CREDENTIALS_DIR constants are GONE
+    (resolver-driven lazy functions now); the scaffold patches the two
+    functions at the scratch env folder."""
     root = tmp_path / "pipeline"
     dirs = {
         "CONFIG_DIR": root / "config",
-        "EXTRACTORS_DIR": root / "config" / "extractors",
         "SECRETS_DIR": root / "secrets",
         "BACKUP_DIR": root / "secrets" / "backups",
         "LOG_FILE": root / "secrets" / "logs" / "dpl_pass_mgr.log",
@@ -345,6 +356,13 @@ def install_project(monkeypatch, tmp_path):
             path.parent.mkdir(parents=True, exist_ok=True)
         else:
             path.mkdir(parents=True, exist_ok=True)
+    env_dir = root / "config" / "development"
+    monkeypatch.setattr(vault_ops, "_extractors_dir",
+                        lambda: env_dir / "extractors")
+    monkeypatch.setattr(vault_ops, "_smtp_credentials_dir",
+                        lambda: env_dir / "smtp")
+    (env_dir / "extractors").mkdir(parents=True, exist_ok=True)
+    (env_dir / "smtp").mkdir(parents=True, exist_ok=True)
     return root
 
 

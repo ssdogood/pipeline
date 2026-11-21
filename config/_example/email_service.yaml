@@ -1,0 +1,33 @@
+# Minimal runnable email config: dry_run ONLY, no real recipients.
+# On copy-rename-fill, the operator sets real host/recipients and flips
+# dry_run: false only when this environment actually sends mail.
+
+email:
+  host: smtp.invalid               # intentionally unreachable - dry-run only
+  port: 465
+  mode: ssl
+  auth:
+    scheme: basic
+    username: dpl-relay
+    password_ref: smtp.password.secret
+  sender: dpl-pipeline@invalid
+  allow_html: true
+  allow_bcc: false
+  allowed_recipient_domains: []
+  attachments:
+    allowed_extensions: [csv, xlsx, log, txt, parquet]
+    max_total_mb: 10
+  retries: 2
+  timeout_sec: 30
+  dry_run: true                    # REQUIRED - example NEVER sends
+  templates_dir: config/email_templates
+  outbox_dir: logs/email_outbox
+
+callers:
+  run_failed:
+    enabled: true
+    to: [ops@invalid]
+    template: run_failed.txt
+    use_html: true
+    data:
+      subject: "[dpl] run FAILED (example config - dry run only)"

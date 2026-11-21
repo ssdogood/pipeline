@@ -77,10 +77,15 @@ EXIT_EXTRACT = 1
 EXIT_HISTORY = 2
 EXIT_CONFIG = 3
 
-SETTINGS_PATH = "config/settings.laptop.yaml"      # env override: DPL_SETTINGS
-EXTRACTOR_DIR = Path("config/extractors")
-RUN_REGISTRY = Path("config/run.yaml")
-WRAPCFG_PATH = "config/wrapper.yaml"
+# PT-040 4c: all per-run config files live INSIDE the active environment
+# folder (config/<env>/...). resolve_environment() is the single authority
+# for which folder that is; these constants are only the legacy defaults
+# kept for --settings override backwards compatibility, and the wrappers
+# resolve the folder-relative paths at runtime (see main()).
+LEGACY_SETTINGS_PATH = "config/settings.laptop.yaml"   # env override: DPL_SETTINGS
+EXTRACTOR_DIR = Path("config/development/extractors")   # default; resolved at runtime
+RUN_REGISTRY = Path("config/development/run.yaml")      # default; resolved at runtime
+WRAPCFG_PATH = "config/development/wrapper.yaml"        # default; resolved at runtime
 
 
 # ----------------------------------------------------------- run registry ---
@@ -301,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
                              "sessions); run NOTHING")
     parser.add_argument("--settings", default=None,
                         help="path to settings yaml "
-                             "(default: config/settings.laptop.yaml; "
+                             "(default: <environment folder>/settings.yaml; "
                              "env override DPL_SETTINGS)")
     args = parser.parse_args(argv)
 
@@ -323,8 +328,16 @@ def main(argv: list[str] | None = None) -> int:
         log.error("environment resolution failed - aborting: %s", e)
         return EXIT_CONFIG
 
-    settings_path = args.settings or _settings_path_from_env()
-    wcfg = load_wrapper_config(WRAPCFG_PATH)
+    # PT-040 4c: every per-run config derives from the env folder.
+    # --settings / DPL_SETTINGS remain explicit operator overrides
+    # (documented escape hatch); everything else follows the resolver.
+    extractor_dir = env.folder / "extractors"
+    run_registry = env.folder / "run.yaml"
+    wrapcfg_path = str(env.folder / "wrapper.yaml")
+    settings_path = args.settings or _settings_path_from_env() \
+        or str(env.folder / "settings.yaml")
+
+    wcfg = load_wrapper_config(wrapcfg_path)
     settings = load_settings(settings_path)
     if wcfg is None or settings is None:
         log.error("wrapper/settings config validation failed - aborting")
@@ -337,7 +350,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_CONFIG
 
     try:
-        pipes = load_registered_pipes()
+        pipes = load_registered_pipes(registry_path=run_registry,
+                                      extractor_dir=extractor_dir)
     except ValueError as e:
         log.error("run registry / pipe routing failed - aborting: %s", e)
         return EXIT_CONFIG
@@ -741,9 +755,13 @@ def main(argv: list[str] | None = None) -> int:
     return exit_code
 
 
-def _settings_path_from_env() -> str:
+def _settings_path_from_env() -> str | None:
+    """DPL_SETTINGS env override, or None (fall back to the env folder).
+
+    PT-040 4c: the legacy hardcoded default is GONE - when no override
+    exists, settings come from the active environment folder."""
     import os
-    return os.environ.get("DPL_SETTINGS", SETTINGS_PATH)
+    return os.environ.get("DPL_SETTINGS") or None
 
 
 if __name__ == "__main__":

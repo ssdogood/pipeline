@@ -179,11 +179,13 @@ def test_example_run_registry_empty_pipe_list_is_deliberate():
 
 
 def test_example_wrapper_matches_committed_shape():
-    """The example wrapper mirrors the real committed config/wrapper.yaml
-    shape - same profiles, same step vocabulary."""
+    """The example wrapper mirrors the canonical _templates/wrapper.yaml
+    shape - same profiles, same step vocabulary. (PT-040 4c: the live
+    anchor moved from top-level config/wrapper.yaml - machine-local env
+    folders are NOT test anchors; the committed template is.)"""
     example = _load(CONFIG / "_example" / "wrapper.yaml")
-    committed = _load(CONFIG / "wrapper.yaml")
-    assert set(example.get("profiles", {})) == set(committed.get("profiles", {}))
+    tpl = _load(CONFIG / "_templates" / "wrapper.yaml")
+    assert set(example.get("profiles", {})) == set(tpl.get("profiles", {}))
     assert set(example["profiles"]["full"]["steps"][0]) == {"name", "force"}
 
 
