@@ -5,14 +5,15 @@ Runs from project root only (relative config paths, like every other
 module). No args -> profile 'inc'.
 
 WHICH PIPES RUN is configured, never discovered-from-disk:
-    config/run.yaml lists the pipes (yaml stems in config/extractors/)
+    <env-folder>/run.yaml lists the pipes (yaml stems in
+    <env-folder>/extractors/)
     that the wrapper executes, in that order. Unregistered yamls in the
     extractor folder are ignored (and logged as such). A registered name
     whose yaml is missing, a name registered twice, or a yaml whose
     connection type has no connector in lib/connectors.py aborts at
     Tier 1 with a named error and exit 3 - never a silent skip.
 
-    Add a pipe:    drop the yaml, add one line to config/run.yaml.
+    Add a pipe:    drop the yaml, add one line to <env-folder>/run.yaml.
     Add a connector: lib connector + extractor module + ONE entry in
         lib/connectors.py. This file never changes.
 
@@ -82,7 +83,10 @@ EXIT_CONFIG = 3
 # for which folder that is; these constants are only the legacy defaults
 # kept for --settings override backwards compatibility, and the wrappers
 # resolve the folder-relative paths at runtime (see main()).
-LEGACY_SETTINGS_PATH = "config/settings.laptop.yaml"   # env override: DPL_SETTINGS
+# PT-040 4f: the laptop-era constant is retired - kept as a name only,
+# assigned None, so any accidental reference fails immediately rather
+# than pointing at a path that no longer exists.
+LEGACY_SETTINGS_PATH = None   # retired: settings live in the env folder
 EXTRACTOR_DIR = Path("config/development/extractors")   # default; resolved at runtime
 RUN_REGISTRY = Path("config/development/run.yaml")      # default; resolved at runtime
 WRAPCFG_PATH = "config/development/wrapper.yaml"        # default; resolved at runtime
@@ -101,7 +105,7 @@ class Pipe:
 
 
 def _load_run_registry(path: Path = RUN_REGISTRY) -> list[str]:
-    """Parse config/run.yaml; raise ValueError with named causes."""
+    """Parse the env folder's run.yaml; raise ValueError with named causes."""
     if not path.is_file():
         raise ValueError(
             f"run registry not found: {path}. Create it listing the "
@@ -197,7 +201,7 @@ def load_registered_pipes(registry_path: Path = RUN_REGISTRY,
     if unregistered:
         log = get_run_logger("dpl.wrapper")
         log.info("unregistered yaml(s) present, ignored: %s "
-                 "(register in config/run.yaml to run them)",
+                 "(register in the env folder's run.yaml to run them)",
                  ", ".join(unregistered))
     return pipes
 
@@ -277,7 +281,7 @@ def _validate_connection_name(pipes: list[Pipe], name: str) -> str | None:
         return (f"connection '{name}' is not declared on any "
                 f"registered pipe (checked: "
                 f"{', '.join(p.name for p in pipes) or 'none'}) - fix "
-                f"the name or register its pipe in config/run.yaml")
+                f"the name or register its pipe in the env folder's run.yaml")
     return None
 
 
@@ -356,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         log.error("run registry / pipe routing failed - aborting: %s", e)
         return EXIT_CONFIG
     if not pipes:
-        log.error("no pipes registered in config/run.yaml")
+        log.error("no pipes registered in the env folder's run.yaml")
         return EXIT_CONFIG
 
     # Global extraction knobs: present-but-invalid is a CONFIG error

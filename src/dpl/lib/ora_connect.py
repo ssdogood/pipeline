@@ -2,7 +2,7 @@
 """
 Oracle connection and query helpers (python-oracledb thin mode).
 
-Config:     config/extractors/oracle_to_stg.yaml (connections, tables)
+Config:     <env-folder>/extractors/oracle_to_stg.yaml (connections, tables)
 Secrets:    pass_mgr vaults - per-user credential_ref; the vault method is
              chosen by default_method in pass_mgr.<env>.yaml. Plaintext
              password files are NOT supported (removed by design).

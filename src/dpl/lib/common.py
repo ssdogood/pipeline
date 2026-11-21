@@ -486,7 +486,7 @@ def _reject_retired_keys(cfg: dict) -> None:
         detail = ", ".join(f"tables[{i}].{k}" for i, k in offenders)
         raise ValueError(
             f"retired config key(s) present: {detail}. "
-            f"These now live in config/extractors/table_rules_oracle_to_stg.csv - remove them "
+            f"These now live in the env folder's extractors/table_rules_oracle_to_stg.csv - remove them "
             f"from config yaml.")
 
 def validate_rules_references(schema_master: dict, rules: dict | None) -> None:

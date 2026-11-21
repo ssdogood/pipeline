@@ -6,8 +6,10 @@ routed through HERE by its connections' shared 'type'. All per-connector
 knowledge lives with the connectors:
 
     Add a PIPE (existing connector, e.g. another Oracle source):
-        drop config/extractors/<name>.yaml and register <name> in
-        config/run.yaml -> done. Nothing else changes anywhere.
+        drop <env-folder>/extractors/<name>.yaml and register <name> in
+        <env-folder>/run.yaml -> done. Nothing else changes anywhere.
+        (env-folder = the ACTIVE environment folder, resolved from
+        config/environment.yaml - the one and only declaration.)
 
     Add a CONNECTOR (new source type, e.g. postgres):
         1. lib/pg_connect.py       - the connector (schema + connect)
@@ -20,7 +22,7 @@ knowledge lives with the connectors:
         explicit error - never a silent skip.
 
 Naming conventions (derived by run.py, never configured per pipe):
-    config/extractors/<name>.yaml  ->  config/extractors/schema_master_<name>.csv
+    <env-folder>/extractors/<name>.yaml  ->  <env-folder>/extractors/schema_master_<name>.csv
 """
 from __future__ import annotations
 
@@ -28,7 +30,7 @@ from dpl.lib.ldap_connect import LDAP_CONFIG_SCHEMA
 from dpl.lib.ora_connect import ORACLE_CONFIG_SCHEMA
 
 CONNECTORS: dict[str, dict] = {
-    # schema    : validates config/extractors/<name>.yaml at load time
+    # schema    : validates <env-folder>/extractors/<name>.yaml at load time
     # extractor : module exporting extract_all(); run.py imports it
     # generator : module exporting generate_schemas() for the
     #             generate_schemas step; None = master is curated by
