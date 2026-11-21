@@ -24,6 +24,14 @@ live via tomllib so a bumped version shows up with no code edit; the
 importlib.metadata fallback covers non-editable installs where the
 pyproject file is not shipped alongside the package.
 
+Path doctrine (operator ruling 2026-11-21, same pattern as
+lib/common.py): PROJECT_ROOT = paths.get_project_root() at module
+level, used everywhere - DPL_HOME env var first (prod box / cron),
+then walk-up discovery. Never derive the root positionally. Both the
+version read and the catalog's source files resolve through
+PROJECT_ROOT, so a DPL_HOME-pointed deployment reports ITS version and
+ITS source truth.
+
 Exit codes:
     0 - success (version printed, catalog printed, or the dispatched
         command returned 0)
@@ -40,9 +48,9 @@ from importlib import metadata
 from pathlib import Path
 
 from dpl import func_registry
+from dpl.lib import paths
 
-PACKAGE_ROOT = Path(__file__).resolve().parent          # .../src/dpl
-PROJECT_ROOT = PACKAGE_ROOT.parent.parent               # .../<project>
+PROJECT_ROOT = paths.get_project_root()   # single path authority (DPL_HOME-first)
 
 CATEGORY_TITLES = (
     "extraction",
@@ -58,7 +66,14 @@ CATEGORY_TITLES = (
 # version (PT-003)
 # --------------------------------------------------------------------------
 def _read_pyproject_version() -> str | None:
-    """Live-read [project].version from the pyproject.toml beside the package."""
+    """Live-read [project].version from the PROJECT_ROOT pyproject.toml.
+
+    PROJECT_ROOT is bound at import from paths.get_project_root() -
+    the single path authority (DPL_HOME first, then walk-up discovery),
+    the same pattern as lib/common.py. A pyproject that is absent from
+    the resolved root (stripped deployment) degrades to the
+    installed-metadata fallback rather than lying.
+    """
     pyproject = PROJECT_ROOT / "pyproject.toml"
     if not pyproject.is_file():
         return None
@@ -140,8 +155,9 @@ def _render_entry(label: str, purpose: str, indent: str) -> str:
 def build_functionality_text() -> str:
     """Assemble the catalog: header with live version, grouped by category."""
     entries: dict[str, list[tuple[str, str]]] = {c: [] for c in CATEGORY_TITLES}
+    source_root = PROJECT_ROOT / "src" / "dpl"
     for rel in func_registry.MODULES:
-        msg = _extract_func_msg(PACKAGE_ROOT / rel)
+        msg = _extract_func_msg(source_root / rel)
         if msg is None:
             print(
                 f"dpl --functionality: WARNING: registered module "

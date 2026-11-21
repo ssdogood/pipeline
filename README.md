@@ -40,24 +40,40 @@ Add to ~/.zshrc or ~/.bashrc for persistence. Note: cron jobs must set this expl
 | `README-FIRST.txt` (inside release bundles) | Receiver instructions — not in the repo; fabricated at build time |
 
 ## Running
-### Wrapper entry point
+### The dpl command family
 
+One front door. Version and capability catalog are always current,
+read live from pyproject.toml and the registered capability modules:
+```bash
+dpl                          # full help (all commands and flags)
+dpl --version                # version (PT-003)
+dpl --functionality          # capability catalog: commands, connectors,
+                             # vaulting, notifications, operations (PT-004)
+```
+
+### Run the pipeline
 Main orchestrator. Handles profile selection, manifest writing, and history tracking:
 ```bash
 # Full run (all tables)
-dpl.wrapper.run --profile full
+dpl run --profile full
 
 # Single extractor profile
-dpl.wrapper.run --profile ad
+dpl run --profile ad
 
 # Manual run ID
-dpl.wrapper.run --run-id manual_$(date +%Y%m%d_%H%M%S)
+dpl run --run-id manual_$(date +%Y%m%d_%H%M%S)
 ```
 
-## Update history manually
+### Update history manually
 After recovering failed runs or reconciling manifests:
 ```bash
-dpl.wrapper.update-history --reconcile
+dpl update-history --reconcile
+```
+
+Legacy names still work (one deprecation note, then the same behavior):
+```bash
+dpl-run --profile full        # prefer: dpl run --profile full
+dpl-update-history --reconcile  # prefer: dpl update-history --reconcile
 ```
 
 ## Extractors (direct)
@@ -72,6 +88,10 @@ python -m dpl.extractors.ad_to_stg
 ```
 
 ## Schema regeneration
+NOTE: `python -m dpl.lib.generate_schemas ...` is currently broken on
+main (args.settings bug; see tracker PT-042) - run the pipeline's
+normal schema step via `dpl run` instead. Direct regeneration returns
+with the `dpl generate-schemas` verb after PT-040 merges.
 Regenerate schema_master_auto.csv after config changes:
 ```bash
 python -m dpl.lib.generate_schemas --force

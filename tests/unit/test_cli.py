@@ -49,11 +49,42 @@ class TestVersion:
 
         source = SRC_DPL.parent.parent / "pyproject.toml"
         text = source.read_text().replace('version = "0.3.0"', 'version = "9.9.9"')
-        fake_root = tmp_path
-        (fake_root / "pyproject.toml").write_text(text)
-        # temporarily repoint PROJECT_ROOT at the tmp tree
-        monkeypatch.setattr(cli, "PROJECT_ROOT", fake_root)
+        (tmp_path / "pyproject.toml").write_text(text)
+        # repoint the SINGLE path authority (paths.get_project_root)
+        monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
         assert cli.get_version() == "9.9.9"
+
+    def test_dpl_home_is_honored(self, tmp_path, monkeypatch):
+        """The prod-box path: DPL_HOME env var must drive version lookup."""
+        text = (SRC_DPL.parent.parent / "pyproject.toml").read_text()
+        text = text.replace('version = "0.3.0"', 'version = "7.7.7"')
+        (tmp_path / "pyproject.toml").write_text(text)
+        monkeypatch.setenv("DPL_HOME", str(tmp_path))
+        # PROJECT_ROOT binds at import in the live process; re-derive it the
+        # way the module does so the env var drives the read end-to-end
+        import dpl.lib.paths as _paths
+
+        monkeypatch.setattr(cli, "PROJECT_ROOT", _paths.get_project_root())
+        assert cli.get_version() == "7.7.7"
+
+    def test_catalog_reads_sources_via_project_root(self, tmp_path, monkeypatch):
+        """Catalog resolves registered sources from PROJECT_ROOT/src/dpl."""
+        deployed = tmp_path / "src" / "dpl"
+        deployed.mkdir(parents=True)
+        monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
+        # deploy a minimal source tree: registry + one module
+        (deployed / "func_registry.py").write_text(
+            (SRC_DPL / "func_registry.py").read_text()
+        )
+        (deployed / "fake_cap.py").write_text(
+            '__func_msg__ = {"name": "fake", "invocation": "", '
+            '"category": "operations", "purpose": "deployed-tree probe"}\n'
+        )
+        import dpl.func_registry as _fr
+
+        monkeypatch.setattr(_fr, "MODULES", ("fake_cap.py",))
+        text = cli.build_functionality_text()
+        assert "deployed-tree probe" in text
 
     def test_fallback_when_no_pyproject(self, tmp_path, monkeypatch):
         monkeypatch.setattr(cli, "PROJECT_ROOT", tmp_path)
