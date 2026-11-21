@@ -62,9 +62,12 @@ from dpl.lib.session_pool import run_folder_tables
 log = get_run_logger("dpl.schema")
 
 
-CONFIG_FILE = "config/extractors/oracle_to_stg.yaml"
-SETTINGS_FILE = "config/settings.laptop.yaml"
-OUTPUT_FILE = "config/extractors/schema_master_oracle_to_stg.csv"
+# PT-040 4b: legacy manual-CLI defaults - kept ONLY as historical
+# docstrings for the manual workflow; the resolved defaults come from
+# the ACTIVE ENV FOLDER at runtime (see main()).
+CONFIG_FILE = "<env-folder>/extractors/oracle_to_stg.yaml"
+SETTINGS_FILE = "<env-folder>/settings.yaml"
+OUTPUT_FILE = "<env-folder>/extractors/schema_master_oracle_to_stg.csv"
 BACKUP_KEEP = 30
 
 # ----------------------------------------------------------- type mapping
@@ -267,7 +270,7 @@ def diff_master(old: dict[str, dict], new: dict[str, dict]) -> dict[str, list[st
 
 def generate_schemas(config_path: str, output_path: str,
                      force: bool, dry_run: bool,
-                     settings_path: str = SETTINGS_FILE,
+                     settings_path: str | None = None,
                      source_type: str | None = None, 
                      paused_override: bool = False) -> int:
     """Main generation routine for ONE pipe (single connector type).
@@ -290,6 +293,10 @@ def generate_schemas(config_path: str, output_path: str,
 
     Returns: 0 success, 1 partial failure or declaration error.
     """
+    # PT-040 4b: no explicit settings path -> the ACTIVE env folder's
+    settings_path = settings_path or str(
+        resolve_environment().folder / "settings.yaml")
+
     # ---- resolve the pipe's single connection type
     if source_type is None:
         # CLI path: no caller to declare the type - peek the yaml.
@@ -563,13 +570,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Bootstrap schema master CSV from configured sources"
     )
+    env = resolve_environment()
+    default_config = str(env.folder / "extractors" / "oracle_to_stg.yaml")
+    default_out = str(
+        env.folder / "extractors" / "schema_master_oracle_to_stg.csv")
     parser.add_argument(
-        "--config", default=CONFIG_FILE,
-        help=f"path to config.yaml (default: {CONFIG_FILE})"
+        "--config", default=default_config,
+        help=f"path to config.yaml (default: {default_config})"
     )
     parser.add_argument(
-        "--out", default=OUTPUT_FILE,
-        help=f"output path for master CSV (default: {OUTPUT_FILE})"
+        "--out", default=default_out,
+        help=f"output path for master CSV (default: {default_out})"
     )
     parser.add_argument(
         "--force", action="store_true",
