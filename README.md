@@ -89,7 +89,7 @@ python -m dpl.extractors.ad_to_stg
 
 ## Schema regeneration
 NOTE: `python -m dpl.lib.generate_schemas ...` is currently broken on
-main (args.settings bug; see tracker PT-042) - run the pipeline's
+main (args.settings bug; see tracker PT-045) - run the pipeline's
 normal schema step via `dpl run` instead. Direct regeneration returns
 with the `dpl generate-schemas` verb after PT-040 merges.
 Regenerate schema_master_auto.csv after config changes:
