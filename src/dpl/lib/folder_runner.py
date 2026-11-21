@@ -42,6 +42,18 @@ from typing import Any
 
 from dpl.lib.logger import get_run_logger
 
+__func_msg__ = {
+    "name": "folder runner",
+    "invocation": "",
+    "category": "extraction",
+    "purpose": (
+        "Bounded-concurrency folder scheduler for parallel extraction:\n"
+        "   1. converts the validated run plan into jobs,\n"
+        "   2. runs ungrouped connections concurrently, serial groups in order,\n"
+        "   3. bounded by max_parallel_connections at all times"
+    ),
+}
+
 log = get_run_logger("dpl.folder_runner")
 
 Task = Callable[[], Any]

@@ -52,6 +52,18 @@ from dpl.lib.history_db import (
     validate_db_path,
 )
 
+__func_msg__ = {
+    "name": "update-history",
+    "invocation": "dpl update-history",
+    "category": "operations",
+    "purpose": (
+        "Manifest-ingestion specialist for the run-history database:\n"
+        "   1. standalone recovery path (dpl update-history),\n"
+        "   2. wrapper final step ingesting every run's manifests,\n"
+        "   3. idempotent: (run_id, folder, table_name) is the identity"
+    ),
+}
+
 log = get_run_logger("dpl.history")
 
 #: table_runs column order used by the INSERT below - single source here

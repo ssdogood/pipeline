@@ -26,6 +26,18 @@ from dpl.lib.pause import (
     validate_pause_block,
 )
 
+__func_msg__ = {
+    "name": "pause digest",
+    "invocation": "",
+    "category": "operations",
+    "purpose": (
+        "Stale-pause digest scanning:\n"
+        "   1. collects all declared pauses in one pipe-config snapshot,\n"
+        "   2. flags those sitting stale past the pause.stale_days threshold\n"
+        "   3. ARMed pauses and live windows are never reported stale"
+    ),
+}
+
 #: inclusive staleness threshold default - mirrors the settings schema
 DEFAULT_STALE_DAYS = 14
 

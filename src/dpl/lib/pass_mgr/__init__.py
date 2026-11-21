@@ -40,6 +40,17 @@ from ._errors import (
 )
 from ._providers import PROVIDER_TYPES
 
+__func_msg__ = {
+    "name": "pass_mgr",
+    "invocation": "",
+    "category": "secrets",
+    "purpose": (
+        "Single authority for retrieving secrets by name:\n"
+        "   callers pass a secret name and nothing else - config loading,\n"
+        "   provider dispatch, decryption and caching stay behind this facade"
+    ),
+}
+
 __all__ = [
     # facade
     "init",

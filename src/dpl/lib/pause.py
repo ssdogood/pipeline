@@ -37,6 +37,18 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
+__func_msg__ = {
+    "name": "pause",
+    "invocation": "",
+    "category": "operations",
+    "purpose": (
+        "Single source of pause truth:\n"
+        "   1. table-level and folder-level pause windows (declared in pipe config),\n"
+        "   2. expiry evaluation - expired pauses lift automatically,\n"
+        "   3. folder block governs when table and folder overlap"
+    ),
+}
+
 DATE_FMT = "%Y-%m-%d"
 
 # States

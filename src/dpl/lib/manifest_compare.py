@@ -46,6 +46,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+__func_msg__ = {
+    "name": "manifest compare",
+    "invocation": "",
+    "category": "operations",
+    "purpose": (
+        "Mechanical equivalence comparator for extraction manifests:\n"
+        "   1. compares old-code vs new-code runs on identical data,\n"
+        "   2. ignores fields that can never match between runs (timestamps),\n"
+        "   3. an operator never eyeballs JSON by hand"
+    ),
+}
+
 # envelope keys that can never match between two runs
 ENVELOPE_VOLATILE = ("run_id", "started_at", "finished_at")
 # table keys that can never match (or are new and absent in baselines)

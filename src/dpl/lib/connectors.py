@@ -27,6 +27,13 @@ from __future__ import annotations
 from dpl.lib.ldap_connect import LDAP_CONFIG_SCHEMA
 from dpl.lib.ora_connect import ORACLE_CONFIG_SCHEMA
 
+__func_msg__ = {
+    "name": "connectors",
+    "invocation": "",
+    "category": "extraction",
+    "purpose": ("Connector registry: maps connection types to extraction paths"),
+}
+
 CONNECTORS: dict[str, dict] = {
     # schema    : validates config/extractors/<name>.yaml at load time
     # extractor : module exporting extract_all(); run.py imports it

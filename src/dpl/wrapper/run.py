@@ -71,6 +71,23 @@ from dpl.wrapper.update_history import (
     validate_db_path,
 )
 
+__func_msg__ = {
+    "name": "run",
+    "invocation": "dpl run",
+    "category": "operations",
+    "purpose": (
+        "Wrapper entry point - orchestrates the full pipeline per profile:\n"
+        "   1. pipes come from config/run.yaml, never discovered from disk,\n"
+        "   2. add a pipe = drop a yaml + one line in run.yaml; this file never changes,\n"
+        "   3. profiles (inc/full), per-run table/connection selectors,\n"
+        "   4. exit codes are the cron contract: \n"
+        "       0 ok; \n"
+        "       1 extraction failure;\n"
+        "       2 history failure (repairable via dpl update-history); \n"
+        "       3 config error"
+    ),
+}
+
 EXIT_OK = 0
 EXIT_EXTRACT = 1
 EXIT_HISTORY = 2

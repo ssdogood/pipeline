@@ -22,6 +22,13 @@ from dpl.lib import pass_mgr
 from dpl.lib.logger import get_run_logger
 from dpl.lib.pause import pause_block_ok
 
+__func_msg__ = {
+    "name": "oracle connection",
+    "invocation": "",
+    "category": "extraction",
+    "purpose": ("Oracle connection eligibility + session factory"),
+}
+
 log = get_run_logger("dpl.ora")
 
 

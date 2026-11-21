@@ -39,6 +39,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+__func_msg__ = {
+    "name": "schema dispatch",
+    "invocation": "",
+    "category": "schema",
+    "purpose": (
+        "Operator-declared schema ownership and the per-pipe dispatch matrix:\n"
+        "   1. every connection must declare schema: auto | manual,\n"
+        "   2. consumes the connector registry, never extends it,\n"
+        "   3. run.py stays dumb - it asks for a Decision and obeys it"
+    ),
+}
+
 VALID_SCHEMA_TAGS = ("auto", "manual")
 
 
