@@ -73,6 +73,13 @@ from dpl.lib.pause import (
 from dpl.lib.session_pool import run_folder_tables
 from dpl.lib.write_parquet import ParquetWriter
 
+__func_msg__ = {
+    "name": "oracle extractor",
+    "invocation": "(internal module, not a command)",
+    "category": "extraction",
+    "purpose": ("Extract Oracle tables → staging layer"),
+}
+
 log = get_run_logger("dpl.oracle_to_stg")
 
 CONFIG_FILE = "config/extractors/oracle_to_stg.yaml"

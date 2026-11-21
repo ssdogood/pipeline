@@ -20,6 +20,17 @@ from dpl.lib import pass_mgr
 from dpl.lib.logger import get_run_logger
 from dpl.lib.pause import pause_block_ok
 
+__func_msg__ = {
+    "name": "ldap connection",
+    "invocation": "",
+    "category": "extraction",
+    "purpose": (
+        "LDAP connection layer for Active Directory extraction:\n"
+        "   1. NTLM/Plain bind with vault-sourced credentials,\n"
+        "   2. paged search streaming entries page by page (memory-bounded)"
+    ),
+}
+
 log = get_run_logger("dpl.ldap")
 
 CONFIG_FILE = "config/extractors/ad_to_stg.yaml"

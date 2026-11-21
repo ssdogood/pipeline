@@ -19,4 +19,16 @@ Stage 4c: result.py - the structured never-raises SendResult, aligned
 """
 from dpl.lib.email_service.api import send_email
 
+__func_msg__ = {
+    "name": "email service",
+    "invocation": "",
+    "category": "notifications",
+    "purpose": (
+        "Email notification with failure isolation:\n"
+        "   1. vault-only SMTP credentials, deterministic recipient masking,\n"
+        "   2. ${key} templates rendered with injection resistance,\n"
+        "   3. templated alert emails per run (never raises on send)"
+    ),
+}
+
 __all__ = ["send_email"]

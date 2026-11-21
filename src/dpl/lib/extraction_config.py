@@ -39,6 +39,18 @@ import re
 
 from dpl.lib.logger import get_run_logger
 
+__func_msg__ = {
+    "name": "extraction config",
+    "invocation": "",
+    "category": "extraction",
+    "purpose": (
+        "Concurrency knobs for parallel extraction - validation, serial groups, run plan:\n"
+        "   1. global knobs (max_parallel_connections, keepalive_minutes),\n"
+        "   2. per-connection knobs (table_concurrency, retries, backoff, serial_group),\n"
+        "   3. builds the validated run plan consumed by the folder scheduler"
+    ),
+}
+
 log = get_run_logger("dpl.extraction_config")
 
 # Code-level defaults are the SAFE ones; the shipped settings file

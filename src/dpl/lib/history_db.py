@@ -68,6 +68,19 @@ from dpl.lib.common import load_settings
 from dpl.lib.logger import get_run_logger
 from dpl.lib.timefmt import require_utc_z
 
+__func_msg__ = {
+    "name": "history db",
+    "invocation": "",
+    "category": "operations",
+    "purpose": (
+        "SQLite run-history database (the only DB-touching module):\n"
+        "   1. per-run envelopes and per-table rows,\n"
+        "   2. pause fields and tables_paused mirror,\n"
+        "   3. consumers get connections, DDL and error types from here -\n"
+        "      sqlite3 appears in no other source file (ARCH-D1 doctrine)"
+    ),
+}
+
 log = get_run_logger("dpl.history")
 
 # ---------------------------------------------------------------------------

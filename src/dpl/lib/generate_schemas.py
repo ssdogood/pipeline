@@ -58,6 +58,13 @@ from dpl.lib.ora_connect import connect as oracle_connect
 from dpl.lib.pause import PAUSED, state_for
 from dpl.lib.session_pool import run_folder_tables
 
+__func_msg__ = {
+    "name": "generate-schemas",
+    "invocation": "dpl generate-schemas",
+    "category": "schema",
+    "purpose": ("Introspect source schemas → master CSV (any registered connector type)"),
+}
+
 log = get_run_logger("dpl.schema")
 
 

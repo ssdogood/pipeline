@@ -53,6 +53,18 @@ import polars as pl
 from dpl.lib.common import landing_dir, parse_dedup_spec
 from dpl.lib.logger import get_run_logger
 
+__func_msg__ = {
+    "name": "parquet writer",
+    "invocation": "",
+    "category": "storage",
+    "purpose": (
+        "Parquet writer - DuckDB staging, cleansing, atomic publish:\n"
+        "   1. stage Polars batches into DuckDB (arrival-order tagged),\n"
+        "   2. cleanse and optional dedup (earliest arrival wins),\n"
+        "   3. optional sort then atomic publish to the layer flow"
+    ),
+}
+
 log = get_run_logger("dpl.writer")
 
 

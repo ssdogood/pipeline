@@ -50,6 +50,18 @@ from typing import Any, Self
 
 from dpl.lib.logger import get_run_logger
 
+__func_msg__ = {
+    "name": "session pool",
+    "invocation": "",
+    "category": "extraction",
+    "purpose": (
+        "Long-lived per-folder sessions with error classification:\n"
+        "   1. one connection per folder, lazily opened, reused across tables,\n"
+        "   2. retries and backoff configurable per connection,\n"
+        "   3. retryable errors classified, not hardcoded substrings"
+    ),
+}
+
 log = get_run_logger("dpl.session_pool")
 
 # --- classification -----------------------------------------------------------
