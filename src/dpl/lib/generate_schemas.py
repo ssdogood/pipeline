@@ -591,6 +591,11 @@ def main() -> int:
         help="show diff without writing"
     )
     parser.add_argument(
+        "--settings",
+        default=str(env.folder / "settings.yaml"),
+        help=f"settings yaml (default: {env.folder / 'settings.yaml'})"
+    )
+    parser.add_argument(
         "--paused-table", action="store_true",
         help="PT-014: introspect paused tables too (manual pull of a "
              "paused table needs fresh schema truth)"
