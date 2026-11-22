@@ -6,7 +6,8 @@ Internal data extraction pipeline for pulling data from Oracle and Active Direct
 
 ```bash
 # 1. Build and activate the environment from the shipped definition
-#    (environment.yml provides the INTERPRETER only; pyproject.toml owns
+#    (environment.yml - CONDA interpreter only, no relation to the
+#     pipeline's config/environment.yaml selector; pyproject.toml owns
 #    every Python package - the single-owner rule)
 conda env create -f environment.yml
 conda activate dpl
@@ -106,14 +107,22 @@ pipeline
 │   └── sops_manifest.txt               # Pinned SOPS/Age checksums + download URLs
 ├── build
 ├── config                              # Runtime configuration
-│   ├── extractors                      # Extractor specific configurations
-│   │   └── backups
-│   ├── logging.yaml                    # Logging configuration
-│   ├── pass_mgr.laptop.yaml            # Password configuration - Dev
-│   ├── pass_mgr.prod.yaml              # Password configuration - Prod
-│   ├── run.yaml                        # Orchestrator configuration
-│   ├── settings.laptop.yaml            # Application level settings
-│   └── wrapper.yaml                    # Wrapper profiles configurations
+│   ├── environment.yaml                # THE ONE declaration of this machine's
+│   │                                   #   environment (development|test|production)
+│   ├── _templates                      # Documented skeleton - copy me for a
+│   │                                   #   full-fledged environment (REPLACE_ME_*)
+│   ├── _example                        # Minimal RUNNABLE - copy me to boot fast
+│   ├── development                     # ACTIVE env folder (GITIGNORED - machine
+│   │   │                               #   local; e.g. config/test/ on the office)
+│   │   ├── settings.yaml               #   Application level settings
+│   │   ├── pass_mgr.yaml               #   Vault configuration
+│   │   ├── run.yaml                    #   Pipe registry (orchestrator)
+│   │   ├── wrapper.yaml                #   Wrapper profiles
+│   │   ├── email_service.yaml          #   Email senders/recipients per env
+│   │   ├── smtp                        #   SMTP vault pseudo-connection
+│   │   └── extractors                  #   Pipe yamls + master CSVs + rules
+│   ├── email_templates                 # SHARED message bodies (never per-env)
+│   └── logging.yaml                    # SHARED logging config (never per-env)
 ├── data
 │   ├── agg                             # gold: aggregates/marts
 │   ├── cur                             # silver: typed, deduped, conformed

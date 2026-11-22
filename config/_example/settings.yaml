@@ -1,0 +1,31 @@
+# ==============================================================================
+# SETTINGS - MINIMAL RUNNABLE EXAMPLE (_example/)
+# ------------------------------------------------------------------------------
+# The smallest COMPLETE settings.yaml that passes strict validation and lets
+# the pipeline BOOT (nothing extracted - no real sources wired). Behaviour-
+# truth for "what does a valid minimal environment look like?" and the
+# pytest loadability baseline. Copy _templates/ for real environments;
+# this file demonstrates the end-state.
+# ==============================================================================
+
+polars:
+  batch_rows: 1000
+  strict_cast: true
+
+paths:
+  landing_root: data/staging
+  scratch_root: data/scratch
+  history_db: data/staging/_history/dpl_history.db
+
+duckdb:
+  memory_limit: 1GB
+  threads: 1
+
+writer:
+  compression: zstd
+  max_file_mb: 128
+  keep_scratch_on_success: false
+
+extraction:
+  max_parallel_connections: 1
+

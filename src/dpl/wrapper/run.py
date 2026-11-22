@@ -5,14 +5,15 @@ Runs from project root only (relative config paths, like every other
 module). No args -> profile 'inc'.
 
 WHICH PIPES RUN is configured, never discovered-from-disk:
-    config/run.yaml lists the pipes (yaml stems in config/extractors/)
+    <env-folder>/run.yaml lists the pipes (yaml stems in
+    <env-folder>/extractors/)
     that the wrapper executes, in that order. Unregistered yamls in the
     extractor folder are ignored (and logged as such). A registered name
     whose yaml is missing, a name registered twice, or a yaml whose
     connection type has no connector in lib/connectors.py aborts at
     Tier 1 with a named error and exit 3 - never a silent skip.
 
-    Add a pipe:    drop the yaml, add one line to config/run.yaml.
+    Add a pipe:    drop the yaml, add one line to <env-folder>/run.yaml.
     Add a connector: lib connector + extractor module + ONE entry in
         lib/connectors.py. This file never changes.
 
@@ -56,6 +57,7 @@ from dpl.lib.common import (
     validate_secrets_layout,
 )
 from dpl.lib.connectors import CONNECTORS
+from dpl.lib.environment import format_banner, resolve_environment
 from dpl.lib.extraction_config import (
     build_plan,
     format_plan,
@@ -93,10 +95,18 @@ EXIT_EXTRACT = 1
 EXIT_HISTORY = 2
 EXIT_CONFIG = 3
 
-SETTINGS_PATH = "config/settings.laptop.yaml"      # env override: DPL_SETTINGS
-EXTRACTOR_DIR = Path("config/extractors")
-RUN_REGISTRY = Path("config/run.yaml")
-WRAPCFG_PATH = "config/wrapper.yaml"
+# PT-040 4c: all per-run config files live INSIDE the active environment
+# folder (config/<env>/...). resolve_environment() is the single authority
+# for which folder that is; these constants are only the legacy defaults
+# kept for --settings override backwards compatibility, and the wrappers
+# resolve the folder-relative paths at runtime (see main()).
+# PT-040 4f: the laptop-era constant is retired - kept as a name only,
+# assigned None, so any accidental reference fails immediately rather
+# than pointing at a path that no longer exists.
+LEGACY_SETTINGS_PATH = None   # retired: settings live in the env folder
+EXTRACTOR_DIR = Path("config/development/extractors")   # default; resolved at runtime
+RUN_REGISTRY = Path("config/development/run.yaml")      # default; resolved at runtime
+WRAPCFG_PATH = "config/development/wrapper.yaml"        # default; resolved at runtime
 
 
 # ----------------------------------------------------------- run registry ---
@@ -112,7 +122,7 @@ class Pipe:
 
 
 def _load_run_registry(path: Path = RUN_REGISTRY) -> list[str]:
-    """Parse config/run.yaml; raise ValueError with named causes."""
+    """Parse the env folder's run.yaml; raise ValueError with named causes."""
     if not path.is_file():
         raise ValueError(
             f"run registry not found: {path}. Create it listing the "
@@ -208,7 +218,7 @@ def load_registered_pipes(registry_path: Path = RUN_REGISTRY,
     if unregistered:
         log = get_run_logger("dpl.wrapper")
         log.info("unregistered yaml(s) present, ignored: %s "
-                 "(register in config/run.yaml to run them)",
+                 "(register in the env folder's run.yaml to run them)",
                  ", ".join(unregistered))
     return pipes
 
@@ -288,7 +298,7 @@ def _validate_connection_name(pipes: list[Pipe], name: str) -> str | None:
         return (f"connection '{name}' is not declared on any "
                 f"registered pipe (checked: "
                 f"{', '.join(p.name for p in pipes) or 'none'}) - fix "
-                f"the name or register its pipe in config/run.yaml")
+                f"the name or register its pipe in the env folder's run.yaml")
     return None
 
 
@@ -317,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
                              "sessions); run NOTHING")
     parser.add_argument("--settings", default=None,
                         help="path to settings yaml "
-                             "(default: config/settings.laptop.yaml; "
+                             "(default: <environment folder>/settings.yaml; "
                              "env override DPL_SETTINGS)")
     args = parser.parse_args(argv)
 
@@ -328,8 +338,27 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------------
     # Tier 1: validate ALL configs before any step runs -> exit 3
     # ------------------------------------------------------------------
-    settings_path = args.settings or _settings_path_from_env()
-    wcfg = load_wrapper_config(WRAPCFG_PATH)
+    # PT-040 4a: resolve the ACTIVE environment first - Tier 1 config
+    # validation includes the environment itself. Refusals (missing
+    # selector, invalid vocabulary word, missing env folder) exit 3
+    # before anything else loads.
+    try:
+        env = resolve_environment()
+        log.info("%s", format_banner(env))
+    except ValueError as e:
+        log.error("environment resolution failed - aborting: %s", e)
+        return EXIT_CONFIG
+
+    # PT-040 4c: every per-run config derives from the env folder.
+    # --settings / DPL_SETTINGS remain explicit operator overrides
+    # (documented escape hatch); everything else follows the resolver.
+    extractor_dir = env.folder / "extractors"
+    run_registry = env.folder / "run.yaml"
+    wrapcfg_path = str(env.folder / "wrapper.yaml")
+    settings_path = args.settings or _settings_path_from_env() \
+        or str(env.folder / "settings.yaml")
+
+    wcfg = load_wrapper_config(wrapcfg_path)
     settings = load_settings(settings_path)
     if wcfg is None or settings is None:
         log.error("wrapper/settings config validation failed - aborting")
@@ -342,12 +371,13 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_CONFIG
 
     try:
-        pipes = load_registered_pipes()
+        pipes = load_registered_pipes(registry_path=run_registry,
+                                      extractor_dir=extractor_dir)
     except ValueError as e:
         log.error("run registry / pipe routing failed - aborting: %s", e)
         return EXIT_CONFIG
     if not pipes:
-        log.error("no pipes registered in config/run.yaml")
+        log.error("no pipes registered in the env folder's run.yaml")
         return EXIT_CONFIG
 
     # Global extraction knobs: present-but-invalid is a CONFIG error
@@ -389,18 +419,13 @@ def main(argv: list[str] | None = None) -> int:
         log.error("%s", e)
         return EXIT_CONFIG
 
-    # Vault-backed logins: settings must name the pass_mgr environment;
+    # Vault-backed logins (PT-040 4a): the vault config comes from the
+    # ACTIVE environment folder - resolved, never named by config.
     # init here so every extractor inherits it (idempotent per process).
-    pm_env = (settings.get("pass_mgr") or {}).get("environment")
-    if not pm_env:
-        log.error(
-            "settings file %s must declare the vault environment, e.g.\n"
-            "  pass_mgr:\n    environment: laptop", settings_path)
-        return EXIT_CONFIG
     try:
         validate_secrets_layout()
         from dpl.lib import pass_mgr
-        pass_mgr.init(pm_env)
+        pass_mgr.init(env.folder / "pass_mgr.yaml")
     except (ValueError, FileNotFoundError) as e:
         log.error("vault unavailable - aborting: %s", e)
         return EXIT_CONFIG
@@ -751,9 +776,13 @@ def main(argv: list[str] | None = None) -> int:
     return exit_code
 
 
-def _settings_path_from_env() -> str:
+def _settings_path_from_env() -> str | None:
+    """DPL_SETTINGS env override, or None (fall back to the env folder).
+
+    PT-040 4c: the legacy hardcoded default is GONE - when no override
+    exists, settings come from the active environment folder."""
     import os
-    return os.environ.get("DPL_SETTINGS", SETTINGS_PATH)
+    return os.environ.get("DPL_SETTINGS") or None
 
 
 if __name__ == "__main__":

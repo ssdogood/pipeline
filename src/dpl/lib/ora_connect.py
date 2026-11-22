@@ -2,7 +2,7 @@
 """
 Oracle connection and query helpers (python-oracledb thin mode).
 
-Config:     config/extractors/oracle_to_stg.yaml (connections, tables)
+Config:     <env-folder>/extractors/oracle_to_stg.yaml (connections, tables)
 Secrets:    pass_mgr vaults - per-user credential_ref; the vault method is
              chosen by default_method in pass_mgr.<env>.yaml. Plaintext
              password files are NOT supported (removed by design).
@@ -32,8 +32,10 @@ __func_msg__ = {
 log = get_run_logger("dpl.ora")
 
 
-CONFIG_FILE = "config/extractors/oracle_to_stg.yaml"
-SETTINGS_FILE = "config/settings.laptop.yaml"
+# PT-040 4b: manual-CLI hint paths - values live in the ACTIVE env
+# folder (config/<env>/extractors/, config/<env>/settings.yaml).
+CONFIG_FILE = "<env-folder>/extractors/oracle_to_stg.yaml"
+SETTINGS_FILE = "<env-folder>/settings.yaml"
 
 DEFAULT_BATCH_SIZE = 50_000
 

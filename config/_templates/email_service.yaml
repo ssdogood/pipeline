@@ -1,0 +1,39 @@
+# =============================================================================
+# EMAIL SERVICE - per-environment config (copy of _templates/ filled per env)
+# Shape identical to config/email_service.yaml; every operator-editable value
+# marked. Password lives ONLY in the vault (password_ref) - a literal
+# 'password:' key is a LOAD ERROR by design.
+# =============================================================================
+
+email:
+  host: REPLACE_ME_RELAY_HOST        # e.g. smtp.example.org
+  port: 465
+  mode: ssl                           # ssl | starttls | plain
+  auth:
+    scheme: basic
+    username: REPLACE_ME_RELAY_USER   # literal OK (public); OR username_ref
+    password_ref: smtp.password.secret
+  sender: REPLACE_ME_SENDER_ADDRESS
+  allow_html: true
+  allow_bcc: false
+  allowed_recipient_domains: []       # [] = any domain
+  attachments:
+    allowed_extensions: [csv, xlsx, log, txt, parquet]
+    max_total_mb: 10
+  retries: 2
+  timeout_sec: 30
+  dry_run: true                      # REQUIRED - false only when live
+  templates_dir: config/email_templates   # SHARED bodies; env-neutral
+  outbox_dir: logs/email_outbox
+
+callers:
+  # Copy, rename, enable - create the template file first.
+  # run_started/run_completed/run_failed/pause_stale are event callers
+  # (protected/enabled semantics - see config.py PROTECTED_CALLERS).
+  run_failed:
+    enabled: true
+    to: [REPLACE_ME_OPS_RECIPIENT]
+    template: run_failed.txt
+    use_html: true
+    data:
+      subject: "[dpl] run FAILED - operator attention required"

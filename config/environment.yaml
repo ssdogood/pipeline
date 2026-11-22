@@ -1,0 +1,14 @@
+# config/environment.yaml
+#
+# THE one and only place where this machine's environment is declared.
+# Exactly one key is allowed:
+#
+#   environment: development   # dev tier - experiment freely
+#   environment: test          # integration tier - real Oracle/AD
+#   environment: production    # live tier - not yet in existence
+#
+# The value must name an existing folder beside this file, e.g.
+# config/development/ holds this machine's real config files.
+# The words development/test/production appear nowhere else in the
+# tree - a file's environment comes from where it sits, never its name.
+environment: development

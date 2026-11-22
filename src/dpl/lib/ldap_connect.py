@@ -33,7 +33,9 @@ __func_msg__ = {
 
 log = get_run_logger("dpl.ldap")
 
-CONFIG_FILE = "config/extractors/ad_to_stg.yaml"
+# PT-040 4b: manual-CLI hint path - values live in the ACTIVE env
+# folder (config/<env>/extractors/).
+CONFIG_FILE = "<env-folder>/extractors/ad_to_stg.yaml"
 PAGE_SIZE_DEFAULT = 500
 AUTH_MAP = {"ntlm": NTLM, "simple": SIMPLE}
 

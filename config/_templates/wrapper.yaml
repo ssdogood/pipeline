@@ -1,0 +1,32 @@
+# ==============================================================================
+# WRAPPER CONFIG - BLANK SKELETON (_templates/)
+# ------------------------------------------------------------------------------
+# Orchestration policy (not paths, not tuning - those live in
+# settings.yaml). Validated by wrapper/profiles.WRAPPER_SCHEMA. The
+# step vocabulary is CLOSED: generate_schemas | reconcile_pending |
+# extract | update_history | housekeeping - unknown step name -> exit 3.
+# ==============================================================================
+
+retention:
+  landing_days: 10        # landing date-dirs kept (DuckLake bronze window)
+  manifest_days: 90       # runs/ archive kept; ALSO the update_history window
+
+run_id:
+  prefix: "run_"
+  ts_format: "%Y%m%d_%H%M%S"
+
+profiles:
+
+  full:                   # nightly default: regenerate, reconcile, extract all
+    steps:
+      - {name: generate_schemas, force: false}
+      - {name: reconcile_pending}
+      - {name: extract, force: true}
+      - {name: update_history}
+      - {name: housekeeping}
+
+  inc:                    # incremental: skip-if-exists semantics
+    steps:
+      - {name: extract, force: false}
+      - {name: update_history}
+      - {name: housekeeping}

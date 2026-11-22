@@ -40,3 +40,8 @@ data_pipe_line_project*
 *.egg-info/
 build/
 dist/
+
+# # PT-040 environment folders (machine-local; committed per-machine selector only)
+config/development/
+config/test/
+config/production/

@@ -263,13 +263,18 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m dpl.wrapper.update_history",
         description="Ingest manifest envelopes into the SQLite history DB")
     parser.add_argument("--db", help="DB path (default: derived from settings)")
-    parser.add_argument("--settings", default="config/settings.laptop.yaml")
+    parser.add_argument("--settings", default=None,
+                        help="path to settings yaml "
+                             "(default: <environment folder>/settings.yaml)")
     parser.add_argument("--days", type=int, default=90,
                         help="backfill window == manifest retention")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
-    settings = load_settings(args.settings)
+    from dpl.lib.environment import resolve_environment
+    settings_path = args.settings or str(
+        resolve_environment().folder / "settings.yaml")
+    settings = load_settings(settings_path)
     if settings is None:
         return 3                                        # config error
 

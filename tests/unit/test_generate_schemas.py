@@ -85,13 +85,20 @@ CFG = {
 
 # ------------------------------------------------------------ fixtures
 @pytest.fixture
-def env(monkeypatch):
+def env(monkeypatch, tmp_path):
     """Neutralize startup: config, settings, vault, secrets layout."""
     monkeypatch.setattr(gs, "load_config", lambda *a, **k: dict(CFG))
     monkeypatch.setattr(gs, "load_settings",
-                        lambda *a, **k: {"pass_mgr": {"environment": "test"}})
+                        lambda *a, **k: {})  # pass_mgr section retired (PT-040 4a)
     monkeypatch.setattr(gs, "validate_secrets_layout", lambda: None)
-    monkeypatch.setattr(gs.pass_mgr, "init", lambda _env: None)
+    # PT-040 4a: generator resolves the env folder itself - point the
+    # resolver at a scratch tree, never this machine's real config/.
+    from dpl.lib.environment import ResolvedEnvironment
+    scratch = ResolvedEnvironment(
+        name="development",
+        folder=tmp_path / "config" / "development")
+    monkeypatch.setattr(gs, "resolve_environment", lambda: scratch)
+    monkeypatch.setattr(gs.pass_mgr, "init", lambda _e: None)
 
 
 def patch_connect(monkeypatch, calls: list[str]):

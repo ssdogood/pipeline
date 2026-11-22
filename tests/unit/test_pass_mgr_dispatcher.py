@@ -90,7 +90,7 @@ class TestCrossProviderRouting:
         # value - either way this assertion catches it.
         build_mixed_world(project)
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         assert get_secret("oracle.stg_pass") == "0ra-stg-pw-7f3"
         assert get_secret("ldap.service_pass") == "ld4p-svc-pw-9k1"
         assert get_secret("hpc.api_token") == "hpc-tok-42aa"
@@ -103,12 +103,12 @@ class TestCrossProviderRouting:
         # ONLY the assigned vault). Meanwhile a name the fernet vault
         # genuinely lacks is a layer-2 SecretNotFound naming the method.
         build_mixed_world(project)
-        cfg_path = project.root / "config" / "pass_mgr.laptop.yaml"
+        cfg_path = project.root / "config" / "development" / "pass_mgr.yaml"
         text = cfg_path.read_text(encoding="utf-8")
         text += "  missing.everywhere: {}\n"
         cfg_path.write_text(text, encoding="utf-8")
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         with pytest.raises(PassMgrSecretNotFoundError, match="missing.everywhere"):
             get_secret("missing.everywhere")
 
@@ -117,7 +117,7 @@ class TestCrossProviderRouting:
         # cross-provider bleed would surface as a wrong value.
         build_mixed_world(project)
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         expected = {
             "oracle.stg_pass": "0ra-stg-pw-7f3",
             "hpc.api_token": "hpc-tok-42aa",
@@ -157,7 +157,7 @@ class TestCacheInvocations:
 
         monkeypatch.setattr(providers_module.subprocess, "run", counting_run)
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         for i in range(5):
             get_secret("oracle.stg_pass")     # sops vault, repeatedly
             get_secret("hpc.api_token")       # fernet vault interleaved
@@ -182,10 +182,10 @@ class TestCacheInvocations:
 
         providers_module.subprocess.run = counting_run
         try:
-            init("laptop", project_root=project.root)
+            init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
             get_secret("oracle.stg_pass")     # probe + decrypt = 2
             reset()                           # simulate a fresh process
-            init("laptop", project_root=project.root)
+            init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
             get_secret("oracle.stg_pass")     # probe + decrypt AGAIN = 4
         finally:
             providers_module.subprocess.run = real_run
@@ -207,7 +207,7 @@ class TestInterfaceIsolation:
         # must refuse with a typed error naming the method and the
         # known implementations.
         build_mixed_world(project)
-        cfg_path = project.root / "config" / "pass_mgr.laptop.yaml"
+        cfg_path = project.root / "config" / "development" / "pass_mgr.yaml"
         text = cfg_path.read_text(encoding="utf-8")
         # define a vault section and point a secret at it
         text = text.replace(
@@ -222,7 +222,7 @@ class TestInterfaceIsolation:
         saved = providers_module.PROVIDER_TYPES.copy()
         providers_module.PROVIDER_TYPES.pop("vault", None)
         try:
-            init("laptop", project_root=project.root)
+            init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
             with pytest.raises(PassMgrConfigError, match="vault"):
                 get_secret("future.secret")
         finally:
@@ -251,9 +251,9 @@ class TestInterfaceIsolation:
 
         providers_module.subprocess.run = counting_run
         try:
-            init("laptop", project_root=project.root)
+            init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
             get_secret("oracle.stg_pass")
-            init("laptop", project_root=project.root)   # same env: no-op
+            init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)   # same env: no-op
             get_secret("ldap.service_pass")
         finally:
             providers_module.subprocess.run = real_run
@@ -287,10 +287,10 @@ class TestInterfaceIsolation:
             },
         )
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         assert get_secret("oracle.stg_pass") == "0ra-stg-pw-7f3"
 
-        init("prod", project_root=project.root)
+        init(project.root / "config" / "production" / "pass_mgr.yaml", project_root=project.root)
         assert get_secret("hpc.api_token") == "hpc-tok-42aa"
         # and the laptop-only name is now legitimately unknown
         with pytest.raises(PassMgrConfigError, match="oracle.stg_pass"):
@@ -321,7 +321,7 @@ class TestSpySanity:
 
         providers_module.subprocess.run = counting_run
         try:
-            init("laptop", project_root=project.root)
+            init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
             get_secret("oracle.stg_pass")
         finally:
             providers_module.subprocess.run = real_run

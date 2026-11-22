@@ -69,7 +69,15 @@ from dpl.lib.paths import get_project_root
 log = get_run_logger("dpl.email.config")
 
 PROJECT_ROOT = get_project_root()
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "email_service.yaml"
+# PT-040 4e: the email config is per-ENVIRONMENT - resolve the active
+# environment folder at import time (the resolver is Tier-1 in every
+# entrypoint; email_service is never loaded before it).
+def _default_email_config_path() -> Path:
+    from dpl.lib.environment import resolve_environment
+    return resolve_environment().folder / "email_service.yaml"
+
+
+DEFAULT_CONFIG_PATH = _default_email_config_path()
 
 #: reserved template keys - stamped by the service at compose time
 #: (architecture: reserved-keys rule). Caller data or caller-config

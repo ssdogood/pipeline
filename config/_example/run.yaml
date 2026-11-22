@@ -1,0 +1,10 @@
+# ==============================================================================
+# RUN REGISTRY - example
+# ------------------------------------------------------------------------------
+# Example: zero pipes registered = the pipeline boots, validates, and runs
+# NOTHING (a valid, safe demonstration end-state; wrapper prints "no pipes
+# registered" as its refusal). Real environments register real pipe names
+# in execution order - see _templates/run.yaml.
+# ==============================================================================
+
+pipes: []

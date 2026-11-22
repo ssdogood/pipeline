@@ -65,6 +65,7 @@ from dpl.lib.common import (
     validate_secrets_layout,
     write_manifest,
 )
+from dpl.lib.environment import resolve_environment
 from dpl.lib.ldap_connect import LDAP_CONFIG_SCHEMA, connect, iter_paged
 from dpl.lib.logger import get_run_logger, setup_logging
 from dpl.lib.pause import (
@@ -90,8 +91,20 @@ log = get_run_logger("dpl.ad_to_stg")
 CONFIG_FILE = "config/extractors/ad_to_stg.yaml"
 SETTINGS_FILE = "config/settings.laptop.yaml"
 
-MASTER_AUTO = "config/extractors/schema_master_ad_to_stg.csv"
-RULES_CSV = "config/extractors/table_rules_ad_to_stg.csv"
+# PT-040 4f: registry paths resolved from the ACTIVE env folder at
+# call time (the constants remain as documentation hints only).
+MASTER_AUTO = "<env-folder>/extractors/schema_master_ad_to_stg.csv"
+RULES_CSV = "<env-folder>/extractors/table_rules_ad_to_stg.csv"
+
+
+def _master_auto() -> str:
+    return str(resolve_environment().folder / "extractors"
+               / "schema_master_ad_to_stg.csv")
+
+
+def _rules_csv() -> str:
+    return str(resolve_environment().folder / "extractors"
+               / "table_rules_ad_to_stg.csv")
 
 # Which connection *type* this extractor handles - selection is by type, # never by connection name (same rule as oracle_to_stg).
 SOURCE_TYPE = "ldap"
@@ -452,19 +465,15 @@ def prepare_run(
     table_collision_check(cfg)
     validate_secrets_layout()
 
-    # Vault init: settings name the pass_mgr environment; idempotent, so
-    # sharing a process with the Oracle extractor is fine.
-    pm_env = (settings.get("pass_mgr") or {}).get("environment")
-    if not pm_env:
-        raise ValueError(
-            "settings file must declare the vault environment, e.g.:\n"
-            "  pass_mgr:\n    environment: laptop")
-    pass_mgr.init(pm_env)
+    # Vault init (PT-040 4a): the vault config comes from the ACTIVE
+    # environment folder; idempotent, so sharing a process with the
+    # Oracle extractor is fine.
+    pass_mgr.init(resolve_environment().folder / "pass_mgr.yaml")
 
     # --- master CSV: load once, cross-check against config, then it rules ---
-    schema_master = load_schema_master(MASTER_AUTO)
+    schema_master = load_schema_master(_master_auto())
     validate_master_vs_config(cfg, schema_master, SOURCE_TYPE)
-    rules = load_table_rules(RULES_CSV)
+    rules = load_table_rules(_rules_csv())
     validate_rules_references(schema_master, rules)
 
     rlog.info("schema master loaded: %d table(s)", len(schema_master))
@@ -712,8 +721,14 @@ def main(run_id: str = "-") -> int:
                         help="with --tables naming paused table(s), "
                              "lift their TABLE-level pause for this run")
     parser.add_argument("-v", "--verbose", action="store_true", help="verbose logging")
-    parser.add_argument("-c", "--config", default=CONFIG_FILE, help="config/extractors/oracle_to_stg.yaml")
-    parser.add_argument("--settings", default=SETTINGS_FILE, help="config/settings.laptop.yaml")
+    from dpl.lib.environment import resolve_environment
+    _env = resolve_environment()
+    parser.add_argument("-c", "--config",
+                        default=str(_env.folder / "extractors" / "ad_to_stg.yaml"),
+                        help="pipe yaml (default: <env-folder>/extractors/ad_to_stg.yaml)")
+    parser.add_argument("--settings",
+                        default=str(_env.folder / "settings.yaml"),
+                        help="settings yaml (default: <env-folder>/settings.yaml)")
 
     args = parser.parse_args()
 

@@ -53,6 +53,7 @@ from dpl.lib.common import (
     validate_secrets_layout,
 )
 from dpl.lib.connectors import CONNECTORS
+from dpl.lib.environment import resolve_environment
 from dpl.lib.logger import get_run_logger, setup_logging
 from dpl.lib.ora_connect import connect as oracle_connect
 from dpl.lib.pause import PAUSED, state_for
@@ -68,9 +69,12 @@ __func_msg__ = {
 log = get_run_logger("dpl.schema")
 
 
-CONFIG_FILE = "config/extractors/oracle_to_stg.yaml"
-SETTINGS_FILE = "config/settings.laptop.yaml"
-OUTPUT_FILE = "config/extractors/schema_master_oracle_to_stg.csv"
+# PT-040 4b: legacy manual-CLI defaults - kept ONLY as historical
+# docstrings for the manual workflow; the resolved defaults come from
+# the ACTIVE ENV FOLDER at runtime (see main()).
+CONFIG_FILE = "<env-folder>/extractors/oracle_to_stg.yaml"
+SETTINGS_FILE = "<env-folder>/settings.yaml"
+OUTPUT_FILE = "<env-folder>/extractors/schema_master_oracle_to_stg.csv"
 BACKUP_KEEP = 30
 
 # ----------------------------------------------------------- type mapping
@@ -273,7 +277,7 @@ def diff_master(old: dict[str, dict], new: dict[str, dict]) -> dict[str, list[st
 
 def generate_schemas(config_path: str, output_path: str,
                      force: bool, dry_run: bool,
-                     settings_path: str = SETTINGS_FILE,
+                     settings_path: str | None = None,
                      source_type: str | None = None, 
                      paused_override: bool = False) -> int:
     """Main generation routine for ONE pipe (single connector type).
@@ -296,6 +300,10 @@ def generate_schemas(config_path: str, output_path: str,
 
     Returns: 0 success, 1 partial failure or declaration error.
     """
+    # PT-040 4b: no explicit settings path -> the ACTIVE env folder's
+    settings_path = settings_path or str(
+        resolve_environment().folder / "settings.yaml")
+
     # ---- resolve the pipe's single connection type
     if source_type is None:
         # CLI path: no caller to declare the type - peek the yaml.
@@ -344,14 +352,9 @@ def generate_schemas(config_path: str, output_path: str,
     if settings is None:
         log.critical("settings load failed: %s", settings_path)
         return 1
-    pm_env = (settings.get("pass_mgr") or {}).get("environment")
-    if not pm_env:
-        log.critical(
-            "settings file %s must declare the vault environment, e.g.:\n"
-            "  pass_mgr:\n    environment: laptop", settings_path)
-        return 1
     validate_secrets_layout()
-    pass_mgr.init(pm_env)
+    # PT-040 4a: the vault config comes from the ACTIVE environment folder.
+    pass_mgr.init(resolve_environment().folder / "pass_mgr.yaml")
 
     connect_fn = intro["connect"]
     dtype_mapper = intro["dtype_mapper"]
@@ -574,13 +577,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Bootstrap schema master CSV from configured sources"
     )
+    env = resolve_environment()
+    default_config = str(env.folder / "extractors" / "oracle_to_stg.yaml")
+    default_out = str(
+        env.folder / "extractors" / "schema_master_oracle_to_stg.csv")
     parser.add_argument(
-        "--config", default=CONFIG_FILE,
-        help=f"path to config.yaml (default: {CONFIG_FILE})"
+        "--config", default=default_config,
+        help=f"path to config.yaml (default: {default_config})"
     )
     parser.add_argument(
-        "--out", default=OUTPUT_FILE,
-        help=f"output path for master CSV (default: {OUTPUT_FILE})"
+        "--out", default=default_out,
+        help=f"output path for master CSV (default: {default_out})"
     )
     parser.add_argument(
         "--force", action="store_true",
@@ -589,6 +596,11 @@ def main() -> int:
     parser.add_argument(
         "--dry-run", action="store_true",
         help="show diff without writing"
+    )
+    parser.add_argument(
+        "--settings",
+        default=str(env.folder / "settings.yaml"),
+        help=f"settings yaml (default: {env.folder / 'settings.yaml'})"
     )
     parser.add_argument(
         "--paused-table", action="store_true",

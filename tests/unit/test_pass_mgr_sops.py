@@ -82,7 +82,7 @@ class TestRoundTrip:
         # end-to-end through the public interface callers will use.
         build_working_sops_setup(project, sample_entries)
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         assert get_secret("oracle.stg_pass") == "0ra-stg-pw-7f3"
         assert get_secret("ldap.service_pass") == "ld4p-svc-pw-9k1"
 
@@ -91,7 +91,7 @@ class TestRoundTrip:
         # 'oracle.stg_pass'. The flattening contract lives here.
         build_working_sops_setup(project, sample_entries)
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         vault_keys = {"oracle.stg_pass", "ldap.service_pass"}
         # both names resolvable, and distinct values (no cross-wiring)
         assert get_secret("oracle.stg_pass") != get_secret("ldap.service_pass")
@@ -104,7 +104,7 @@ class TestRoundTrip:
             secrets={"app.subsystem.deep_pass": {}},
         )
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         assert get_secret("app.subsystem.deep_pass") == "d33p-v4lue"
 
     def test_non_string_leaf_refused(self, project):
@@ -116,7 +116,7 @@ class TestRoundTrip:
             secrets={"oracle.numeric": {}},
         )
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         with pytest.raises(PassMgrDecryptError, match="string"):
             get_secret("oracle.numeric")
 
@@ -150,12 +150,12 @@ class TestFailureModes:
 
         # break the one knob: point the config at a nonexistent binary
         real_binary = project.binary_path("sops")
-        cfg_path = project.root / "config" / "pass_mgr.laptop.yaml"
+        cfg_path = project.root / "config" / "development" / "pass_mgr.yaml"
         cfg_text = cfg_path.read_text(encoding="utf-8")
         cfg_text = cfg_text.replace(real_binary, "bin/sops-v0.0.0.absent")
         cfg_path.write_text(cfg_text, encoding="utf-8")
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         with pytest.raises(PassMgrBinaryMissingError, match="sops-v0.0.0.absent"):
             get_secret("oracle.stg_pass")
 
@@ -165,7 +165,7 @@ class TestFailureModes:
         build_working_sops_setup(project, sample_entries)
         (project.secrets_dir / "age.key").unlink()
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         with pytest.raises(PassMgrKeyFileMissingError, match="age.key"):
             get_secret("oracle.stg_pass")
 
@@ -176,7 +176,7 @@ class TestFailureModes:
         project.write_config_default()
         # no vault created; key exists so probes pass until the vault
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         with pytest.raises(PassMgrConfigError, match="secrets.sops.yaml"):
             get_secret("oracle.stg_pass")
 
@@ -190,7 +190,7 @@ class TestFailureModes:
         (project.secrets_dir / "age.key").unlink()  # age-keygen refuses overwrite
         project.add_age_identity()
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         with pytest.raises(PassMgrDecryptError, match="failed to decrypt"):
             get_secret("oracle.stg_pass")
 
@@ -207,7 +207,7 @@ class TestFailureModes:
         flipped = text[:mid] + ("\n" if text[mid] != "\n" else " ") + text[mid + 1 :]
         vault.write_text(flipped, encoding="utf-8")
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         with pytest.raises(PassMgrDecryptError):
             get_secret("oracle.stg_pass")
         
@@ -243,7 +243,7 @@ class TestFailureModes:
             _providers, "SOPS_TIMEOUT_SECONDS", 0.5
         )
         try:
-            init("laptop", project_root=project.root)
+            init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
             with pytest.raises(PassMgrDecryptError, match="timed out"):
                 get_secret("oracle.stg_pass")
         finally:
@@ -252,14 +252,14 @@ class TestFailureModes:
     def test_secret_in_config_but_missing_from_vault(self, project, sample_entries):
         # Layer-2 not-found: config lists a name the vault never held.
         build_working_sops_setup(project, sample_entries)
-        cfg_path = project.root / "config" / "pass_mgr.laptop.yaml"
+        cfg_path = project.root / "config" / "development" / "pass_mgr.yaml"
         cfg_text = cfg_path.read_text(encoding="utf-8")
         cfg_text = cfg_text.replace(
             "ldap.service_pass: {}", "ldap.service_pass: {}\n  hpc.api_token: {}"
         )
         cfg_path.write_text(cfg_text, encoding="utf-8")
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         with pytest.raises(PassMgrSecretNotFoundError, match="hpc.api_token"):
             get_secret("hpc.api_token")
 
@@ -291,7 +291,7 @@ class TestVersionPinning:
         )
         manifest.write_text(text, encoding="utf-8")
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         with pytest.raises(PassMgrVersionMismatchError, match="9.9.9"):
             get_secret("oracle.stg_pass")
 
@@ -303,7 +303,7 @@ class TestVersionPinning:
         # one.
         build_working_sops_setup(project, sample_entries)
 
-        cfg_path = project.root / "config" / "pass_mgr.laptop.yaml"
+        cfg_path = project.root / "config" / "development" / "pass_mgr.yaml"
         cfg_text = cfg_path.read_text(encoding="utf-8")
         cfg_text = cfg_text.replace(
             f"binary: {project.binary_path('sops')}",
@@ -311,7 +311,7 @@ class TestVersionPinning:
         )
         cfg_path.write_text(cfg_text, encoding="utf-8")
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         with pytest.raises(PassMgrVersionMismatchError):
             get_secret("oracle.stg_pass")
 
@@ -321,7 +321,7 @@ class TestVersionPinning:
         # version pin - but decryption still works. Degrade, don't die.
         build_working_sops_setup(project, sample_entries)
 
-        cfg_path = project.root / "config" / "pass_mgr.laptop.yaml"
+        cfg_path = project.root / "config" / "development" / "pass_mgr.yaml"
         cfg_text = cfg_path.read_text(encoding="utf-8")
         lines = [
             ln for ln in cfg_text.splitlines()
@@ -329,7 +329,7 @@ class TestVersionPinning:
         ]
         cfg_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         assert get_secret("oracle.stg_pass") == "0ra-stg-pw-7f3"
 
     def test_corrupt_manifest_is_hard_error(self, project, sample_entries):
@@ -344,6 +344,6 @@ class TestVersionPinning:
         )
         manifest.write_text(text + "\n", encoding="utf-8")
 
-        init("laptop", project_root=project.root)
+        init(project.root / "config" / "development" / "pass_mgr.yaml", project_root=project.root)
         with pytest.raises(PassMgrConfigError, match="manifest"):
             get_secret("oracle.stg_pass")

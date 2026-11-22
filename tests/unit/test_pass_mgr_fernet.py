@@ -94,7 +94,7 @@ class TestRoundTrip:
         project_nobin.add_fernet_envelope(flat_sample_entries)
         write_fernet_config(project_nobin)
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         assert get_secret("oracle.stg_pass") == "0ra-stg-pw-7f3"
         assert get_secret("ldap.service_pass") == "ld4p-svc-pw-9k1"
 
@@ -104,7 +104,7 @@ class TestRoundTrip:
         project_nobin.add_fernet_envelope(flat_sample_entries)
         write_fernet_config(project_nobin)
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         a = get_secret("oracle.stg_pass")
         b = get_secret("ldap.service_pass")
         assert a != b
@@ -118,7 +118,7 @@ class TestRoundTrip:
         project_nobin.add_fernet_envelope(flat_sample_entries)
         write_fernet_config(project_nobin)
 
-        cfg = load_config("laptop", project_root=project_nobin.root)
+        cfg = load_config(project_nobin.root / "config" / "laptop", project_root=project_nobin.root)
         provider = FernetProvider(cfg.method_sections["fernet"], cfg)
         assert provider.load() == flat_sample_entries
 
@@ -138,7 +138,7 @@ class TestFailureModes:
         write_fernet_config(project_nobin)
         (project_nobin.secrets_dir / "fernet.key").unlink()
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         with pytest.raises(PassMgrKeyFileMissingError, match="fernet.key"):
             get_secret("oracle.stg_pass")
 
@@ -156,7 +156,7 @@ class TestFailureModes:
         write_fernet_config(project_nobin)
         # no envelope created
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         with pytest.raises(PassMgrConfigError, match="secrets.fernet.bin"):
             get_secret("oracle.stg_pass")
 
@@ -174,7 +174,7 @@ class TestFailureModes:
             Fernet.generate_key()  # a DIFFERENT key
         )
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         with pytest.raises(PassMgrDecryptError, match="wrong key or corrupted"):
             get_secret("oracle.stg_pass")
 
@@ -194,7 +194,7 @@ class TestFailureModes:
         token[len(token) // 2] ^= 0xFF  # flip one byte in the middle
         blob_path.write_bytes(bytes(token))
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         with pytest.raises(PassMgrDecryptError):
             get_secret("oracle.stg_pass")
 
@@ -208,7 +208,7 @@ class TestFailureModes:
             "not-a-valid-fernet-key", encoding="utf-8"
         )
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         with pytest.raises((PassMgrConfigError, PassMgrDecryptError)):
             get_secret("oracle.stg_pass")
 
@@ -227,7 +227,7 @@ class TestFailureModes:
             bytes([0xDE, 0xAD, 0xBE, 0xEF] * 8)
         )
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         with pytest.raises(PassMgrDecryptError):
             get_secret("oracle.stg_pass")
 
@@ -261,7 +261,7 @@ class TestEnvelopeFormat:
         )
         write_fernet_config(project_nobin)
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         with pytest.raises(PassMgrDecryptError, match="version"):
             get_secret("oracle.stg_pass")
 
@@ -274,7 +274,7 @@ class TestEnvelopeFormat:
         )
         write_fernet_config(project_nobin)
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         with pytest.raises(PassMgrDecryptError, match="entries"):
             get_secret("oracle.stg_pass")
 
@@ -292,7 +292,7 @@ class TestEnvelopeFormat:
         )
         write_fernet_config(project_nobin)
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         with pytest.raises(PassMgrDecryptError, match="string"):
             get_secret("oracle.stg_pass")
 
@@ -302,7 +302,7 @@ class TestEnvelopeFormat:
         self._seal_custom_envelope(project_nobin, ["not", "an", "object"])
         write_fernet_config(project_nobin)
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         with pytest.raises(PassMgrDecryptError, match="JSON object"):
             get_secret("oracle.stg_pass")
 
@@ -325,7 +325,7 @@ class TestCacheBehaviour:
         project_nobin.add_fernet_envelope(flat_sample_entries)
         write_fernet_config(project_nobin)
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         first = get_secret("oracle.stg_pass")
 
         (project_nobin.secrets_dir / "secrets.fernet.bin").unlink()
@@ -348,7 +348,7 @@ class TestCacheBehaviour:
             },
         )
 
-        init("laptop", project_root=project_nobin.root)
+        init(project_nobin.root / "config" / "laptop" / "pass_mgr.yaml", project_root=project_nobin.root)
         with pytest.raises(PassMgrSecretNotFoundError, match="hpc.api_token"):
             get_secret("hpc.api_token")
 
@@ -381,7 +381,7 @@ class TestProviderConstruction:
             },
         )
 
-        cfg = load_config("laptop", project_root=project_nobin.root)
+        cfg = load_config(project_nobin.root / "config" / "laptop", project_root=project_nobin.root)
         with pytest.raises(PassMgrConfigError, match="encrypted_file"):
             FernetProvider(cfg.method_sections["fernet"], cfg)
 
@@ -399,7 +399,7 @@ class TestEnvelopeHeaderTolerance:
     def _cfg(tmp_path) -> PassMgrConfig:
         """Minimal but REAL config object - providers only use base_dir."""
         return PassMgrConfig(
-            environment="test",
+            env_folder=tmp_path,
             is_production=False,
             default_method="fernet",
             method_sections={},

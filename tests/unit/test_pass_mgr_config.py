@@ -55,12 +55,15 @@ from dpl.lib.pass_mgr._config import load_config, resolve_relative_path
 def write_config(root: Path, environment: str, config: dict) -> Path:
     """Write a pass_mgr config into a minimal temp tree.
 
-    Mirrors exactly one thing from the real layout:
-    <root>/config/pass_mgr.<environment>.yaml
+    PT-040 4a layout: <root>/config/<environment>/pass_mgr.yaml.
+    The environment WORD labels the SCRATCH folder only - the config
+    file itself never carries the word in its name. 'laptop'/'prod'
+    here are just scratch dir labels; production POLICY (4a) is driven
+    by the folder being literally named 'production'.
     """
-    config_dir = root / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    path = config_dir / f"pass_mgr.{environment}.yaml"
+    env_dir = root / "config" / environment
+    env_dir.mkdir(parents=True, exist_ok=True)
+    path = env_dir / "pass_mgr.yaml"
     path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     return path
 
@@ -107,9 +110,10 @@ class TestValidConfig:
     def test_valid_config_loads(self, tmp_path: Path):
         write_config(tmp_path, "laptop", base_config())
 
-        cfg = load_config("laptop", project_root=tmp_path)
+        cfg = load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
-        assert cfg.environment == "laptop"
+        # 4a: no environment field on the config - the FOLDER is the identity
+        assert cfg.env_folder.name == "laptop"
         assert cfg.is_production is False
         assert cfg.default_method == "sops"
         # Per-secret method resolution: inheritance AND override.
@@ -120,7 +124,7 @@ class TestValidConfig:
 
     def test_method_for_returns_resolved_method(self, tmp_path: Path):
         write_config(tmp_path, "laptop", base_config())
-        cfg = load_config("laptop", project_root=tmp_path)
+        cfg = load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
         assert cfg.method_for("oracle.stg_pass") == "sops"
         assert cfg.method_for("ldap.service_pass") == "fernet"
@@ -130,7 +134,7 @@ class TestValidConfig:
         # (Distinct from layer-2: name in config but missing from vault -
         # tested in the SOPS/dispatcher suites.)
         write_config(tmp_path, "laptop", base_config())
-        cfg = load_config("laptop", project_root=tmp_path)
+        cfg = load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
         with pytest.raises(PassMgrConfigError, match="hpc.api_token"):
             cfg.method_for("hpc.api_token")
@@ -143,20 +147,21 @@ class TestValidConfig:
 
 class TestEnvironmentErrors:
 
-    def test_unknown_environment_name(self, tmp_path: Path):
-        # 'server' is not one of the two sanctioned environments. The
-        # environment is always explicit - a typo must not quietly
-        # produce a search for a nonexistent config file (though it
-        # would next fail on missing-file anyway, this earlier error
-        # is more precise about WHAT went wrong).
-        with pytest.raises(PassMgrConfigError, match="unknown environment"):
-            load_config("server", project_root=tmp_path)
+    def test_missing_folder_refuses_with_vocabulary_hint(self, tmp_path: Path):
+        # PT-040 4a: word-based refusal is GONE - there is no sanctioned
+        # WORD list in the vault layer anymore. A folder that does not
+        # exist (or holds no pass_mgr.yaml) is refused by PATH, with the
+        # fix named. Word validation lives in dpl.lib.environment.
+        with pytest.raises(PassMgrConfigError, match="pass_mgr.yaml"):
+            load_config(tmp_path / "config" / "server", project_root=tmp_path)
 
     def test_missing_config_file(self, tmp_path: Path):
         # Nothing written at all - the error must name the exact path it
         # looked for, so the operator knows what to create.
-        with pytest.raises(PassMgrConfigError, match="pass_mgr.prod.yaml"):
-            load_config("prod", project_root=tmp_path)
+        with pytest.raises(
+            PassMgrConfigError, match=r"config[/\\]production[/\\]pass_mgr\.yaml"
+        ):
+            load_config(tmp_path / "config" / "production", project_root=tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -169,14 +174,14 @@ class TestStructuralValidation:
     def test_invalid_yaml_syntax(self, tmp_path: Path):
         # Broken YAML (unclosed bracket). The error must carry the
         # underlying YAML diagnostic, not swallow it.
-        bad = tmp_path / "config"
+        bad = tmp_path / "config" / "laptop"
         bad.mkdir(parents=True)
-        (bad / "pass_mgr.laptop.yaml").write_text(
+        (bad / "pass_mgr.yaml").write_text(
             "{ version: 1, methods:", encoding="utf-8"
         )
 
         with pytest.raises(PassMgrConfigError, match="YAML syntax error"):
-            load_config("laptop", project_root=tmp_path)
+            load_config(bad, project_root=tmp_path)
 
     def test_top_level_not_a_mapping(self, tmp_path: Path):
         # A YAML list at top level - valid YAML, wrong shape.
@@ -185,7 +190,7 @@ class TestStructuralValidation:
         (bad / "pass_mgr.laptop.yaml").write_text("- a\n- b\n", encoding="utf-8")
 
         with pytest.raises(PassMgrConfigError, match="mapping"):
-            load_config("laptop", project_root=tmp_path)
+            load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
     def test_unknown_top_level_key_rejected(self, tmp_path: Path):
         # Typo protection: 'secret' instead of 'secrets' would, in a
@@ -196,7 +201,7 @@ class TestStructuralValidation:
         write_config(tmp_path, "laptop", base_config(secret={}))
 
         with pytest.raises(PassMgrConfigError, match="unknown top-level key"):
-            load_config("laptop", project_root=tmp_path)
+            load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
     def test_missing_required_key_rejected(self, tmp_path: Path):
         config = base_config()
@@ -205,7 +210,7 @@ class TestStructuralValidation:
         write_config(tmp_path, "laptop", config)
 
         with pytest.raises(PassMgrConfigError, match="missing required"):
-            load_config("laptop", project_root=tmp_path)
+            load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
     def test_unsupported_schema_version_rejected(self, tmp_path: Path):
         # version != 1 is reserved for the v2 rotation era. Until a
@@ -214,7 +219,7 @@ class TestStructuralValidation:
         write_config(tmp_path, "laptop", base_config(version=2))
 
         with pytest.raises(PassMgrConfigError, match="unsupported config schema version"):
-            load_config("laptop", project_root=tmp_path)
+            load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
     def test_empty_methods_rejected(self, tmp_path: Path):
         # A config with no methods can't serve any secret - refuse at
@@ -222,13 +227,13 @@ class TestStructuralValidation:
         write_config(tmp_path, "laptop", base_config(methods={}))
 
         with pytest.raises(PassMgrConfigError, match="methods"):
-            load_config("laptop", project_root=tmp_path)
+            load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
     def test_empty_secrets_rejected(self, tmp_path: Path):
         write_config(tmp_path, "laptop", base_config(secrets={}))
 
         with pytest.raises(PassMgrConfigError, match="secrets"):
-            load_config("laptop", project_root=tmp_path)
+            load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
     def test_method_section_not_a_mapping(self, tmp_path: Path):
         config = base_config()
@@ -237,7 +242,7 @@ class TestStructuralValidation:
         write_config(tmp_path, "laptop", config)
 
         with pytest.raises(PassMgrConfigError, match="'sops'"):
-            load_config("laptop", project_root=tmp_path)
+            load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
     def test_default_method_must_be_defined(self, tmp_path: Path):
         # default_method pointing at a method with no section = every
@@ -245,7 +250,7 @@ class TestStructuralValidation:
         write_config(tmp_path, "laptop", base_config(default_method="vault"))
 
         with pytest.raises(PassMgrConfigError, match="default_method"):
-            load_config("laptop", project_root=tmp_path)
+            load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +267,7 @@ class TestSecretEntryValidation:
         write_config(tmp_path, "laptop", config)
 
         with pytest.raises(PassMgrConfigError, match="oracle.stg_pass"):
-            load_config("laptop", project_root=tmp_path)
+            load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
     def test_secret_entry_unknown_key_rejected(self, tmp_path: Path):
         # Entry allows ONLY 'method'. 'methd:' would silently fall back
@@ -274,7 +279,7 @@ class TestSecretEntryValidation:
         write_config(tmp_path, "laptop", config)
 
         with pytest.raises(PassMgrConfigError, match="unknown key"):
-            load_config("laptop", project_root=tmp_path)
+            load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
     def test_secret_referencing_undefined_method(self, tmp_path: Path):
         # 'vault' has no section in methods{}. The error must name BOTH
@@ -285,7 +290,7 @@ class TestSecretEntryValidation:
         write_config(tmp_path, "laptop", config)
 
         with pytest.raises(PassMgrConfigError, match="undefined method.*vault"):
-            load_config("laptop", project_root=tmp_path)
+            load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -328,19 +333,19 @@ class TestProductionPolicy:
         # The headline rule: production REFUSES plaintext credentials.
         # Not a warning - a hard load failure. This is the test the
         # security team will want to see exists.
-        write_config(tmp_path, "prod", production_config_with("default"))
+        write_config(tmp_path, "production", production_config_with("default"))
 
         with pytest.raises(PassMgrProductionPolicyError, match="PRODUCTION"):
-            load_config("prod", project_root=tmp_path)
+            load_config(tmp_path / "config" / "production", project_root=tmp_path)
 
     def test_prod_rejects_single_plain_override(self, tmp_path: Path):
         # Stricter variant: default is sops, but ONE secret overrides to
         # plain. Still refused AT LOAD - prod must not even be CAPABLE
         # of serving a plaintext secret, whether or not anything asks.
-        write_config(tmp_path, "prod", production_config_with("override"))
+        write_config(tmp_path, "production", production_config_with("override"))
 
         with pytest.raises(PassMgrProductionPolicyError, match="plain"):
-            load_config("prod", project_root=tmp_path)
+            load_config(tmp_path / "config" / "production", project_root=tmp_path)
 
     def test_laptop_allows_plain(self, tmp_path: Path):
         # The mirror test - policy errors must NOT over-fire. On the
@@ -350,15 +355,15 @@ class TestProductionPolicy:
         # the gate opens for the right key, not just that it shuts.
         write_config(tmp_path, "laptop", production_config_with("override"))
 
-        cfg = load_config("laptop", project_root=tmp_path)
+        cfg = load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
 
         assert cfg.secret_methods["oracle.stg_pass"] == "plain"
 
     def test_prod_with_only_secure_methods_loads(self, tmp_path: Path):
         # And the real prod shape - sops everywhere - sails through.
-        write_config(tmp_path, "prod", base_config())
+        write_config(tmp_path, "production", base_config())
 
-        cfg = load_config("prod", project_root=tmp_path)
+        cfg = load_config(tmp_path / "config" / "production", project_root=tmp_path)
 
         assert cfg.is_production is True
         assert cfg.secret_methods["oracle.stg_pass"] == "sops"

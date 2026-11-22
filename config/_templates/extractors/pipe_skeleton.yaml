@@ -1,0 +1,61 @@
+# ==============================================================================
+# PIPE EXTRACTOR CONFIG - BLANK SKELETON (_templates/)
+# ------------------------------------------------------------------------------
+# One file per pipe in config/_templates/extractors/. In a REAL environment
+# folder, pipe yamls live in config/<environment>/extractors/ and are
+# registered in config/<environment>/run.yaml (names, in execution order).
+#
+# This skeleton shows BOTH connection families' shapes. Keep only the
+# family your source uses; delete the other. Table entries show the shape
+# of each table object; expand to your real table list.
+# ==============================================================================
+
+# Registered pipe name = this file's stem (minus .yaml).
+oracle_example:
+  # EVERY connection has: type, schema, folder, table_concurrency, retries,
+  # retry_backoff_seconds - plus its family-specific keys. 'folder' is the
+  # landing subfolder label (NOT an environment - 1 connection : 1 folder).
+  connections:
+    ora_conn:
+      type: oracle            # CLOSED vocabulary: oracle | ldap (later: mssql)
+      schema: REPLACE_ME_DB_SCHEMA
+      host: REPLACE_ME_HOST
+      port: REPLACE_ME_PORT_1521
+      service: REPLACE_ME_SERVICE_NAME
+      folder: REPLACE_ME_FOLDER_LABEL
+      table_concurrency: 2
+      retries: 3
+      retry_backoff_seconds: 30
+      serial_group: REPLACE_ME_OR_NONE   # sessions sharing a serial group run
+                                        # sequentially (one DB session at a time)
+      users: REPLACE_ME_VAULT_REF        # vault ref - NEVER a plaintext secret
+
+  transforms: []               # optional pipeline transforms (oracle only)
+
+  tables:
+    - connection: ora_conn
+      schema: REPLACE_ME_DB_SCHEMA
+      name: REPLACE_ME_TABLE_NAME
+      query: REPLACE_ME_SQL_QUERY
+      pause: null              # table-level pause: null | tag (see pause docs)
+
+ldap_example:
+  connections:
+    ad_conn:
+      type: ldap
+      schema: REPLACE_ME_AD_SCHEMA
+      uri: REPLACE_ME_LDAP_URI
+      auth: simple
+      page_size: 1000
+      folder: REPLACE_ME_FOLDER_LABEL
+      table_concurrency: 1
+      retries: 3
+      retry_backoff_seconds: 30
+      users: REPLACE_ME_VAULT_REF
+
+  tables:
+    - name: REPLACE_ME_TABLE_NAME
+      connection: ad_conn
+      schema: REPLACE_ME_AD_SCHEMA
+      search_base: REPLACE_ME_DN
+      filter: REPLACE_ME_LDAP_FILTER

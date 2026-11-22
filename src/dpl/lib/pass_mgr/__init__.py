@@ -4,7 +4,7 @@ pass_mgr - the single authority for retrieving secrets by name.
 Public surface:
 
     import pass_mgr
-    pass_mgr.init(environment="laptop")          # once, at startup
+    pass_mgr.init(env_folder)                    # once, at startup
     value = pass_mgr.get_secret("oracle.stg_pass")
 
 Callers (connectors) pass a secret NAME and nothing else. They know no
@@ -94,7 +94,7 @@ class _Dispatcher:
             if section is None:
                 raise PassMgrConfigError(
                     f"pass_mgr: method '{method_id}' has no config "
-                    f"section in pass_mgr.{self.config.environment}.yaml."
+                    f"section in {self.config.env_folder / 'pass_mgr.yaml'}."
                 )
             self._providers[method_id] = provider_cls(section, self.config)
         return self._providers[method_id]
@@ -125,24 +125,31 @@ _dispatcher: _Dispatcher | None = None
 # Public facade
 # ---------------------------------------------------------------------------
 
-def init(environment: str, project_root: Path | None = None) -> None:
+def init(pass_mgr_yaml: Path, project_root: Path | None = None) -> None:
     """Initialize pass_mgr for this process.
 
-    Loads and validates pass_mgr.<environment>.yaml - all configuration
+    Loads and validates the given vault config file - all configuration
     errors (bad YAML, unknown keys, undefined methods, insecure methods in
-    production) surface HERE, at startup, never on first fetch. The
-    environment is always explicit; nothing is inferred from the host.
+    production) surface HERE, at startup, never on first fetch. The path
+    is always explicit; nothing is inferred from the host.
 
-    Idempotent: calling init() again with the same environment is a no-op;
-    calling it with a DIFFERENT environment resets the cache deliberately
-    (a config error if you were expecting the old one to persist).
+    PT-040 4a: the environment word is retired from this API. Callers
+    pass the resolved environment's pass_mgr.yaml path (typically
+    <ResolvedEnvironment.folder>/pass_mgr.yaml from dpl.lib.environment).
+
+    Idempotent: calling init() again with the same config file is a
+    no-op; calling it with a DIFFERENT path resets the cache
+    deliberately (a config error if you were expecting the old one to
+    persist).
     """
     global _dispatcher
 
-    if _dispatcher is not None and _dispatcher.config.environment == environment:
+    yaml_path = Path(pass_mgr_yaml)
+    if _dispatcher is not None and \
+            _dispatcher.config.env_folder == yaml_path.parent:
         return
 
-    config = load_config(environment, project_root=project_root)
+    config = load_config(yaml_path.parent, project_root=project_root)
     _dispatcher = _Dispatcher(config)
 
 
@@ -167,7 +174,8 @@ def get_secret(name: str) -> str:
     if _dispatcher is None:
         raise PassMgrConfigError(
             "pass_mgr: get_secret() called before init(). Call "
-            "pass_mgr.init(environment='laptop'|'prod') once at startup."
+            "pass_mgr.init(<env-folder>/pass_mgr.yaml) once at startup - "
+            "the path comes from dpl.lib.environment.resolve_environment()."
         )
     return _dispatcher.get_secret(name)
 

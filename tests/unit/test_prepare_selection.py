@@ -39,13 +39,24 @@ def _cfg(pause=None, table_pauses=None):
 
 @pytest.fixture
 def settings():
-    return {"pass_mgr": {"environment": "test"}}
+    # PT-040 4a: pass_mgr section is RETIRED from settings - vault config
+    # now comes from the environment folder; resolver stub in `neutral`
+    # supplies everything pass_mgr-related. Minimal payload: empty.
+    return {}
 
 
 @pytest.fixture
-def neutral(monkeypatch):
+def neutral(monkeypatch, tmp_path):
+    from dpl.lib.environment import ResolvedEnvironment
     for mod in (orx, adx):
         monkeypatch.setattr(mod, "validate_secrets_layout", lambda: None)
+        # PT-040 4a: extractors resolve the env folder themselves; point
+        # the resolver at a scratch tree so tests never require this
+        # machine's real config/development/.
+        scratch = ResolvedEnvironment(
+            name="development", folder=tmp_path / "config" / "development")
+        monkeypatch.setattr(mod, "resolve_environment",
+                            lambda _s=scratch: _s)   # bind loop var (B023)
         monkeypatch.setattr(mod.pass_mgr, "init", lambda _e: None)
         monkeypatch.setattr(mod, "load_schema_master", lambda _p: {})
         monkeypatch.setattr(mod, "validate_master_vs_config",

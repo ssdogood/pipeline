@@ -98,7 +98,9 @@ _BUSY_TIMEOUT_MS = 5000
 # and the user manual): explicit db path beats env var beats settings.
 ENV_DB = "DPL_HISTORY_DB"
 ENV_SETTINGS = "DPL_SETTINGS"
-DEFAULT_SETTINGS_FILE = "config/settings.laptop.yaml"
+# PT-040 4b: legacy hardcoded default RETIRED - the settings path is
+# the ACTIVE ENV FOLDER's when nothing overrides it.
+DEFAULT_SETTINGS_FILE = None
 
 # ---------------------------------------------------------------------------
 # DDL v2 - the single source of truth for the schema.
@@ -346,8 +348,12 @@ def resolve_db_path(db_path: Path | str | None = None,
     env_db = os.environ.get(ENV_DB)
     if env_db:
         return Path(env_db)
-    settings_file = settings_file or os.environ.get(
-        ENV_SETTINGS, DEFAULT_SETTINGS_FILE)
+    settings_file = settings_file or os.environ.get(ENV_SETTINGS)
+    if settings_file is None:
+        # PT-040 4b: no override -> the ACTIVE environment folder.
+        from dpl.lib.environment import resolve_environment
+        settings_file = str(
+            resolve_environment().folder / "settings.yaml")
     settings = load_settings(settings_file)
     if settings is None:
         raise ValueError(

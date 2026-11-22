@@ -1,0 +1,29 @@
+# ==============================================================================
+# WRAPPER CONFIG - example (matches the committed config/wrapper.yaml shape)
+# ------------------------------------------------------------------------------
+# Orchestration policy. The example mirrors the wrapper profiles used by
+# real environments; retention shown shortened is fine per-environment.
+# usage; retention shortened to show tuning is per-environment.
+# ==============================================================================
+
+retention:
+  landing_days: 10
+  manifest_days: 90
+
+run_id:
+  prefix: "run_"
+  ts_format: "%Y%m%d_%H%M%S"
+
+profiles:
+  full:
+    steps:
+      - {name: generate_schemas, force: false}
+      - {name: reconcile_pending}
+      - {name: extract, force: true}
+      - {name: update_history}
+      - {name: housekeeping}
+  inc:
+    steps:
+      - {name: extract, force: false}
+      - {name: update_history}
+      - {name: housekeeping}

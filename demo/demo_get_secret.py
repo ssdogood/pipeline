@@ -8,9 +8,12 @@ def mask(value: str) -> str:
     return value[:4] + "*" * max(len(value) - 4, 4)
 
 
-# One line of setup. No paths, no method, no key - the environment
-# config decides everything.
-pass_mgr.init("laptop")
+# One line of setup. No paths, no method, no key - the ACTIVE
+# ENVIRONMENT FOLDER (config/environment.yaml) decides everything.
+# PT-040 4a: the vault config is <env-folder>/pass_mgr.yaml.
+from dpl.lib.environment import resolve_environment
+
+pass_mgr.init(resolve_environment().folder / "pass_mgr.yaml")
 
 for name in ("ora_db.user_name.password",):
     print(f"{name:45s} -> {mask(pass_mgr.get_secret(name))}")

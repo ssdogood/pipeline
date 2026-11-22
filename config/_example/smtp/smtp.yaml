@@ -1,0 +1,9 @@
+# SMTP credentials discovery - pseudo-connection for the vault scanner.
+# SMTP is not an extractor; it consumes vault secrets like one.
+# Only the password is vaulted; the username is public config.
+connections:
+  smtp:
+    type: smtp
+    users:
+      password:
+        credential_ref: smtp.password.secret
