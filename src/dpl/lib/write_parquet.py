@@ -525,6 +525,9 @@ def write_table(cfg: dict, settings: dict, source: str, table: str,
     Thin glue ONLY - all logic lives in ParquetWriter. `batches` is drained
     fully; pass a fresh generator per call (a retry is simply a new call).
     """
+    # PT-046 C3: bound BEFORE the block (static-strictness; close()
+    # always assigns, so the initialized value never escapes).
+    stats: dict | None = None
     with ParquetWriter(
         settings, source=source, table=table, load_date=load_date,
         transforms=cfg.get("transforms", {}),
