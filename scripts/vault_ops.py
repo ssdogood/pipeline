@@ -129,33 +129,21 @@ def log_action(action: str, details: str) -> None:
 
 
 def find_active_env_dir(config_dir):
-    """Locate the active environment folder - SELECTOR-ONLY.
+    """Locate the active environment folder - SELECTOR-ONLY, delegated.
 
-    PT-040 4e (user decision 2026-11-20): the environment is declared
-    and controlled at ONE and ONLY ONE place - config/environment.yaml.
-    No env-var bypass, no guess-from-directory-shape fallback. If the
-    selector is missing, unreadable, or names a folder that does not
-    exist: LOUD REFUSAL, no moving forward.
+    PT-046 C2: this private duplicate of selector discovery is RETIRED.
+    One implementation exists - dpl.lib.environment.resolve_environment()
+    - which enforces the fixed vocabulary (development|test|production)
+    and every loud-refusal rule. The vault tool obeys the same resolver
+    as the pipeline (one implementation = one place that can disagree).
+    Signature kept (config_dir) for call-site and monkeypatch
+    compatibility; the resolver locates the selector itself.
     """
-    d = config_dir
-
-    sel = d / "environment.yaml"
-    if not sel.is_file():
-        fail(f"{sel} not found - the environment MUST be declared there "
-             f"(one place only: environment: development|test|production); "
-             f"the vault tool never guesses")
+    from dpl.lib.environment import resolve_environment
     try:
-        data = yaml.safe_load(sel.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as e:
-        fail(f"{sel}: invalid YAML: {e}")
-    word = (data.get("environment") or "").strip() if isinstance(data, dict) else ""
-    if not word:
-        fail(f"{sel}: missing or empty 'environment' key "
-             f"(one place only: environment: development|test|production)")
-    cand = d / word
-    if not cand.is_dir():
-        fail(f"{sel} names environment '{word}' but folder {cand} is missing")
-    return cand.resolve()
+        return resolve_environment().folder
+    except ValueError as e:
+        fail(f"environment resolution failed: {e}")
 
 
 def load_env_config(env_dir: Path) -> dict:
