@@ -525,8 +525,9 @@ def write_table(cfg: dict, settings: dict, source: str, table: str,
     Thin glue ONLY - all logic lives in ParquetWriter. `batches` is drained
     fully; pass a fresh generator per call (a retry is simply a new call).
     """
-    # PT-046 C3: bound BEFORE the block (static-strictness; close()
-    # always assigns, so the initialized value never escapes).
+    # PT-046 C3: bound BEFORE the block (static-strictness). close()
+    # always assigns, so the guard is the honest regression tripwire
+    # (same pattern as oracle_to_stg's wstats), never a live path.
     stats: dict | None = None
     with ParquetWriter(
         settings, source=source, table=table, load_date=load_date,
@@ -538,4 +539,8 @@ def write_table(cfg: dict, settings: dict, source: str, table: str,
         for df in batches:
             w.append(df)
         stats = w.close()
+    if stats is None:
+        raise RuntimeError(
+            "internal error: writer returned no stats - "
+            "close() was not called?")
     return stats
