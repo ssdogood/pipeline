@@ -201,7 +201,9 @@ class TestRegistryConsistency:
                         for t in node.targets
                     )
                 ):
-                    carriers.add(str(p.relative_to(SRC_DPL)))
+                    # PT-046: registry entries are POSIX-style; the
+                    # sweep must normalize (Windows yields backslashes)
+                    carriers.add(p.relative_to(SRC_DPL).as_posix())
         registered = set(_registry_paths())
         unregistered = sorted(carriers - registered)
         assert not unregistered, f"carriers missing from registry: {unregistered}"

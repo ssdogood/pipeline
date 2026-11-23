@@ -215,7 +215,9 @@ def test_example_passes_strict_validation():
     validate against the strict registry-built schema."""
     settings = load_settings(str(EXAMPLE_DIR / "settings.yaml"))
     assert settings is not None
-    assert settings["paths"]["runs_root"].endswith("/_runs")
+    # PT-046: separator-free (Windows yields backslashes)
+    from pathlib import Path as _P
+    assert _P(settings["paths"]["runs_root"]).name == "_runs"
 
 
 def test_example_is_minimal_but_complete_sections():
