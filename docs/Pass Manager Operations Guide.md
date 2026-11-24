@@ -12,7 +12,7 @@ Four principles, stated plainly:
 
 1. **One vault per environment, one key per environment** — laptop secrets stay in a vault sealed with the laptop's age identity; prod secrets in a different vault sealed with prod's age identity. The laptop key cannot decrypt prod's vault (and vice versa). This containment limits any single-compromise blast radius to one environment.
 
-2. **Keys live outside the project tree** — in `~/.dpl-keys/<env>/`. They never travel with the repository. The vault *can* travel with the tree (ciphertext, public recipient only), but the key must be provisioned per-machine via `setup_secrets.sh`.
+2. **Keys live outside the project tree** — in `~/.dpl/keys/<env>/`. They never travel with the repository. The vault *can* travel with the tree (ciphertext, public recipient only), but the key must be provisioned per-machine via `setup_secrets.sh`.
 
 3. **Config files are the source of truth; the vault is the implementation** — each connection/user that needs a password declares a `credential_ref` in its extractor config. `vault.sh scan` reconciles the vault to match. A secret that is declared but absent from the vault gets added (via masked prompt); a secret in the vault but no longer referenced gets offered for deletion.
 
@@ -28,7 +28,7 @@ Four principles, stated plainly:
 | `secrets/secrets.sops.yaml` | Encrypted vault (ciphertext, auto-headered) | Yes | No (ciphertext is safe to commit) |
 | `secrets/backups/` | Last 3 encrypted vault copies (auto-pruned) | **No** | No (ciphertext) |
 | `secrets/logs/dpl_pass_mgr.log` | Audit log: actions, names, fingerprints | **No** | No (names + one-way hashes only) |
-| `~/.dpl-keys/<env>/` | age identity + Fernet key | **No** | **Yes — do not commit!** |
+| `~/.dpl/keys/<env>/` | age identity + Fernet key | **No** | **Yes — do not commit!** |
 
 The vault file itself carries a machine-generated warning header ("DO NOT EDIT MANUALLY") that is re-applied on every seal. Obey it: manage secrets only through `./vault.sh`.
 
@@ -88,10 +88,10 @@ Expect green: "GREEN — this machine's tree is certified". This runs the offlin
 ### Step 4 — Provision keys
 
 ```bash
-./setup_secrets.sh laptop
+./setup_secrets.sh
 ```
 
-Interactive prompts; defaults are the recommended locations. The script mints two keys and prints the two path lines to paste into the next step. It refuses to overwrite existing keys — safe to re-run.
+No argument — the environment is discovered from `config/environment.yaml` (the one declaration). Interactive prompts; defaults are the recommended locations under `~/.dpl/keys/<env>/`. The script mints two keys and prints the two path lines to paste into the next step. It refuses to overwrite existing keys — safe to re-run.
 
 ### Step 5 — Create the pass_mgr environment config
 
@@ -103,12 +103,12 @@ default_method: sops
 
 methods:
   fernet:
-    key_file: ~/.dpl-keys/laptop/fernet/key
+    key_file: ~/.dpl/keys/<env>/fernet/key
     encrypted_file: secrets/secrets.fernet.bin
   sops:
     binary: bin/sops-v3.13.3.darwin.arm64     # platform-appropriate binary
     manifest: bin/sops_manifest.txt
-    age_key_file: ~/.dpl-keys/laptop/sops-age/age.key
+    age_key_file: ~/.dpl/keys/<env>/sops-age/age.key
     encrypted_file: secrets/secrets.sops.yaml
 
 secrets:
@@ -123,12 +123,12 @@ default_method: sops
 
 methods:
   fernet:
-    key_file: ~/.dpl-keys/prod/fernet/key
+    key_file: ~/.dpl/keys/<env>/fernet/key
     encrypted_file: secrets/secrets.fernet.bin
   sops:
     binary: bin/sops-v3.13.3.linux.amd64       # prod runs on RHEL
     manifest: bin/sops_manifest.txt
-    age_key_file: ~/.dpl-keys/prod/sops-age/age.key
+    age_key_file: ~/.dpl/keys/<env>/sops-age/age.key
     encrypted_file: secrets/secrets.sops.yaml
 
 secrets:
@@ -291,7 +291,7 @@ Each error maps to an operational remedy.
 |---|---|---|
 | `VAULT ERROR: no Python found with PyYAML` | Environment not activated | `conda activate dpl` (or `conda install -n dpl pyyaml`) — see Step 0 |
 | `VAULT ERROR: no config for environment '<env>'` | Typo in env, or config missing | Check `config/pass_mgr.<env>.yaml` exists — see Step 5 |
-| `VAULT ERROR: age identity file missing at ~/.dpl-keys/...` | Keys not provisioned | Run `./setup_secrets.sh <env>`, confirm config path (Step 4) |
+| `VAULT ERROR: age identity file missing at ~/.dpl/keys/...` | Keys not provisioned | Run `./setup_secrets.sh` (no argument - it reads config/environment.yaml), confirm config path (Step 4) |
 | `VAULT ERROR: sops binary missing` | `bin/` not restored | Follow Section 4 ritual |
 | `VAULT ERROR: sops exited with status 100` | Bad sops invocation / corrupt vault | If persistent, restore vault from `secrets/backups/` |
 | `VAULT ERROR: sops did not respond within 10s` | sops hung | Verify binary integrity (Section 4), retry |

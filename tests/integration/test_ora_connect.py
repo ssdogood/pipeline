@@ -59,8 +59,7 @@ def ora_settings():
     settings = load_settings(SETTINGS_FILE)
     if settings is None:
         pytest.fail(
-            f"integration prerequisite failed: {SETTINGS_FILE} did not "
-            f"load/validate."
+            f"integration prerequisite failed: {SETTINGS_FILE} did not load/validate."
         )
     return settings
 
@@ -97,7 +96,16 @@ def _declared_for(cfg: dict, table_name: str) -> dict[str, DTypeLike] | None:
 def test_connect_and_select_dual(ora_cfg):
     """Connect with vault-resolved password; SELECT 1 FROM dual -> 1."""
     with connect(ora_cfg, "ora_db") as conn:
-        v = conn.cursor().execute("SELECT 1 FROM dual").fetchone()[0]
+        # PT-046 C3: static-strictness - cursor() is Optional-typed in
+        # the SDK; assert the connection is usable before use.
+        cur = conn.cursor()
+        assert cur is not None, "oracle cursor is None - cannot probe"
+        # PT-046 C3: no chaining - oracledb stubs type execute() as
+        # returning None (runtime returns the cursor); fetch via cur.
+        cur.execute("SELECT 1 FROM dual")
+        row = cur.fetchone()
+        assert row is not None, "dual probe returned no row"
+        v = row[0]
         assert v == 1
 
 
@@ -118,15 +126,17 @@ def test_first_table_streamed(ora_cfg, ora_settings):
 
     with connect(ora_cfg, t["connection"]) as conn:
         total = 0
-        for i, df in enumerate(iter_batches(conn, t["query"], batch_rows,
-                                            declared=declared,
-                                            strict=strict_cast)):
+        for i, df in enumerate(
+            iter_batches(
+                conn, t["query"], batch_rows, declared=declared, strict=strict_cast
+            )
+        ):
             total += df.height
             if i == 0:
-                assert df.columns == [c.lower() for c in df.columns], \
+                assert df.columns == [c.lower() for c in df.columns], (
                     "columns not lowercased"
-                assert list(declared.keys()) == df.columns, \
-                    "dtypes: column order drift"
+                )
+                assert list(declared.keys()) == df.columns, "dtypes: column order drift"
 
     assert total > 0, "query returned zero rows"
 
@@ -136,9 +146,13 @@ def test_read_query_one_shot(ora_cfg, ora_settings):
     """read_query returns a single concatenated DataFrame (small query)."""
     declared: dict[str, DTypeLike] = {"one": pl.Int64, "label": pl.String}
     strict_cast = ora_settings.get("polars", {}).get("strict_cast", True)
-    df = read_query(ora_cfg, "ora_db",
-                    "SELECT 1 AS ONE, 'x' AS LABEL FROM dual",
-                    declared=declared, strict=strict_cast)
+    df = read_query(
+        ora_cfg,
+        "ora_db",
+        "SELECT 1 AS ONE, 'x' AS LABEL FROM dual",
+        declared=declared,
+        strict=strict_cast,
+    )
     assert df.height == 1 and df["one"][0] == 1
 
 
@@ -146,5 +160,4 @@ def test_read_query_one_shot(ora_cfg, ora_settings):
 def test_non_select_query_rejected(ora_cfg):
     """A PL/SQL block is refused: only result-bearing queries stream."""
     with connect(ora_cfg, "ora_db") as conn, pytest.raises(ValueError):
-        next(iter_batches(conn, "BEGIN NULL; END;",
-                          declared={"dummy": pl.Int64}))
+        next(iter_batches(conn, "BEGIN NULL; END;", declared={"dummy": pl.Int64}))

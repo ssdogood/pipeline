@@ -1,16 +1,30 @@
 #!/usr/bin/env bash
 #
-# setup_secrets.sh - create age identity and Fernet key for an environment.
+# setup_secrets.sh - create age identity and Fernet key for the ACTIVE
+#                    environment (PT-046 addendum: selector-only).
 #
-# Usage:   ./setup_secrets.sh laptop   (or prod)
+# Usage:   ./setup_secrets.sh            (no arguments - the environment
+#                                         is discovered from
+#                                         config/environment.yaml)
 #
-# Creates keys under ~/.dpl-keys/<env>/, prints the config values to add
-# to pass_mgr.<env>.yaml. Never overwrites existing keys.
+# Creates keys under ~/.dpl/keys/<env>/, never overwrites existing keys,
+# and prints the config values to add to <env-folder>/pass_mgr.yaml.
+#
+# First-day sequence (fresh machine):
+#   1. unzip/untar the shipment (or git clone/pull the bundle)
+#   2. mint the env folder:   cp -r config/_templates config/<env>
+#   3. fill values in the new folder (settings, pass_mgr, ...)
+#   4. declare the environment in config/environment.yaml
+#   5. run this script          <- keys are minted for THAT environment
+#   6. ./vault.sh scan          <- capture and seal secrets
+#   7. run the gate, then the first real run
 
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$SCRIPT_DIR/bin"
+CONFIG_DIR="$SCRIPT_DIR/config"
+SELECTOR="$CONFIG_DIR/environment.yaml"
 
 fail() {
     echo ""
@@ -19,23 +33,49 @@ fail() {
     exit 1
 }
 
-# --- Step 1: argument ------------------------------------------------------
-if [ $# -ne 1 ]; then
-    fail "Usage: ./setup_secrets.sh <laptop|prod>"
+# --- Step 1: the selector - the ONE declaration -----------------------------
+# The environment is never an argument. It is discovered from
+# config/environment.yaml, validated against the fixed vocabulary,
+# and the env folder must already exist (minted from _templates/).
+if [ $# -ne 0 ]; then
+    fail "This script takes NO arguments. The environment is discovered from $SELECTOR (one place only). Got: $*"
 fi
-ENV="$1"
+
+if [ ! -f "$SELECTOR" ]; then
+    fail "$SELECTOR not found. The environment MUST be declared there before keys can be minted (one place only: environment: development|test|production)"
+fi
+
+ENV="$(grep -E '^[[:space:]]*environment:' "$SELECTOR" | head -1 | sed 's/^[[:space:]]*environment:[[:space:]]*//;s/[[:space:]]*$//' | tr -d '\"'"'"'')"
+if [ -z "$ENV" ]; then
+    fail "$SELECTOR: missing or empty 'environment' key (one place only: environment: development|test|production)"
+fi
+
 case "$ENV" in
-    laptop|prod) ;;
-    *) fail "Environment must be 'laptop' or 'prod', got '$ENV'" ;;
+    development|test|production) ;;
+    *)
+        fail "$SELECTOR names environment '$ENV' - must be one of: development|test|production (the folder is not selectable by any other name)"
+        ;;
 esac
 
-# --- Step 2: paths (defaults, or custom with confirmation) ------------------
-DEFAULT_AGE="$HOME/.dpl-keys/$ENV/sops-age/age.key"
-DEFAULT_FERNET="$HOME/.dpl-keys/$ENV/fernet/key"
+ENV_DIR="$CONFIG_DIR/$ENV"
+if [ ! -d "$ENV_DIR" ]; then
+    fail "$SELECTOR names environment '$ENV' but folder $ENV_DIR is missing. First-day sequence: cp -r config/_templates $ENV_DIR, fill the values, then re-run this script."
+fi
+
+if [ ! -f "$ENV_DIR/pass_mgr.yaml" ]; then
+    fail "$ENV_DIR/pass_mgr.yaml is missing - the env folder was minted but not filled. Copy the pass_mgr skeleton from _templates, fill the values, then re-run."
+fi
+
+KEYS_ROOT="$HOME/.dpl/keys"
+ENV_KEY_DIR="$KEYS_ROOT/$ENV"
+DEFAULT_AGE="$ENV_KEY_DIR/sops-age/age.key"
+DEFAULT_FERNET="$ENV_KEY_DIR/fernet/key"
 
 echo ""
-echo "=== pass_mgr key setup - environment: $ENV ==="
+echo "=== pass_mgr key setup - environment: $ENV (folder: $ENV_DIR) ==="
 echo ""
+
+# --- Step 2: key paths (defaults, or custom with confirmation) --------------
 echo "Default key locations:"
 echo "  Age key:    $DEFAULT_AGE"
 echo "  Fernet key: $DEFAULT_FERNET"
@@ -86,10 +126,10 @@ if [ -z "$KGEN_BIN" ]; then
 fi
 
 # --- Step 4: secure directories ----------------------------------------------
-mkdir -p "$HOME/.dpl-keys"
-chmod 700 "$HOME/.dpl-keys"
-mkdir -p "$(dirname "$AGE_PATH")" "$(dirname "$FERNET_PATH")"
-chmod 700 "$(dirname "$AGE_PATH")" "$(dirname "$FERNET_PATH")"
+mkdir -p "$HOME/.dpl"
+chmod 700 "$HOME/.dpl"
+mkdir -p "$KEYS_ROOT" "$(dirname "$AGE_PATH")" "$(dirname "$FERNET_PATH")"
+chmod 700 "$KEYS_ROOT" "$(dirname "$AGE_PATH")" "$(dirname "$FERNET_PATH")"
 
 # --- Step 5: mint age identity (refuse overwrite) ---------------------------
 if [ -f "$AGE_PATH" ]; then
@@ -112,7 +152,7 @@ if [ -f "$FERNET_PATH" ]; then
     echo "Fernet key already exists at $FERNET_PATH - skipping (protected)."
 else
     echo "Generating Fernet key..."
-    # Prefer the ACTIVE environment's Python (conda etc.), so the
+    # Prefer the ACTIVE conda environment's Python, so the
     # 'cryptography' package resolves to the same one the tests use.
     PYTHON_BIN="${CONDA_PREFIX:+$CONDA_PREFIX/bin/python}"
     PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}"
@@ -127,10 +167,12 @@ echo ""
 echo "=============================================="
 echo "  Setup complete for '$ENV'."
 echo ""
-echo "  Put these values in config/pass_mgr.$ENV.yaml:"
+echo "  Put these values in $ENV_DIR/pass_mgr.yaml:"
 echo ""
-echo "    age_key_file: $AGE_PATH"
-echo "    key_file:     $FERNET_PATH"
+echo "    age_key_file: ~/.dpl/keys/$ENV/sops-age/age.key"
+echo "    key_file:     ~/.dpl/keys/$ENV/fernet/key"
+echo ""
+echo "  (custom locations: use the paths you chose, in tilde form)"
 echo ""
 echo "  Then run: ./run_offline_tests.sh"
 echo "=============================================="

@@ -86,5 +86,5 @@ project-includes = [
 [tool.pyright]
 include = ["src"]
 exclude = ["**/node_modules", "**/__pycache__", "**/.venv"]
-pythonVersion = "3.12"
+pythonVersion = "3.11.18"
 typeCheckingMode = "standard"

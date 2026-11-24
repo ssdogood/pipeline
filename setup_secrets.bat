@@ -1,17 +1,29 @@
 @echo off
 rem =====================================================================
 rem  setup_secrets.bat  -  create age identity and Fernet key
-rem                         (Windows native edition of setup_secrets.sh)
+rem                         (Windows native edition, selector-only)
 rem
-rem  Usage:   setup_secrets.bat laptop    (or prod)
+rem  PT-046 addendum: NO environment argument. The environment is
+rem  discovered from config\environment.yaml (the ONE declaration),
+rem  validated against development|test|production, and the env folder
+rem  must already exist (minted from config\_templates\).
 rem
-rem  Creates keys under %USERPROFILE%\.dpl-keys\<env>\, never overwrites
+rem  Creates keys under %USERPROFILE%\.dpl\keys\<env>\, never overwrites
 rem  existing keys, tightens NTFS permissions with icacls (the real
 rem  successor of chmod on Windows), and prints the config values for
-rem  pass_mgr.<env>.yaml.
+rem  <env-folder>\pass_mgr.yaml.
+rem
+rem  First-day sequence (fresh machine):
+rem    1. unzip/untar the shipment (or git clone/pull the bundle)
+rem    2. mint the env folder:   xcopy /E /I config\_templates config\<env>
+rem    3. fill values in the new folder (settings, pass_mgr, ...)
+rem    4. declare the environment in config\environment.yaml
+rem    5. run this script          <- keys are minted for THAT environment
+rem    6. vault.bat scan           <- capture and seal secrets
+rem    7. run the gate, then the first real run
 rem
 rem  IMPORTANT - the config contract: key-file paths in the YAML config
-rem  MUST be written in tilde form (~/.dpl-keys/...), never as absolute
+rem  MUST be written in tilde form (~/.dpl/keys/...), never as absolute
 rem  Windows paths. resolve_relative_path() accepts ONLY tilde-prefixed
 rem  paths for key files. The report below prints the exact values to
 rem  paste, in the correct form already.
@@ -19,22 +31,78 @@ rem =====================================================================
 
 setlocal EnableExtensions EnableDelayedExpansion
 
-rem --- Step 1: argument ----------------------------------------------------
-set "ENV=%~1"
-if "%ENV%"=="" goto usage
-if /i not "%ENV%"=="laptop" if /i not "%ENV%"=="prod" goto bad_env
+rem --- Step 1: the selector - the ONE declaration ------------------------
+if not "%~1"=="" (
+    echo.
+    echo SETUP FAILED: This script takes NO arguments. The environment is
+    echo discovered from config\environment.yaml ^(one place only^). Got: %~1
+    echo.
+    exit /b 1
+)
 
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "BIN_DIR=%SCRIPT_DIR%\bin"
+set "CONFIG_DIR=%SCRIPT_DIR%\config"
+set "SELECTOR=%CONFIG_DIR%\environment.yaml"
 
-rem --- Step 2: key paths (defaults, or custom with confirmation) -----------
-set "HOME_KEYROOT=%USERPROFILE%\.dpl-keys"
+if not exist "%SELECTOR%" (
+    echo.
+    echo SETUP FAILED: %SELECTOR% not found. The environment MUST be declared
+    echo there before keys can be minted ^(one place only:
+    echo environment: development^|test^|production^)
+    echo.
+    exit /b 1
+)
+
+set "ENV="
+for /f "usebackq tokens=1,* delims=: " %%a in ("%SELECTOR%") do (
+    if /i "%%a"=="environment" set "ENV=%%b"
+)
+if not defined ENV (
+    echo.
+    echo SETUP FAILED: %SELECTOR%: missing or empty 'environment' key
+    echo ^(one place only: environment: development^|test^|production^)
+    echo.
+    exit /b 1
+)
+
+if /i not "%ENV%"=="development" if /i not "%ENV%"=="test" if /i not "%ENV%"=="production" (
+    echo.
+    echo SETUP FAILED: %SELECTOR% names environment '%ENV%' - must be one of:
+    echo development^|test^|production ^(the folder is not selectable by any
+    echo other name^)
+    echo.
+    exit /b 1
+)
+
+set "ENV_DIR=%CONFIG_DIR%\%ENV%"
+if not exist "%ENV_DIR%" (
+    echo.
+    echo SETUP FAILED: %SELECTOR% names environment '%ENV%' but folder
+    echo %ENV_DIR% is missing. First-day sequence:
+    echo   xcopy /E /I config\_templates %ENV_DIR%
+    echo then fill the values, then re-run this script.
+    echo.
+    exit /b 1
+)
+
+if not exist "%ENV_DIR%\pass_mgr.yaml" (
+    echo.
+    echo SETUP FAILED: %ENV_DIR%\pass_mgr.yaml is missing - the env folder
+    echo was minted but not filled. Copy the pass_mgr skeleton from
+    echo _templates, fill the values, then re-run.
+    echo.
+    exit /b 1
+)
+
+rem --- Step 2: key paths (defaults, or custom with confirmation) ---------
+set "HOME_KEYROOT=%USERPROFILE%\.dpl\keys"
 set "DEFAULT_AGE=%HOME_KEYROOT%\%ENV%\sops-age\age.key"
 set "DEFAULT_FERNET=%HOME_KEYROOT%\%ENV%\fernet\key"
 
 echo.
-echo === pass_mgr key setup - environment: %ENV% ===
+echo === pass_mgr key setup - environment: %ENV% (folder: %ENV_DIR%) ===
 echo.
 echo Default key locations:
 echo   Age key:    %DEFAULT_AGE%
@@ -79,6 +147,8 @@ for %%f in ("%BIN_DIR%\age-keygen-*amd64.exe") do if not defined KGEN_BIN set "K
 if not defined KGEN_BIN goto no_kgen
 
 rem --- Step 4: create directories and lock permissions ---------------------
+if not exist "%USERPROFILE%\.dpl" mkdir "%USERPROFILE%\.dpl"
+call :lock_dir "%USERPROFILE%\.dpl"
 if not exist "%HOME_KEYROOT%" mkdir "%HOME_KEYROOT%"
 call :lock_dir "%HOME_KEYROOT%"
 
@@ -124,11 +194,13 @@ echo.
 echo ==============================================
 echo   Setup complete for '%ENV%'.
 echo.
-echo   Put THESE values in config\pass_mgr.%ENV%.yaml
+echo   Put THESE values in %ENV_DIR%\pass_mgr.yaml
 echo   ^(copy exactly - tilde form, forward slashes^):
 echo.
-echo     age_key_file: ~/.dpl-keys/%ENV%/sops-age/age.key
-echo     key_file:     ~/.dpl-keys/%ENV%/fernet/key
+echo     age_key_file: ~/.dpl/keys/%ENV%/sops-age/age.key
+echo     key_file:     ~/.dpl/keys/%ENV%/fernet/key
+echo.
+echo   ^(custom locations: use the paths you chose, in tilde form^)
 echo.
 echo   Then run: run_offline_tests.bat
 echo ==============================================
@@ -142,7 +214,7 @@ rem ---------------------------------------------------------------------
 :show_pubkey
 rem  Print the age1... public key from the identity file.
 set "PK="
-for /f "tokens=*" %%k in ('findstr /c:"age1" "%AGE_PATH%"') do set "PK=%%k"
+for /f "tokens=* usebackq" %%k in (`findstr /c:"age1" "%AGE_PATH%"`) do set "PK=%%k"
 if defined PK (
     set "PK=!PK:*age1=age1!"
     echo   Public key: !PK!
@@ -199,18 +271,6 @@ goto :eof
 rem ---------------------------------------------------------------------
 rem  Failure exits
 rem ---------------------------------------------------------------------
-
-:usage
-echo.
-echo SETUP FAILED: Usage: setup_secrets.bat ^<laptop^|prod^>
-echo.
-exit /b 1
-
-:bad_env
-echo.
-echo SETUP FAILED: Environment must be 'laptop' or 'prod', got '%ENV%'.
-echo.
-exit /b 1
 
 :no_kgen
 echo.

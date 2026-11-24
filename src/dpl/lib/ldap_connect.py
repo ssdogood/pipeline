@@ -12,6 +12,7 @@ Contract mirrors lib/ora_connect.py at the connection level:
 from __future__ import annotations
 
 from contextlib import contextmanager
+from typing import Literal
 
 from ldap3 import ALL, NTLM, SIMPLE, SUBTREE, Connection, Server
 from schema import And, Forbidden, Optional, Schema
@@ -37,7 +38,11 @@ log = get_run_logger("dpl.ldap")
 # folder (config/<env>/extractors/).
 CONFIG_FILE = "<env-folder>/extractors/ad_to_stg.yaml"
 PAGE_SIZE_DEFAULT = 500
-AUTH_MAP = {"ntlm": NTLM, "simple": SIMPLE}
+# PT-046 C3: Literal-typed so static checkers can verify the mapping
+# covers theldap3 SDK's accepted authentication literals exactly.
+LdapAuthName = Literal["ntlm", "simple"]
+AUTH_MAP: dict[LdapAuthName, Literal["NTLM", "SIMPLE"]] = {
+    "ntlm": NTLM, "simple": SIMPLE}
 
 # The LDAP config contract. Sole owner: this module (the AD connector).
 LDAP_CONFIG_SCHEMA = Schema({
@@ -57,7 +62,11 @@ LDAP_CONFIG_SCHEMA = Schema({
                     Optional(str): object
                 }
             },
-            Optional("auth", default="ntlm"): And(str, len),
+            # PT-046 C3: closed vocabulary - must match AUTH_MAP keys
+            # exactly (LdapAuthName). Bad word -> loud schema refusal at
+            # config load, not a KeyError deep in the connection layer.
+            Optional("auth", default="ntlm"): And(
+                str, len, lambda v: v.lower() in ("ntlm", "simple")),
             Optional("page_size", default=500): And(int, lambda n: n > 0),
             "folder": And(str, len),
             Optional("pause"): pause_block_ok,   # PT-014 folder-level

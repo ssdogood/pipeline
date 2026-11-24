@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import threading
 
-from dpl.lib.folder_runner import jobs_from_plan, run_jobs
+from dpl.lib.folder_runner import Job, jobs_from_plan, run_jobs
 
 # ------------------------------------------------------------------ fakes ---
 
@@ -39,7 +39,10 @@ class _Concurrent:
         return "done"
 
 
-def _job(folder: str, task):
+def _job(folder: str, task) -> Job:
+    # PT-046 C3: annotated return = list[Job] at call sites, satisfying
+    # run_jobs' invariant list[Job] parameter (naked tuples inferred a
+    # narrower type that list-invariance rejects).
     return (f"folder:{folder}", [(folder, task)])
 
 
