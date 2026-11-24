@@ -29,22 +29,25 @@ export DPL_SETTINGS=/path/to/your/config
 # 6. Optional but recommended: put lines 1-3 (and 4/5 if used) in your
 #    shell profile so every new terminal is ready.
 ```
+
 Add to ~/.zshrc or ~/.bashrc for persistence. Note: cron jobs must set this explicitly — they don't inherit your shell profile.
 
 ## Documentation
 
 | Document | Purpose |
-|---|---|
+| --- | --- |
 | `docs/Pass Manager Operations Guide.md` | Vault/password operations, environment setup (Step 0), known issues |
 | `docs/Release Procedure.md` | How releases are built, self-certified, and published |
 | `tests/integration/README.md` | Live-server integration tests (Oracle, LDAP) |
 | `README-FIRST.txt` (inside release bundles) | Receiver instructions — not in the repo; fabricated at build time |
 
 ## Running
+
 ### The dpl command family
 
 One front door. Version and capability catalog are always current,
 read live from pyproject.toml and the registered capability modules:
+
 ```bash
 dpl                          # full help (all commands and flags)
 dpl --version                # version (PT-003)
@@ -53,7 +56,9 @@ dpl --functionality          # capability catalog: commands, connectors,
 ```
 
 ### Run the pipeline
+
 Main orchestrator. Handles profile selection, manifest writing, and history tracking:
+
 ```bash
 # Full run (all tables)
 dpl run --profile full
@@ -66,34 +71,42 @@ dpl run --run-id manual_$(date +%Y%m%d_%H%M%S)
 ```
 
 ### Update history manually
+
 After recovering failed runs or reconciling manifests:
+
 ```bash
-dpl update-history --reconcile
+dpl update-history --dry-run
 ```
 
 Legacy names still work (one deprecation note, then the same behavior):
+
 ```bash
 dpl-run --profile full        # prefer: dpl run --profile full
-dpl-update-history --reconcile  # prefer: dpl update-history --reconcile
+dpl-update-history --dry-run  # prefer: dpl update-history --dry-run
 ```
 
 ## Extractors (direct)
+
 Oracle extraction (usually called from wrapper):
+
 ```bash
 python -m dpl.extractors.oracle_to_stg
 ```
 
 Active Directory extraction:
+
 ```bash
 python -m dpl.extractors.ad_to_stg
 ```
 
 ## Schema regeneration
+
 NOTE: `python -m dpl.lib.generate_schemas ...` is currently broken on
 main (args.settings bug; see tracker PT-045) - run the pipeline's
 normal schema step via `dpl run` instead. Direct regeneration returns
 with the `dpl generate-schemas` verb after PT-040 merges.
 Regenerate schema_master_auto.csv after config changes:
+
 ```bash
 python -m dpl.lib.generate_schemas --force
 ```
@@ -101,7 +114,8 @@ python -m dpl.lib.generate_schemas --force
 Use --tables TABLE_A,TABLE_B to regenerate specific tables only.
 
 ## Project Structure
-```
+
+```bash
 pipeline
 ├── bin
 │   └── sops_manifest.txt               # Pinned SOPS/Age checksums + download URLs
@@ -158,38 +172,49 @@ pipeline
 ```
 
 ## Configuration Files
+
 ### oracle_to_stg.yaml / ad_to_stg.yaml
+
 Per-extractor config. Defines connections, tables to extract, and folder destinations. Folder names must be unique across all connections — validation fails at startup if violated.
 
 ### schema_master_*.csv
+
 Single source of truth for column definitions. Regenerate with generate_schemas --force after changing config. Tables in schema master must match config.yaml exactly.
 
 ### table_rules_*.csv
+
 Curated deduplication and sort rules. Per-table settings for:
+
 * Dedup columns (all, none, or specific columns)
 * Sort order (column_name- for descending)
 
 ### settings.*.yaml
+
 Global runtime settings: batch sizes, compression, memory limits, and path roots. Machine-specific variants (laptop/prod) override defaults.
 
 ### wrapper.yaml
+
 Wrapper orchestration config: profiles, manifest retention, history DB path.
 
 ### logging.yaml
+
 Log format, level, and file handler configuration. One centralized config in lib/logger.py.
 
 ## Exit Codes
+
 Wrapper returns exit codes for cron integration:
-|Code|	Meaning|
+
+|Code|Meaning|
 |----|---------|
-|0|	Success, all tables extracted|
-|1|	Some extractions failed|
-|2|	SQLite history DB failure|
-|3|	Config error (invalid YAML, missing schema)|
+|0|Success, all tables extracted|
+|1|Some extractions failed|
+|2|SQLite history DB failure|
+|3|Config error (invalid YAML, missing schema)|
 
 ## Testing
 
 Offline test suite (self-contained, no real connections):
+
 ```bash
 pytest tests/
 # or the certified green run:
@@ -202,6 +227,7 @@ see README-FIRST.txt inside the unpacked bundle (the bundle itself
 ships no test code, by design).
 
 ### Known Constraints
+
 * Production deployments use the release bundle + test-kit certification flow — see `docs/Release Procedure.md`
 * Manifests retained 90 days by default — adjust in wrapper.yaml
 * Logs rotate at 5MB max, keep 5 backups — configure in logging.yaml
@@ -209,7 +235,9 @@ ships no test code, by design).
 * Older/pre-AVX2 CPUs: polars aborts (0xc000001d) — install `polars-lts-cpu` once per machine; see `docs/Pass Manager Operations Guide.md`, Known Issues
 
 ## Contact
+
 You can contact me on silencesdogood at pm dot me.
 
-#### End Note
+### End Note
+
 I only designed the application and tested it. The code is written by AI including the yaml files.
