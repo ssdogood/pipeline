@@ -11,4 +11,4 @@
 # config/development/ holds this machine's real config files.
 # The words development/test/production appear nowhere else in the
 # tree - a file's environment comes from where it sits, never its name.
-environment: development
+environment: test
