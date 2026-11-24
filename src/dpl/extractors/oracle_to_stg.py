@@ -282,6 +282,10 @@ def _task_for(
         dedup_parsed = rule.get("dedup")
         sort_spec = rule.get("sort_spec") or []
 
+        # PT-046 C3: bound BEFORE the block so static checkers never
+        # see a possibly-unbound name (close() always assigns; the
+        # None guard below remains the honest regression tripwire).
+        wstats: dict | None = None
         with ParquetWriter(
             settings,
             source=folder,

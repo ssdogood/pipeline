@@ -151,7 +151,9 @@ def test_example_settings_loads_strict():
         "_example/settings.yaml failed strict validation - the minimal "
         "runnable baseline is broken"
     )
-    assert settings["paths"]["runs_root"].endswith("/_runs")
+    # PT-046: separator-free (Windows yields backslashes)
+    from pathlib import Path as _P
+    assert _P(settings["paths"]["runs_root"]).name == "_runs"
 
 
 def test_example_settings_spans_all_sections():

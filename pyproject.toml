@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
-    "duckdb>=1.0.0",
+    "duckdb>=2.0.0",
     "oracledb>=2.0.0",
     "polars>=2.0.0",
     # RUNTIME-TRANSITIVE, not directly imported anywhere: DuckDB's
@@ -43,7 +43,8 @@ dev = [
     "pyrefly", 
     "types-PyYAML", 
     "types-ldap3",
-    "pytest-cov"
+    "pytest-cov",
+    "pyright[nodejs]==1.1.414"
 ]
 
 [project.scripts]
@@ -81,3 +82,9 @@ project-includes = [
     "**/*.py*",
     "**/*.ipynb",
 ]
+
+[tool.pyright]
+include = ["src"]
+exclude = ["**/node_modules", "**/__pycache__", "**/.venv"]
+pythonVersion = "3.11.18"
+typeCheckingMode = "standard"

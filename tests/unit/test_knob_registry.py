@@ -74,7 +74,9 @@ def test_known_payload_still_loads_via_load_settings(tmp_path):
     settings = load_settings(_write_settings(tmp_path, _base_settings()))
     assert settings is not None
     # normalize_settings derived default applied as before
-    assert settings["paths"]["runs_root"].endswith("/_runs")
+    # PT-046: separator-free (Windows yields backslashes)
+    from pathlib import Path as _P
+    assert _P(settings["paths"]["runs_root"]).name == "_runs"
 
 
 def test_invalid_range_still_refused(tmp_path):

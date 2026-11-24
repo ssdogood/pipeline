@@ -32,6 +32,7 @@ import email
 import sys
 import tempfile
 from collections.abc import Callable
+from email.message import Message  # PT-046 C3: pyright visibility
 from pathlib import Path
 
 import pytest
@@ -388,7 +389,7 @@ HTML_TPL = ("<html><body><p>${title}</p>"
             "<p>status: ${status}</p></body></html>")
 
 
-def _parts(msg: email.message.Message) -> dict[str, str]:
+def _parts(msg: Message) -> dict[str, str]:
     """Map subtype -> decoded text for every part of a message."""
     out: dict[str, str] = {}
     for part in msg.walk():
