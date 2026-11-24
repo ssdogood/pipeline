@@ -13,8 +13,10 @@ resolved via the user's credential_ref (pass_mgr). They therefore:
     (pyproject registers the marker and deselects it by default);
   - are run DELIBERATELY, on a machine with network access to AD and
     an initialized vault:   pytest -m integration -v
-  - read the REAL config (config/extractors/ad_to_stg.yaml) - this is
-    a live-fire verification, deliberately not hermetic.
+  - read the REAL config - the ACTIVE environment's extractor yaml,
+    resolved via config/environment.yaml (one declaration): this is a
+    live-fire verification against whatever environment the selector
+    names on this machine. Run it where you mean to test.
 
 Run with:  pytest tests/integration/test_ldap_connect.py -m integration -v
 """
@@ -27,7 +29,13 @@ from dpl.lib.common import load_config
 from dpl.lib.ldap_connect import LDAP_CONFIG_SCHEMA, connect, iter_paged
 from dpl.lib.logger import setup_logging
 
-CONFIG_FILE = "config/extractors/ad_to_stg.yaml"
+
+# PT-046 follow-up: the config path is derived at RUNTIME from the
+# active environment (config/environment.yaml - the one declaration).
+# The retired top-level config/extractors/ location is never consulted.
+def _env_folder():
+    from dpl.lib.environment import resolve_environment
+    return resolve_environment().folder
 
 
 @pytest.fixture(scope="module")
@@ -39,10 +47,11 @@ def ldap_cfg():
     load config, that IS the finding.
     """
     setup_logging()
-    cfg = load_config(CONFIG_FILE, LDAP_CONFIG_SCHEMA)
+    config_file = _env_folder() / "extractors" / "ad_to_stg.yaml"
+    cfg = load_config(config_file, LDAP_CONFIG_SCHEMA)
     if cfg is None:
         pytest.fail(
-            f"integration prerequisite failed: {CONFIG_FILE} did not load/"
+            f"integration prerequisite failed: {config_file} did not load/"
             f"validate. Fix the config before judging the connector."
         )
     return cfg

@@ -82,7 +82,7 @@ def write_pass_cfg(tmp_project, env: str, secrets: list) -> None:
             "methods:\n"
             "  sops:\n"
             "    binary: bin/sops-x\n"
-            "    age_key_file: ~/.dpl-keys/x\n"
+            "    age_key_file: ~/.dpl/keys/x\n"
             "    encrypted_file: secrets/secrets.sops.yaml\n")
     body += "secrets:\n" + "".join(f'  "{n}": {{}}\n' for n in secrets)
     p.write_text(body, encoding="utf-8")

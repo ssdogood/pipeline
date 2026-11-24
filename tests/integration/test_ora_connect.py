@@ -28,9 +28,7 @@ import pytest
 from dpl.lib.common import load_config, load_schema_master, load_settings
 from dpl.lib.logger import setup_logging
 from dpl.lib.ora_connect import (
-    CONFIG_FILE,
     ORACLE_CONFIG_SCHEMA,
-    SETTINGS_FILE,
     DTypeLike,
     _batch_rows,
     connect,
@@ -40,15 +38,23 @@ from dpl.lib.ora_connect import (
 )
 
 
+def _env_folder():
+    """PT-046 follow-up: the ACTIVE environment folder, resolved from
+    config/environment.yaml (the one declaration) at test runtime."""
+    from dpl.lib.environment import resolve_environment
+    return resolve_environment().folder
+
+
 # ------------------------------------------------------------------ fixtures
 @pytest.fixture(scope="module")
 def ora_cfg():
     """Real oracle_to_stg.yaml; fails loudly if it cannot load/validate."""
     setup_logging()
-    cfg = load_config(CONFIG_FILE, ORACLE_CONFIG_SCHEMA)
+    config_file = _env_folder() / "extractors" / "oracle_to_stg.yaml"
+    cfg = load_config(config_file, ORACLE_CONFIG_SCHEMA)
     if cfg is None:
         pytest.fail(
-            f"integration prerequisite failed: {CONFIG_FILE} did not "
+            f"integration prerequisite failed: {config_file} did not "
             f"load/validate. Fix the config before judging the connector."
         )
     return cfg
@@ -56,10 +62,11 @@ def ora_cfg():
 
 @pytest.fixture(scope="module")
 def ora_settings():
-    settings = load_settings(SETTINGS_FILE)
+    settings = load_settings(_env_folder() / "settings.yaml")
     if settings is None:
         pytest.fail(
-            f"integration prerequisite failed: {SETTINGS_FILE} did not load/validate."
+            "integration prerequisite failed: <env-folder>/settings.yaml "
+            "did not load/validate."
         )
     return settings
 
@@ -72,7 +79,13 @@ def _declared_for(cfg: dict, table_name: str) -> dict[str, DTypeLike] | None:
     the original smoke).
     """
     try:
-        master = load_schema_master("config/extractors/schema_master_oracle_to_stg.csv")
+        # PT-046 follow-up: resolved from the ACTIVE environment folder
+        # (config/environment.yaml - the one declaration), not a retired
+        # top-level path.
+        master_csv = (_env_folder()
+                      / "extractors"
+                      / "schema_master_oracle_to_stg.csv")
+        master = load_schema_master(master_csv)
     except FileNotFoundError:
         pytest.skip(
             "schema_master_*.csv not found - run "

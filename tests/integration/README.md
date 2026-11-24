@@ -9,5 +9,12 @@ These tests are deliberately SEPARATE from tests/unit/:
 - integration/ = requires credentials and reachable systems;
   run deliberately, never as part of routine checks.
 
-Until the first integration test exists, this folder intentionally
-holds nothing but this README.  
+Environment note (PT-046 follow-up): integration tests resolve their
+config from the ACTIVE environment - the folder named by
+config/environment.yaml. They read real values from that environment
+(extractor yamls, schema masters, settings) and hit real systems.
+Run them where you mean to test: the selector decides what the test
+sees.
+
+The integration tests below exist and run deliberately:
+  pytest tests/integration -m integration -v

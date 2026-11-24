@@ -187,7 +187,7 @@ class TestStructuralValidation:
         # A YAML list at top level - valid YAML, wrong shape.
         bad = tmp_path / "config"
         bad.mkdir(parents=True)
-        (bad / "pass_mgr.laptop.yaml").write_text("- a\n- b\n", encoding="utf-8")
+        (bad / "pass_mgr.bad_name.yaml").write_text("- a\n- b\n", encoding="utf-8")
 
         with pytest.raises(PassMgrConfigError, match="mapping"):
             load_config(tmp_path / "config" / "laptop", project_root=tmp_path)
@@ -410,12 +410,12 @@ class TestKeyFilePathResolution:
     project tree, expressed as a ~/... path - and nowhere else."""
 
     def test_tilde_key_path_expands_and_is_allowed(self, tmp_path):
-        raw = "~/.dpl-keys/laptop/fernet/key"
+        raw = "~/.dpl/keys/development/fernet/key"
         assert resolve_relative_path(raw, "fernet.key_file", tmp_path) \
             == Path(raw).expanduser().resolve()
 
     def test_age_key_path_uses_the_same_rule(self, tmp_path):
-        raw = "~/.dpl-keys/laptop/sops-age/age.key"
+        raw = "~/.dpl/keys/development/sops-age/age.key"
         assert resolve_relative_path(raw, "sops.age_key_file", tmp_path) \
             == Path(raw).expanduser().resolve()
 
