@@ -77,7 +77,9 @@ SESSION_CLASS_SUBSTRINGS = (
     "ORA-12170",          # TNS: connect timeout
     "ORA-12541",          # TNS: no listener
     "ORA-12571",          # TNS: packet writer failed
-    "DPI-1080",            # network connection was lost (thin-mode drop)
+    "DPI-1080",           # network connection was lost (thin-mode drop)
+    "DPY-4011",           # database or network closed the connection
+    "DPY-4033",           # database closed the connection because the connection's idle time
     # generic transport (matches yesterday's RETRYABLE_ERRORS set)
     "ConnectionReset",
     "ConnectionRefused",
