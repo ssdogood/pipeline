@@ -271,8 +271,9 @@ def test_bad_retries_rejected(tmp_path: Path) -> None:
 
 
 def test_missing_templates_dir_rejected(tmp_path: Path) -> None:
-    errs = errors_of(tmp_path, "  templates_dir: ",
-                     "  templates_dir: nosuchdir/")
+    errs = errors_of(tmp_path, 
+                        f"  templates_dir: {tmp_path / 'templates'}\n", 
+                        "   templates_dir: nosuchdir/\n")
     assert any("templates_dir" in e for e in errs)
 
 
