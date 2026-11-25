@@ -14,11 +14,11 @@ fields (run_id, profile, times, status, pending_tables) so history can
 be rebuilt from files alone.
 
 Declared schema (M3/M5):
-    The master CSV (config/extractors/schema_master_oracle_to_stg.csv) is 
-    the SINGLE source of truth for column names, order and dtypes. It is 
-    loaded once per run, cross-checkedagainst config.yaml, and handed to 
-    iter_batches() so every batch DataFrame is CONSTRUCTED with the declared 
-    dtypes instead of inferring them from the data (which mis-types all-null 
+    The master CSV (config/extractors/schema_master_oracle_to_stg.csv) is
+    the SINGLE source of truth for column names, order and dtypes. It is
+    loaded once per run, cross-checkedagainst config.yaml, and handed to
+    iter_batches() so every batch DataFrame is CONSTRUCTED with the declared
+    dtypes instead of inferring them from the data (which mis-types all-null
     columns and blows up later in the writer).
 
 Logging: dpl/lib/logger.py - "dpl.oracle_to_stg" under the central dpl tree.
@@ -37,7 +37,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from dpl.lib import asof, pass_mgr
+from dpl.lib import asof, pass_mgr, schedule
 from dpl.lib.common import (
     FAILURE_STATUSES,
     landing_dir,
@@ -100,21 +100,25 @@ RULES_CSV = "<env-folder>/extractors/table_rules_oracle_to_stg.csv"
 
 
 def _master_auto() -> str:
-    return str(resolve_environment().folder / "extractors"
-               / "schema_master_oracle_to_stg.csv")
+    return str(
+        resolve_environment().folder / "extractors" / "schema_master_oracle_to_stg.csv"
+    )
 
 
 def _rules_csv() -> str:
-    return str(resolve_environment().folder / "extractors"
-               / "table_rules_oracle_to_stg.csv")
+    return str(
+        resolve_environment().folder / "extractors" / "table_rules_oracle_to_stg.csv"
+    )
 
 
 # Which connection *type* this extractor handles. Selection is by type,
 # never by connection name - names are user-chosen and arbitrary.
 SOURCE_TYPE = "oracle"
 
-def _check_exists(settings: dict, cfg: dict, load_date: date,
-                  conn_name: str, table_name: str) -> Path | None:
+
+def _check_exists(
+    settings: dict, cfg: dict, load_date: date, conn_name: str, table_name: str
+) -> Path | None:
     """Return the destination dir if any published part exists; else None.
 
     Disk-as-truth: a table counts as done when at least one part file
@@ -155,8 +159,9 @@ def _build_stats(
     }
 
 
-def _declared_schema_for(schema_master: dict | None, folder: str,
-                         table_name: str) -> dict[str, DTypeLike] | None:
+def _declared_schema_for(
+    schema_master: dict | None, folder: str, table_name: str
+) -> dict[str, DTypeLike] | None:
     """Resolve the master-CSV dtype strings for one table into Polars types.
 
     Returns None when no master was supplied (legacy/inference path).
@@ -176,8 +181,8 @@ def _declared_schema_for(schema_master: dict | None, folder: str,
     # dict preserves the CSV row order == source column order == cursor order
     return {col: resolve_dtype(dt) for col, dt in entry["columns"].items()}
 
-def _rules_for(rules: dict | None, folder: str,
-               table_name: str) -> dict:
+
+def _rules_for(rules: dict | None, folder: str, table_name: str) -> dict:
     """Fetch the rules entry for one table; empty entry when absent.
 
     A table with no row in table_rules.csv simply runs with no dedup and
@@ -191,8 +196,10 @@ def _rules_for(rules: dict | None, folder: str,
         {"raw_dedup": None, "sort_spec": []},
     )
 
+
 def _utc_now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
 
 def _task_for(
     cfg: dict,
@@ -234,9 +241,9 @@ def _task_for(
     # --paused-table lifts a table-level pause for THIS run only and
     # can never lift a folder-level one.
     paused_state, pause_norm, _was_lifted = lifted_by_override(
-        table_cfg, cfg["connections"].get(conn_name), paused_override)
-    pause_line = (describe(paused_state, pause_norm)
-                  if pause_norm is not None else "")
+        table_cfg, cfg["connections"].get(conn_name), paused_override
+    )
+    pause_line = describe(paused_state, pause_norm) if pause_norm is not None else ""
     pause_fields = {}
     if paused_state == PAUSED:
         # pyrefly narrowing: PAUSED implies a governing block exists
@@ -266,8 +273,9 @@ def _task_for(
             return paused_stats
 
         if not force:
-            existing_dir = _check_exists(settings, cfg, load_date,
-                                         conn_name, table_name)
+            existing_dir = _check_exists(
+                settings, cfg, load_date, conn_name, table_name
+            )
             if existing_dir:
                 tlog.info("skipping (%s exists)", existing_dir)
                 return _build_stats(table_cfg, load_date, "skipped")
@@ -296,20 +304,31 @@ def _task_for(
             sort_spec=sort_spec,
             run_id=run_id,
         ) as w:
-            for df in iter_batches(conn, query, batch_size=batch_rows,
-                                   declared=declared, strict=strict_cast):
+            for df in iter_batches(
+                conn,
+                query,
+                batch_size=batch_rows,
+                declared=declared,
+                strict=strict_cast,
+            ):
                 w.append(df)
             wstats = w.close()
         if wstats is None:
             # regression guard: close() always returns a stats dict
             raise RuntimeError(
                 f"internal error: writer returned no stats for "
-                f"{folder}.{table_name} - close() was not called?")
-        tlog.info("completed (%d rows, %.1fs%s)", wstats.get("rows_read", 0),
-                  time.time() - start,
-                  ", sorted" if wstats.get("sort_columns") else "")
+                f"{folder}.{table_name} - close() was not called?"
+            )
+        tlog.info(
+            "completed (%d rows, %.1fs%s)",
+            wstats.get("rows_read", 0),
+            time.time() - start,
+            ", sorted" if wstats.get("sort_columns") else "",
+        )
         return _build_stats(
-            table_cfg, load_date, "extracted",
+            table_cfg,
+            load_date,
+            "extracted",
             rows_read=wstats.get("rows_read", 0),
             rows_written=wstats.get("rows_written", 0),
             duration_sec=time.time() - start,
@@ -317,6 +336,7 @@ def _task_for(
         )
 
     return attempt
+
 
 def prepare_run(
     cfg: dict,
@@ -380,7 +400,8 @@ def prepare_run(
                 f"'{t['connection']}') declares a table-level "
                 f"'schedule' - schedule is a connection-level key "
                 f"(REQ-032-9); feeds with different cadences belong "
-                f"in separate connection entries")
+                f"in separate connection entries"
+            )
 
     # PT-015 (B2): as_of + type/window_days validation. Universal
     # contract (operator ruling 2026-11-25: dev/test break-once is
@@ -401,12 +422,16 @@ def prepare_run(
                 "connection '%s' declares no 'as_of' - assuming T-0 "
                 "(live snapshot as of extraction); write 'as_of: T-0' "
                 "in the yaml to silence this warning",
-                conn_name)
-        for key in ("schedule",):
-            if key in conn_cfg:
-                # full grammar validation happens in B3's decider;
-                # placement guard only: schedule must not be table-level
-                pass
+                conn_name,
+            )
+        # PT-032 (B3): every declared schedule block is grammar-
+        # validated HERE, at startup, whether or not the connection is
+        # due today - a malformed schedule must refuse the run loudly,
+        # never silently disable a connection's cadence.
+        if "schedule" in conn_cfg:
+            schedule.validate_schedule_block(
+                conn_cfg["schedule"], f"pipe oracle connection '{conn_name}'"
+            )
     for t in cfg["tables"]:
         conn_name = t["connection"]
         conn_cfg = cfg["connections"].get(conn_name)
@@ -419,12 +444,14 @@ def prepare_run(
                 f"is a CONNECTION-level key (REQ-015-10); a "
                 f"connection's feeds share one lag (if a genuine "
                 f"mixed-lag case appears, table-level as_of becomes "
-                f"a DESIGNED extension)")
+                f"a DESIGNED extension)"
+            )
         if "type" not in t:
             raise ValueError(
                 f"{tctx}: table 'type' is REQUIRED (master | "
                 f"transaction) - the taxonomy has no safe default; "
-                f"the manifest coverage record depends on it")
+                f"the manifest coverage record depends on it"
+            )
         table_type = asof.validate_table_type(t["type"], tctx)
         if table_type == "transaction":
             if "window_days" not in t:
@@ -432,15 +459,15 @@ def prepare_run(
                     f"{tctx}: 'window_days' is REQUIRED for "
                     f"transaction tables - it declares the width "
                     f"the QUERY pulls and drives the manifest "
-                    f"coverage statement (REQ-015-7)")
+                    f"coverage statement (REQ-015-7)"
+                )
             asof.validate_window_days(t["window_days"], tctx)
         elif "window_days" in t:
             raise ValueError(
                 f"{tctx}: 'window_days' on a master table is "
                 f"nonsensical - a snapshot has no pull window; "
-                f"remove the key")
-
-
+                f"remove the key"
+            )
 
     # PT-014: --tables naming paused tables without --paused-table
     # refuses THOSE tables loudly (the operator remedy is in the
@@ -463,12 +490,13 @@ def prepare_run(
                 "paused table(s) %s requested without --paused-table - "
                 "to extract a paused table, rerun with "
                 "--paused-table (or remove its pause tag)",
-                ", ".join(refused))
-            only_tables = [n for n in only_tables
-                           if n not in set(refused)]
+                ", ".join(refused),
+            )
+            only_tables = [n for n in only_tables if n not in set(refused)]
 
     tables = [
-        t for t in cfg["tables"]
+        t
+        for t in cfg["tables"]
         if cfg["connections"].get(t["connection"], {}).get("type") == SOURCE_TYPE
     ]
 
@@ -494,26 +522,29 @@ def prepare_run(
                         "connection '%s' is paused and requested "
                         "without --paused-table - to extract it, rerun "
                         "with --paused-table (or remove its pause tag)",
-                        only_connection)
+                        only_connection,
+                    )
                     refused_conn = True
             if refused_conn:
                 tables = []
             else:
                 if only_tables:
-                    members = {t["name"] for t in cfg["tables"]
-                               if t["connection"] == only_connection}
-                    outsiders = [n for n in only_tables
-                                 if n not in members]
+                    members = {
+                        t["name"]
+                        for t in cfg["tables"]
+                        if t["connection"] == only_connection
+                    }
+                    outsiders = [n for n in only_tables if n not in members]
                     if outsiders:
                         rlog.error(
                             "table(s) %s are not on connection '%s' - "
                             "check the name(s) (typo?) or drop "
                             "--connection",
-                            ", ".join(outsiders), only_connection)
-                        only_tables = [n for n in only_tables
-                                       if n in members]
-                tables = [t for t in tables
-                          if t["connection"] == only_connection]
+                            ", ".join(outsiders),
+                            only_connection,
+                        )
+                        only_tables = [n for n in only_tables if n in members]
+                tables = [t for t in tables if t["connection"] == only_connection]
 
     if only_tables is not None and not only_tables:
         # PT-014 live-run finding (2026-11-18): refusal can empty the
@@ -567,6 +598,32 @@ def extract_folder(
     # the first table and read its per-connection knobs.
     conn_name = folder_tables[0]["connection"]
     conn_cfg = cfg["connections"][conn_name]
+
+    # PT-032 (B3): due-today decider. Today = the run's ONE calendar
+    # date (load_date), fixed at run start. Absent schedule = due
+    # every day (REQ-032-5). A non-due connection yields ZERO jobs -
+    # the skip is RECORDED (per-table not_scheduled; paused wins the
+    # status word per the composition ruling) and the manifest is
+    # still written, same doctrine as all-paused exit-0. --override
+    # (B4) will pass through here explicitly; today the decider gates
+    # every profile equally.
+    if not schedule.is_due_connection(conn_cfg, load_date):
+        rlog.info(
+            "[%s] not scheduled today (%s) - %d table(s) skipped "
+            "with record, no session opened",
+            folder,
+            load_date.isoformat(),
+            len(folder_tables),
+        )
+        results = []
+        for t in folder_tables:
+            state, _ = state_for(t, conn_cfg)
+            status = "paused" if state == PAUSED else "not_scheduled"
+            results.append(_build_stats(t, load_date, status))
+        return _finish_envelope(
+            ctx, folder, results, load_date, run_id, profile, runs_root, rlog
+        )
+
     keepalive = (settings.get("extraction") or {}).get("keepalive_minutes")
     table_conc = conn_cfg.get("table_concurrency", 1)
     retries = conn_cfg.get("retries", 2)
@@ -575,23 +632,44 @@ def extract_folder(
     def factory(_cn=conn_name, _ka=keepalive):
         return connect(cfg, _cn, expire_time=_ka)
 
-    rlog.info("[%s] extracting %d table(s) (lanes=%d, retries=%d, "
-              "keepalive=%s min)", folder, len(folder_tables),
-              table_conc, retries, keepalive)
+    rlog.info(
+        "[%s] extracting %d table(s) (lanes=%d, retries=%d, keepalive=%s min)",
+        folder,
+        len(folder_tables),
+        table_conc,
+        retries,
+        keepalive,
+    )
 
     total_tables = len(folder_tables)
     tasks = [
-        (t["name"], _task_for(cfg, settings, t, load_date, force,
-                              ctx["schema_master"], ctx["rules"], run_id,
-                              pos=pos, total=total_tables,
-                              paused_override=ctx.get("paused_override", False)))
+        (
+            t["name"],
+            _task_for(
+                cfg,
+                settings,
+                t,
+                load_date,
+                force,
+                ctx["schema_master"],
+                ctx["rules"],
+                run_id,
+                pos=pos,
+                total=total_tables,
+                paused_override=ctx.get("paused_override", False),
+            ),
+        )
         for pos, t in enumerate(folder_tables, start=1)
     ]
 
     outcomes = run_folder_tables(
-        folder, tasks, factory,
-        table_concurrency=table_conc, retries=retries,
-        backoff_seconds=backoff)
+        folder,
+        tasks,
+        factory,
+        table_concurrency=table_conc,
+        retries=retries,
+        backoff_seconds=backoff,
+    )
 
     results: list[dict[str, Any]] = []
     for t, oc in zip(folder_tables, outcomes):
@@ -601,19 +679,44 @@ def extract_folder(
             # duration on the failure path is 0.0: the worker owns
             # the clock now, and duration_sec is volatile-stripped by
             # the equivalence comparator anyway.
-            stats = _build_stats(t, load_date, "failed",
-                                 error=oc["error"])
+            stats = _build_stats(t, load_date, "failed", error=oc["error"])
         stats["attempts"] = oc["attempts"]
         results.append(stats)
 
         if stats["status"] in FAILURE_STATUSES:
-            rlog.warning("[%s] %s failed after %d attempt(s) - continuing",
-                         folder, t["name"], stats["attempts"])
+            rlog.warning(
+                "[%s] %s failed after %d attempt(s) - continuing",
+                folder,
+                t["name"],
+                stats["attempts"],
+            )
 
     folder_failed = any(t["status"] in FAILURE_STATUSES for t in results)
 
-    pending_tables = [t["name"] for t in results
-                      if t["status"] in FAILURE_STATUSES]
+    return _finish_envelope(
+        ctx, folder, results, load_date, run_id, profile, runs_root, rlog, folder_failed
+    )
+
+
+def _finish_envelope(
+    ctx: dict,
+    folder: str,
+    results: list[dict[str, Any]],
+    load_date: date,
+    run_id: str,
+    profile: str,
+    runs_root: str,
+    rlog: Any,
+    folder_failed: bool = False,
+) -> dict[str, Any]:
+    """Shared envelope tail for extract_folder (normal + not-due paths).
+
+    Same assembly for every status vocabulary so history ingest and
+    the comparator see ONE shape. B3 adds 'not_scheduled' to the
+    operator counts (tables_not_scheduled mirrors tables_paused -
+    the four-key mirror doctrine; counted when present).
+    """
+    pending_tables = [t["name"] for t in results if t["status"] in FAILURE_STATUSES]
 
     envelope = {
         # run-level fields: update_history rebuilds the DB from these
@@ -631,21 +734,21 @@ def extract_folder(
         # additive keys; history ingestion reads named fields only,
         # the comparator demands equality when both sides have them.
         "tables_total": len(results),
-        "tables_extracted": sum(
-            1 for r in results if r["status"] == "extracted"),
-        "tables_skipped": sum(
-            1 for r in results if r["status"] == "skipped"),
-        "tables_paused": sum(
-            1 for r in results if r["status"] == "paused"),
-        "tables_failed": sum(
-            1 for r in results if r["status"] in FAILURE_STATUSES),
+        "tables_extracted": sum(1 for r in results if r["status"] == "extracted"),
+        "tables_skipped": sum(1 for r in results if r["status"] == "skipped"),
+        "tables_paused": sum(1 for r in results if r["status"] == "paused"),
+        "tables_failed": sum(1 for r in results if r["status"] in FAILURE_STATUSES),
+        # PT-032 (B3): schedule-skip count - distinct vocabulary,
+        # same additive-keys doctrine as the counts above.
+        "tables_not_scheduled": sum(
+            1 for r in results if r["status"] == "not_scheduled"
+        ),
     }
 
     # THE manifest write - extractor-owned, into the archive.
     manifest_dir = runs_dir(runs_root, load_date, folder)
     write_manifest(manifest_dir, run_id, envelope)
-    rlog.info("manifest written: %s/_manifest_%s.json",
-              manifest_dir, run_id)
+    rlog.info("manifest written: %s/_manifest_%s.json", manifest_dir, run_id)
 
     return envelope
 
@@ -668,43 +771,65 @@ def extract_all(
     raise exactly as before; table failures are recorded, never
     raised; any_failed reflects any folder's partial_failure.
     """
-    ctx = prepare_run(cfg, settings, only_tables=only_tables, run_id=run_id,
-                      paused_override=paused_override)
+    ctx = prepare_run(
+        cfg,
+        settings,
+        only_tables=only_tables,
+        run_id=run_id,
+        paused_override=paused_override,
+    )
 
     manifests: dict[str, dict[str, Any]] = {}
     for folder in ctx["by_folder"]:
         manifests[folder] = extract_folder(
-            ctx, cfg, settings, load_date, folder, force=force,
-            run_id=run_id, profile=profile)
+            ctx,
+            cfg,
+            settings,
+            load_date,
+            folder,
+            force=force,
+            run_id=run_id,
+            profile=profile,
+        )
 
-    any_failed = any(m["status"] == "partial_failure"
-                     for m in manifests.values())
+    any_failed = any(m["status"] == "partial_failure" for m in manifests.values())
     return manifests, any_failed
 
 
 def main(run_id: str = "-") -> int:
     parser = argparse.ArgumentParser(description="Oracle ETL extractor")
-    parser.add_argument("--force", action="store_true", help="re-extract even if files exist")
+    parser.add_argument(
+        "--force", action="store_true", help="re-extract even if files exist"
+    )
     parser.add_argument("--tables", help="comma-separated table names to extract")
-    parser.add_argument("--paused-table", action="store_true",
-                        help="with --tables naming paused table(s), "
-                             "lift their TABLE-level pause for this run")
+    parser.add_argument(
+        "--paused-table",
+        action="store_true",
+        help="with --tables naming paused table(s), "
+        "lift their TABLE-level pause for this run",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="verbose logging")
     from dpl.lib.environment import resolve_environment
+
     _env = resolve_environment()
-    parser.add_argument("-c", "--config",
-                        default=str(_env.folder / "extractors" / "oracle_to_stg.yaml"),
-                        help="pipe yaml (default: <env-folder>/extractors/oracle_to_stg.yaml)")
-    parser.add_argument("--settings",
-                        default=str(_env.folder / "settings.yaml"),
-                        help="settings yaml (default: <env-folder>/settings.yaml)")
+    parser.add_argument(
+        "-c",
+        "--config",
+        default=str(_env.folder / "extractors" / "oracle_to_stg.yaml"),
+        help="pipe yaml (default: <env-folder>/extractors/oracle_to_stg.yaml)",
+    )
+    parser.add_argument(
+        "--settings",
+        default=str(_env.folder / "settings.yaml"),
+        help="settings yaml (default: <env-folder>/settings.yaml)",
+    )
 
     args = parser.parse_args()
 
     setup_logging()
 
     if args.verbose:
-        log.setLevel(logging.DEBUG)     # bump only this component, not the tree
+        log.setLevel(logging.DEBUG)  # bump only this component, not the tree
 
     try:
         cfg = load_config(CONFIG_FILE, ORACLE_CONFIG_SCHEMA)
@@ -713,16 +838,18 @@ def main(run_id: str = "-") -> int:
 
         settings = load_settings(SETTINGS_FILE)
         if settings is None:
-            raise RuntimeError(f"Failed to load {SETTINGS_FILE}")           
-    except Exception as exc:                                    # noqa: BLE001 - top-level: any startup failure maps to exit code 1 with a logged cause
+            raise RuntimeError(f"Failed to load {SETTINGS_FILE}")
+    except Exception as exc:  # noqa: BLE001 - top-level: any startup failure maps to exit code 1 with a logged cause
         log.critical("config/settings load failed: %s", exc)
         return 1
 
     only_tables = [t.strip() for t in args.tables.split(",")] if args.tables else None
     paused_override = bool(args.paused_table)
     if paused_override and not only_tables:
-        log.error("--paused-table modifies --tables selections only - "
-                  "rerun as: --tables <names> --paused-table")
+        log.error(
+            "--paused-table modifies --tables selections only - "
+            "rerun as: --tables <names> --paused-table"
+        )
         return 3
     load_date = date.today()
 
@@ -731,15 +858,24 @@ def main(run_id: str = "-") -> int:
     if run_id == "-":
         run_id = make_run_id(prefix="manual_")
 
-    log.info("starting Oracle extraction (force=%s, tables=%s, strict_cast=%s, "
-             "run_id=%s)",
-             args.force, only_tables,
-             settings.get("polars", {}).get("strict_cast", True), run_id)
+    log.info(
+        "starting Oracle extraction (force=%s, tables=%s, strict_cast=%s, run_id=%s)",
+        args.force,
+        only_tables,
+        settings.get("polars", {}).get("strict_cast", True),
+        run_id,
+    )
 
     try:
         manifests, any_failed = extract_all(
-            cfg, settings, load_date, force=args.force, only_tables=only_tables,
-            run_id=run_id, profile="manual", paused_override=paused_override,
+            cfg,
+            settings,
+            load_date,
+            force=args.force,
+            only_tables=only_tables,
+            run_id=run_id,
+            profile="manual",
+            paused_override=paused_override,
         )
     except (ValueError, KeyError, FileNotFoundError) as exc:
         log.critical("startup validation failed: %s", exc)
@@ -754,7 +890,10 @@ def main(run_id: str = "-") -> int:
 
     log.info(
         "extraction complete: %d extracted, %d skipped, %d paused, %d failed",
-        extracted, skipped, paused, failed,
+        extracted,
+        skipped,
+        paused,
+        failed,
     )
 
     if any_failed:
