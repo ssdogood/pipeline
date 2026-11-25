@@ -212,8 +212,8 @@ def ingest_manifest(conn, mpath: Path) -> None:
         (run_id, folder, load_date, status,
         tables_total, tables_extracted, tables_skipped, tables_failed,
         tables_paused, tables_not_scheduled, as_of, anchor_date,
-        exit_code, finished_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        missed_days, exit_code, finished_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             env["run_id"],
             env["folder"],
@@ -227,6 +227,7 @@ def ingest_manifest(conn, mpath: Path) -> None:
             counts["tables_not_scheduled"],
             env.get("as_of"),
             env.get("anchor_date"),
+            env.get("missed_days"),
             wrapper_exit,
             env.get("finished_at"),
         ),

@@ -28,6 +28,7 @@ MODULES = (
     "lib/extraction_config.py",
     "lib/schedule.py",
     "lib/asof.py",
+    "lib/missed_days.py",
     "lib/schema_dispatch.py",
     "lib/folder_runner.py",
     "extractors/oracle_to_stg.py",

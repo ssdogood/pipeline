@@ -862,6 +862,29 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 - never fatal
         log.error("pause digest could not be evaluated: %s", exc)
 
+    # ── PT-032 B7: missed-scheduled-day report (once per run) ────
+    # Pure aggregate over the run's envelopes -> ONE email when any
+    # folder reports missed due-days. Override runs report too (the
+    # override extracts, it never silences - design 3.4). Never fatal
+    # (FR-17): a broken email stack cannot damage a data run.
+    try:
+        from dpl.lib.missed_days import missed_day_payload
+
+        payload = missed_day_payload(manifests)
+        if payload:
+            log.warning(
+                "schedule report: %s missed scheduled day(s) across "
+                "%s folder(s)",
+                payload["missed_count"],
+                payload["missed_folders"],
+            )
+            payload["run_id"] = run_id
+            _notify("schedule_missed", run_id, payload)
+        else:
+            log.debug("schedule report: no missed scheduled days")
+    except Exception as exc:  # noqa: BLE001 - never fatal
+        log.error("missed-day report could not be evaluated: %s", exc)
+
     # ── Email events: fire after final state is known, before exit ──
     # Exactly one terminal event per run. Tier protection for
     # run_failed lives in config.py (enabled: false -> load error).

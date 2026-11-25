@@ -1,0 +1,18 @@
+DPL missed-schedule report - scheduled extraction day(s) that ran nowhere.
+
+Run ID:          ${run_id}
+Missed day(s):   ${missed_count}
+Affected folder(s): ${missed_folders}
+
+${missed_lines}
+
+A missed day means the machine was off, or the run failed, on a day
+this connection was scheduled to extract. Recovery, if the source
+still holds the data:
+
+    python -m dpl.wrapper.run --connection <name> --ignore-schedule
+
+(the override extracts despite the schedule; the report above is
+never silenced by it). Widen the query window in a temporary config
+if the missed days fall outside the normal pull window.
+Full log: grep "run_id=${run_id}" logs/dpl_pipeline.log

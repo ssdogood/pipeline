@@ -36,6 +36,7 @@ Schema v2.1 (PT-014 Commit 2, 2026-11-19):
   - folder_runs : + tables_paused (mirrors the envelope count).
   - v2.2 (PT-032/015): folder_runs + tables_not_scheduled, as_of,
     anchor_date; table_runs + table_type, coverage_kind/from/to.
+  - v2.2 (B7): folder_runs + missed_days (JSON miss report).
   Applied by init_db() as additive ALTER TABLE, in place and lossless -
   unlike the v1 rename, old rows simply keep their NULLs.
 
@@ -133,6 +134,7 @@ CREATE TABLE IF NOT EXISTS folder_runs (
     tables_not_scheduled INTEGER,    -- v2.2 (PT-032): schedule-skip mirror
     as_of            TEXT,           -- v2.2 (PT-015): declared lag (T-0|T-1|T-2)
     anchor_date      TEXT,           -- v2.2 (PT-015): computed anchor (run-N)
+    missed_days      TEXT,           -- v2.2 (PT-032 B7): JSON miss report
     exit_code        INTEGER,        -- from envelope wrapper.exit_code (pre-0.3.0: NULL)
     finished_at      TEXT,
     PRIMARY KEY (run_id, folder)
@@ -330,7 +332,7 @@ def _migrate_v2_2(conn: sqlite3.Connection) -> bool:
         return False  # fresh DB: the v2.2 DDL already has them
     if "coverage_kind" in _table_columns(
         conn, "table_runs"
-    ) and "tables_not_scheduled" in _table_columns(conn, "folder_runs"):
+    ) and "missed_days" in _table_columns(conn, "folder_runs"):
         return False  # already v2.2: idempotent re-run
 
     additions: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
@@ -349,6 +351,7 @@ def _migrate_v2_2(conn: sqlite3.Connection) -> bool:
                 ("tables_not_scheduled", "INTEGER"),
                 ("as_of", "TEXT"),
                 ("anchor_date", "TEXT"),
+            ("missed_days", "TEXT"),
             ),
         ),
     )

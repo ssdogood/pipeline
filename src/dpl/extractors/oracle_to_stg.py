@@ -37,7 +37,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from dpl.lib import asof, pass_mgr, schedule
+from dpl.lib import asof, missed_days, pass_mgr, schedule
 from dpl.lib.common import (
     FAILURE_STATUSES,
     landing_dir,
@@ -662,6 +662,19 @@ def extract_folder(
     )
     lag = asof.AS_OF_LAGS[as_of_declared]
     anchor_date = asof.anchor(load_date, lag)
+    # PT-032 (B7): missed-day detection - scheduled connections only,
+    # BOTH paths record it (an override run extracts but never silences
+    # the report - design 3.4). Detection failure is never fatal:
+    # extraction outranks the miss report (never-raise seam).
+    miss_report: dict[str, object] | None = None
+    if conn_cfg.get("schedule") is not None:
+        try:
+            lasts = missed_days.fetch_last_success(
+                Path(settings["paths"]["landing_root"]) / "_history" / "dpl_history.db")
+            miss_report = missed_days.missed_days_for_connection(
+                conn_cfg["schedule"], lasts.get(folder), load_date)
+        except Exception as exc:  # noqa: BLE001 - reporting never fatal
+            rlog.warning("[%s] missed-day detection failed: %s", folder, exc)
     if not due:
         rlog.info(
             "[%s] not scheduled today (%s) - %d table(s) skipped "
@@ -686,6 +699,7 @@ def extract_folder(
             rlog,
             as_of_declared=as_of_declared,
             anchor_date=anchor_date,
+            miss_report=miss_report,
         )
     overridden = bool(ctx.get("ignore_schedule")) and not conn_due
     if overridden:
@@ -784,6 +798,7 @@ def extract_folder(
         overridden,
         as_of_declared,
         anchor_date,
+        miss_report,
     )
 
 
@@ -800,6 +815,7 @@ def _finish_envelope(
     schedule_overridden: bool = False,
     as_of_declared: str | None = None,
     anchor_date: date | None = None,
+    miss_report: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     """Shared envelope tail for extract_folder (normal + not-due paths).
 
@@ -826,6 +842,12 @@ def _finish_envelope(
         # manifests predating B5.
         "as_of": as_of_declared,
         "anchor_date": (anchor_date.isoformat() if anchor_date is not None else None),
+        # PT-032 (B7): the folder's missed-scheduled-day report -
+        # additive keys; absent in manifests predating B7. populated for
+        # BOTH the normal and not-due paths; override runs report too.
+        "missed_days": (miss_report["missed"] if miss_report else []),
+        "missed_days_from": miss_report["from"] if miss_report else None,
+        "missed_days_truncated": miss_report["truncated"] if miss_report else False,
         "tables": results,
         # operator summary counts (Part B request, 2026-11-14):
         # additive keys; history ingestion reads named fields only,
