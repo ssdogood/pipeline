@@ -66,14 +66,16 @@ def _token_error(ctx: str, token: object) -> ValueError:
     return ValueError(
         f"{ctx}: invalid schedule token {token!r} - allowed: "
         f"weekday words {WEEKDAYS[0]}..{WEEKDAYS[-1]}, integers 1..31, "
-        f"'{_LAST}'")
+        f"'{_LAST}'"
+    )
 
 
 def _validate_tokens(tokens: object, key: str, ctx: str) -> list[str | int]:
     """Validate one token list; return it normalized (digit-strings -> int)."""
     if not isinstance(tokens, list):
         raise ValueError(
-            f"{ctx}: schedule '{key}' must be a list of tokens, got {tokens!r}")
+            f"{ctx}: schedule '{key}' must be a list of tokens, got {tokens!r}"
+        )
     if not tokens:
         raise ValueError(f"{ctx}: schedule '{key}' must not be empty")
     normalized: list[str | int] = []
@@ -117,31 +119,34 @@ def validate_schedule_block(block: object, ctx: str) -> dict[str, list[str | int
     if not isinstance(block, dict):
         raise ValueError(
             f"{ctx}: 'schedule' must be a mapping with exactly one of "
-            f"{list(_ALLOWED_KEYS)}, got {block!r}")
+            f"{list(_ALLOWED_KEYS)}, got {block!r}"
+        )
 
     block_typed: dict[object, object] = cast("dict[object, object]", block)
-    unknown: list[str] = sorted(
-        str(k) for k in block_typed if k not in _ALLOWED_KEYS)
+    unknown: list[str] = sorted(str(k) for k in block_typed if k not in _ALLOWED_KEYS)
     if unknown:
         hint = ""
         if "months" in unknown:
-            hint = (" ('months' is a reserved future key for monthly "
-                    "cadences - not yet a feature)")
+            hint = (
+                " ('months' is a reserved future key for monthly "
+                "cadences - not yet a feature)"
+            )
         raise ValueError(
             f"{ctx}: unknown key(s) in 'schedule': {unknown}{hint} - "
-            f"allowed keys: {list(_ALLOWED_KEYS)}")
+            f"allowed keys: {list(_ALLOWED_KEYS)}"
+        )
 
     if "on" in block and "except" in block:
         raise ValueError(
             f"{ctx}: schedule declares BOTH 'on' and 'except' - that is a "
-            f"contradiction, not a combination; declare exactly one")
+            f"contradiction, not a combination; declare exactly one"
+        )
 
     for key in _ALLOWED_KEYS:
         if key in block_typed:
             return {key: _validate_tokens(block_typed[key], key, ctx)}
 
-    raise ValueError(
-        f"{ctx}: 'schedule' must declare 'on' or 'except', got {block!r}")
+    raise ValueError(f"{ctx}: 'schedule' must declare 'on' or 'except', got {block!r}")
 
 
 def is_due(block: dict[str, list[str | int]], date: dt.date) -> bool:
@@ -184,3 +189,41 @@ def is_due_connection(conn_cfg: Mapping[str, object], date: dt.date) -> bool:
         return True
     ctx = f"connection '{conn_cfg.get('folder', '<unknown>')}'"
     return is_due(validate_schedule_block(block, ctx), date)
+
+
+IGNORE_SCHEDULE_FLAG = "--ignore-schedule"
+
+
+def validate_ignore_schedule_pairing(
+    ignore_schedule: bool,
+    only_tables: list[str] | None,
+    only_connection: str | None,
+    has_connection_flag: bool = False,
+) -> str | None:
+    """Validate Option-B pairing for --ignore-schedule.
+
+    A bare flag would silently broaden the run to EVERY connection -
+    exactly the Sunday-stale-data mistake the flag exists to
+    prevent. So the flag REQUIRES a --tables and/or --connection
+    selection; bare --ignore-schedule refuses with the corrective
+    message. `has_connection_flag` selects the correct hint: the
+    wrapper owns --connection, the extractor CLIs do NOT (there the
+    target must come via --tables). Returns the error text, or None
+    when the pairing is legal.
+    """
+    if not ignore_schedule:
+        return None
+    if not (only_tables or only_connection):
+        if has_connection_flag:
+            return (
+                f"{IGNORE_SCHEDULE_FLAG} modifies --tables/--connection "
+                "selections only - rerun as: --tables <names> "
+                f"{IGNORE_SCHEDULE_FLAG} (or --connection <name> "
+                f"{IGNORE_SCHEDULE_FLAG})"
+            )
+        return (
+            f"{IGNORE_SCHEDULE_FLAG} modifies --tables selections only - "
+            "rerun as: --tables <names> "
+            f"{IGNORE_SCHEDULE_FLAG}"
+        )
+    return None

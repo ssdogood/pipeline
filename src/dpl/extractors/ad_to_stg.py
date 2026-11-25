@@ -463,6 +463,7 @@ def prepare_run(
     run_id: str = "-",
     paused_override: bool = False,
     only_connection: str | None = None,
+    ignore_schedule: bool = False,
 ) -> dict[str, Any]:
     """Run head carved out of extract_all (Phase 4 C1).
 
@@ -681,6 +682,7 @@ def prepare_run(
         "schema_master": schema_master,
         "rules": rules,
         "paused_override": paused_override,
+        "ignore_schedule": ignore_schedule,
     }
 
 
@@ -716,7 +718,12 @@ def extract_folder(
     # absent schedule = due every day. Non-due connection yields ZERO
     # jobs; skip is RECORDED (not_scheduled; pause wins the status
     # word), manifest still written, no session opened.
-    if not schedule.is_due_connection(conn_cfg, load_date):
+    # PT-032 (B4): --ignore-schedule (Option B - always a deliberate,
+    # named act) bypasses the decider for this run; forcing a
+    # NON-DUE connection is stamped loudly in the log and envelope.
+    conn_due = schedule.is_due_connection(conn_cfg, load_date)
+    due = conn_due or bool(ctx.get("ignore_schedule"))
+    if not due:
         rlog.info(
             "[%s] not scheduled today (%s) - %d table(s) skipped "
             "with record, no session opened",
@@ -730,7 +737,22 @@ def extract_folder(
             status = "paused" if state == PAUSED else "not_scheduled"
             results.append(_build_stats(t, load_date, status))
         return _finish_envelope(
-            ctx, folder, results, load_date, run_id, profile, runs_root, rlog
+            ctx,
+            folder,
+            results,
+            load_date,
+            run_id,
+            profile,
+            runs_root,
+            rlog,
+        )
+    overridden = bool(ctx.get("ignore_schedule")) and not conn_due
+    if overridden:
+        rlog.warning(
+            "[%s] NOT scheduled for %s - extracting anyway "
+            "(--ignore-schedule; deliberate off-schedule pull)",
+            folder,
+            load_date.isoformat(),
         )
 
     table_conc = conn_cfg.get("table_concurrency", 1)
@@ -799,7 +821,16 @@ def extract_folder(
     folder_failed = any(t["status"] in FAILURE_STATUSES for t in results)
 
     return _finish_envelope(
-        ctx, folder, results, load_date, run_id, profile, runs_root, rlog, folder_failed
+        ctx,
+        folder,
+        results,
+        load_date,
+        run_id,
+        profile,
+        runs_root,
+        rlog,
+        folder_failed,
+        overridden,
     )
 
 
@@ -813,6 +844,7 @@ def _finish_envelope(
     runs_root: str,
     rlog: Any,
     folder_failed: bool = False,
+    schedule_overridden: bool = False,
 ) -> dict[str, Any]:
     """Shared envelope tail for extract_folder (normal + not-due paths).
 
@@ -846,6 +878,11 @@ def _finish_envelope(
         ),
     }
 
+    # PT-032 (B4): stamp the manifest when --ignore-schedule forced
+    # THIS folder off-schedule (additive-keys doctrine).
+    if schedule_overridden:
+        envelope["schedule_overridden"] = True
+
     manifest_dir = runs_dir(runs_root, load_date, folder)
     write_manifest(manifest_dir, run_id, envelope)
     rlog.info("manifest written: %s/_manifest_%s.json", manifest_dir, run_id)
@@ -862,6 +899,7 @@ def extract_all(
     run_id: str = "-",
     profile: str = "manual",
     paused_override: bool = False,
+    ignore_schedule: bool = False,
 ) -> tuple[dict[str, dict[str, Any]], bool]:
     """Extract all AD tables; return (manifests_by_folder, any_failed).
 
@@ -875,6 +913,7 @@ def extract_all(
         only_tables=only_tables,
         run_id=run_id,
         paused_override=paused_override,
+        ignore_schedule=ignore_schedule,
     )
 
     manifests: dict[str, dict[str, Any]] = {}
@@ -906,6 +945,14 @@ def main(run_id: str = "-") -> int:
         help="with --tables naming paused table(s), "
         "lift their TABLE-level pause for this run",
     )
+    parser.add_argument(
+        "--ignore-schedule",
+        action="store_true",
+        help="with --tables naming the target, extract it "
+        "TODAY even though its schedule says otherwise "
+        "(deliberate off-schedule pull; stamped in log "
+        "and manifest)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="verbose logging")
     from dpl.lib.environment import resolve_environment
 
@@ -930,13 +977,13 @@ def main(run_id: str = "-") -> int:
         log.setLevel(logging.DEBUG)
 
     try:
-        cfg = load_config(CONFIG_FILE, LDAP_CONFIG_SCHEMA)
+        cfg = load_config(args.config, LDAP_CONFIG_SCHEMA)
         if cfg is None:
-            raise RuntimeError(f"Failed to load {CONFIG_FILE}")
+            raise RuntimeError(f"Failed to load {args.config}")
 
-        settings = load_settings(SETTINGS_FILE)
+        settings = load_settings(args.settings)
         if settings is None:
-            raise RuntimeError(f"Failed to load {SETTINGS_FILE}")
+            raise RuntimeError(f"Failed to load {args.settings}")
     except Exception as exc:  # noqa: BLE001 - top-level: any startup failure maps to exit code 1 with a logged cause
         log.critical("config/settings load failed: %s", exc)
         return 1
@@ -948,6 +995,16 @@ def main(run_id: str = "-") -> int:
             "--paused-table modifies --tables selections only - "
             "rerun as: --tables <names> --paused-table"
         )
+        return 3
+    # PT-032 (B4): --ignore-schedule requires a NAMED target
+    # (Option-B ruling); extractor CLIs have no --connection flag,
+    # so here the target must come via --tables.
+    ignore_schedule = bool(getattr(args, "ignore_schedule", False))
+    _pair_err = schedule.validate_ignore_schedule_pairing(
+        ignore_schedule, only_tables, None
+    )
+    if _pair_err is not None:
+        log.error("%s", _pair_err)
         return 3
     load_date = date.today()
 
@@ -971,6 +1028,7 @@ def main(run_id: str = "-") -> int:
             run_id=run_id,
             profile="manual",
             paused_override=paused_override,
+            ignore_schedule=ignore_schedule,
         )
     except (ValueError, KeyError, FileNotFoundError) as exc:
         log.critical("startup validation failed: %s", exc)

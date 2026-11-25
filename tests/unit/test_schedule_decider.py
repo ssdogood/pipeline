@@ -304,3 +304,82 @@ class TestADMirror:
         cfg = self._ad_cfg({"on": ["noday"]})
         with pytest.raises(ValueError, match="invalid schedule token"):
             adx.prepare_run(cfg, settings)
+
+
+class TestIgnoreSchedule:
+    """B4: --ignore-schedule (Option B) - deliberate, named,
+    stamped. The flag always needs a selection; forcing a non-due
+    connection runs + stamps schedule_overridden in the envelope;
+    due connections are never marked."""
+
+    def test_override_forces_non_due_connection(
+        self, neutral: None, settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = _cfg(schedule={"on": ["sun"]})  # Wednesday: not due
+        ctx = orx.prepare_run(cfg, settings, ignore_schedule=True)
+        opened: list[str] = []
+        monkeypatch.setattr(
+            orx, "run_folder_tables", lambda *a, **k: opened.append(str(a[0])) or []
+        )
+        env = orx.extract_folder(ctx, cfg, settings, WED, "stg")
+        assert opened == ["stg"]  # extraction happened
+        assert env.get("schedule_overridden") is True
+        assert env["tables_not_scheduled"] == 0
+
+    def test_override_on_due_connection_never_marks(
+        self, neutral: None, settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = _cfg(schedule={"on": ["sun"]})
+        ctx = orx.prepare_run(cfg, settings, ignore_schedule=True)
+        opened: list[str] = []
+        monkeypatch.setattr(
+            orx, "run_folder_tables", lambda *a, **k: opened.append(str(a[0])) or []
+        )
+        env = orx.extract_folder(ctx, cfg, settings, SUN, "stg")
+        assert opened == ["stg"]  # due anyway
+        assert "schedule_overridden" not in env
+
+    def test_no_flag_non_due_still_skips(
+        self, neutral: None, settings: dict[str, Any]
+    ) -> None:
+        """Regression: B3 behaviour untouched when flag absent."""
+        cfg = _cfg(schedule={"on": ["sun"]})
+        ctx = orx.prepare_run(cfg, settings)
+        env = orx.extract_folder(ctx, cfg, settings, WED, "stg")
+        assert env["tables_not_scheduled"] == 2
+        assert "schedule_overridden" not in env
+
+    def test_ad_override_mirror(
+        self, neutral: None, settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = TestADMirror()._ad_cfg({"on": ["sun"]})
+        ctx = adx.prepare_run(cfg, settings, ignore_schedule=True)
+
+        def _ad_stub(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    "status": "ok",
+                    "result": adx._build_stats(t, WED, "extracted"),
+                    "attempts": 1,
+                }
+                for t in ctx["by_folder"][args[0]]
+            ]
+
+        monkeypatch.setattr(adx, "run_folder_tables", _ad_stub)
+        env = adx.extract_folder(ctx, cfg, settings, WED, "ad-main")
+        assert env.get("schedule_overridden") is True
+        assert env["tables"][0]["status"] == "extracted"
+
+    def test_bare_flag_refused_at_cli_pairing_helper(self, neutral: None) -> None:
+        from dpl.lib.schedule import validate_ignore_schedule_pairing
+
+        err = validate_ignore_schedule_pairing(True, None, None)
+        assert err is not None and "--ignore-schedule" in err
+        assert "--connection" not in err   # extractor hint: tables only
+        werr = validate_ignore_schedule_pairing(
+            True, None, None, has_connection_flag=True
+        )
+        assert werr is not None and "--connection" in werr  # wrapper hint
+        assert validate_ignore_schedule_pairing(True, ["T1"], None) is None
+        assert validate_ignore_schedule_pairing(True, None, "ora_db") is None
+        assert validate_ignore_schedule_pairing(False, None, None) is None

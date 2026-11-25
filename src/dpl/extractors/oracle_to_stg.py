@@ -345,6 +345,7 @@ def prepare_run(
     run_id: str = "-",
     paused_override: bool = False,
     only_connection: str | None = None,
+    ignore_schedule: bool = False,
 ) -> dict[str, Any]:
     """Run head carved out of extract_all (Phase 4 C1).
 
@@ -354,6 +355,11 @@ def prepare_run(
     then schedules folders via extract_folder; extract_all calls both,
     serially, for the manual CLI path. Raises on startup problems
     exactly as the old inline head did.
+
+    B4: `ignore_schedule` (from --ignore-schedule, Option B) bypasses
+    the due-today decider for THIS run. Validation of the pairing
+    (flag requires a selection) happens at the CLI/wrapper layer,
+    which owns --tables/--connection; here it only travels.
 
     Returns the run context: started_at (ONE clock for the whole run),
     by_folder ({folder: [table_cfg, ...]} in config order),
@@ -568,6 +574,7 @@ def prepare_run(
         "schema_master": schema_master,
         "rules": rules,
         "paused_override": paused_override,
+        "ignore_schedule": ignore_schedule,
     }
 
 
@@ -604,10 +611,14 @@ def extract_folder(
     # every day (REQ-032-5). A non-due connection yields ZERO jobs -
     # the skip is RECORDED (per-table not_scheduled; paused wins the
     # status word per the composition ruling) and the manifest is
-    # still written, same doctrine as all-paused exit-0. --override
-    # (B4) will pass through here explicitly; today the decider gates
-    # every profile equally.
-    if not schedule.is_due_connection(conn_cfg, load_date):
+    # still written, same doctrine as all-paused exit-0.
+    # PT-032 (B4): --ignore-schedule (Option B - always a deliberate,
+    # named act) bypasses the decider for this run; forcing a
+    # NON-DUE connection is stamped loudly in the log (and in the
+    # envelope, below).
+    conn_due = schedule.is_due_connection(conn_cfg, load_date)
+    due = conn_due or bool(ctx.get("ignore_schedule"))
+    if not due:
         rlog.info(
             "[%s] not scheduled today (%s) - %d table(s) skipped "
             "with record, no session opened",
@@ -621,7 +632,25 @@ def extract_folder(
             status = "paused" if state == PAUSED else "not_scheduled"
             results.append(_build_stats(t, load_date, status))
         return _finish_envelope(
-            ctx, folder, results, load_date, run_id, profile, runs_root, rlog
+            ctx,
+            folder,
+            results,
+            load_date,
+            run_id,
+            profile,
+            runs_root,
+            rlog,
+        )
+    overridden = bool(ctx.get("ignore_schedule")) and not conn_due
+    if overridden:
+        # B4: deliberate off-schedule pull - loud in the log AND the
+        # manifest, so the records can never mistake it for a normal
+        # scheduled extraction.
+        rlog.warning(
+            "[%s] NOT scheduled for %s - extracting anyway "
+            "(--ignore-schedule; deliberate off-schedule pull)",
+            folder,
+            load_date.isoformat(),
         )
 
     keepalive = (settings.get("extraction") or {}).get("keepalive_minutes")
@@ -694,7 +723,16 @@ def extract_folder(
     folder_failed = any(t["status"] in FAILURE_STATUSES for t in results)
 
     return _finish_envelope(
-        ctx, folder, results, load_date, run_id, profile, runs_root, rlog, folder_failed
+        ctx,
+        folder,
+        results,
+        load_date,
+        run_id,
+        profile,
+        runs_root,
+        rlog,
+        folder_failed,
+        overridden,
     )
 
 
@@ -708,6 +746,7 @@ def _finish_envelope(
     runs_root: str,
     rlog: Any,
     folder_failed: bool = False,
+    schedule_overridden: bool = False,
 ) -> dict[str, Any]:
     """Shared envelope tail for extract_folder (normal + not-due paths).
 
@@ -745,6 +784,13 @@ def _finish_envelope(
         ),
     }
 
+    # PT-032 (B4): when --ignore-schedule forces THIS folder
+    # off-schedule, the manifest carries schedule_overridden=True
+    # (a due folder never carries the mark; additive-keys doctrine
+    # keeps old manifests comparable).
+    if schedule_overridden:
+        envelope["schedule_overridden"] = True
+
     # THE manifest write - extractor-owned, into the archive.
     manifest_dir = runs_dir(runs_root, load_date, folder)
     write_manifest(manifest_dir, run_id, envelope)
@@ -762,6 +808,7 @@ def extract_all(
     run_id: str = "-",
     profile: str = "manual",
     paused_override: bool = False,
+    ignore_schedule: bool = False,
 ) -> tuple[dict[str, dict[str, Any]], bool]:
     """Extract all Oracle tables; return (manifests_by_folder, any_failed).
 
@@ -777,6 +824,7 @@ def extract_all(
         only_tables=only_tables,
         run_id=run_id,
         paused_override=paused_override,
+        ignore_schedule=ignore_schedule,
     )
 
     manifests: dict[str, dict[str, Any]] = {}
@@ -808,6 +856,14 @@ def main(run_id: str = "-") -> int:
         help="with --tables naming paused table(s), "
         "lift their TABLE-level pause for this run",
     )
+    parser.add_argument(
+        "--ignore-schedule",
+        action="store_true",
+        help="with --tables naming the target, extract it "
+        "TODAY even though its schedule says otherwise "
+        "(deliberate off-schedule pull; stamped in log "
+        "and manifest)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="verbose logging")
     from dpl.lib.environment import resolve_environment
 
@@ -832,13 +888,13 @@ def main(run_id: str = "-") -> int:
         log.setLevel(logging.DEBUG)  # bump only this component, not the tree
 
     try:
-        cfg = load_config(CONFIG_FILE, ORACLE_CONFIG_SCHEMA)
+        cfg = load_config(args.config, ORACLE_CONFIG_SCHEMA)
         if cfg is None:
-            raise RuntimeError(f"Failed to load {CONFIG_FILE}")
+            raise RuntimeError(f"Failed to load {args.config}")
 
-        settings = load_settings(SETTINGS_FILE)
+        settings = load_settings(args.settings)
         if settings is None:
-            raise RuntimeError(f"Failed to load {SETTINGS_FILE}")
+            raise RuntimeError(f"Failed to load {args.settings}")
     except Exception as exc:  # noqa: BLE001 - top-level: any startup failure maps to exit code 1 with a logged cause
         log.critical("config/settings load failed: %s", exc)
         return 1
@@ -850,6 +906,16 @@ def main(run_id: str = "-") -> int:
             "--paused-table modifies --tables selections only - "
             "rerun as: --tables <names> --paused-table"
         )
+        return 3
+    # PT-032 (B4): --ignore-schedule requires a NAMED target
+    # (Option-B ruling); the extractor CLI has no --connection, so
+    # here the target must come via --tables.
+    ignore_schedule = bool(getattr(args, "ignore_schedule", False))
+    _pair_err = schedule.validate_ignore_schedule_pairing(
+        ignore_schedule, only_tables, None
+    )
+    if _pair_err is not None:
+        log.error("%s", _pair_err)
         return 3
     load_date = date.today()
 
@@ -876,6 +942,7 @@ def main(run_id: str = "-") -> int:
             run_id=run_id,
             profile="manual",
             paused_override=paused_override,
+            ignore_schedule=ignore_schedule,
         )
     except (ValueError, KeyError, FileNotFoundError) as exc:
         log.critical("startup validation failed: %s", exc)
