@@ -368,6 +368,21 @@ def prepare_run(
     # refused structural garbage - this adds the owner's name).
     validate_pause_declarations(cfg)
 
+    # PT-032 (B1): schedule lives at CONNECTION level only. A
+    # table-level schedule: is refused loudly (REQ-032-9) - feeds
+    # with different cadences belong in separate connection
+    # entries. Connection blocks themselves are validated when the
+    # due-today decider runs (B3); here we guard the placement.
+    for t in cfg["tables"]:
+        if "schedule" in t:
+            raise ValueError(
+                f"table '{t['name']}' (connection "
+                f"'{t['connection']}') declares a table-level "
+                f"'schedule' - schedule is a connection-level key "
+                f"(REQ-032-9); feeds with different cadences belong "
+                f"in separate connection entries")
+
+
     # PT-014: --tables naming paused tables without --paused-table
     # refuses THOSE tables loudly (the operator remedy is in the
     # message); unnamed tables proceed untouched. PT-036 fix

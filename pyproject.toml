@@ -89,3 +89,14 @@ include = ["config", "demo", "scripts", "src", "tests"]
 exclude = ["**/node_modules", "**/__pycache__", "**/.venv"]
 typeCheckingMode = "standard"
 reportMissingImports = "warning"
+
+# PT-032/015: new modules are born STRICT (ratchet convention agreed
+# 2026-11-25 - global mode stays standard; existing code migrates
+# package-by-package later, after higher-priority modules rest).
+# Add each new pure module here as it is created (B1: schedule.py).
+# NOTE: per-environment typeCheckingMode is NOT supported by pyright
+# (executionEnvironments only takes root/paths/version/platform);
+# the top-level `strict` path list is the sanctioned per-file ratchet.
+strict = [
+    "src/dpl/lib/schedule.py", "tests/unit/test_schedule.py"
+]

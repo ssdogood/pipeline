@@ -26,6 +26,7 @@ MODULES = (
     "lib/session_pool.py",
     "lib/write_parquet.py",
     "lib/extraction_config.py",
+    "lib/schedule.py",
     "lib/schema_dispatch.py",
     "lib/folder_runner.py",
     "extractors/oracle_to_stg.py",
