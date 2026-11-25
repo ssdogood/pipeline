@@ -87,6 +87,12 @@ TABLE_RUN_COLUMNS: tuple[str, ...] = (
     "pause_end",
     "pause_reason",
     "days_elapsed",
+    # v2.2 (PT-032/015): the table's as-of story; NULL whenever the
+    # manifest predates B5 (additive - old manifests never fail)
+    "table_type",
+    "coverage_kind",
+    "coverage_from",
+    "coverage_to",
 )
 
 #: the four original envelope-level count keys mirrored into folder_runs
@@ -205,8 +211,9 @@ def ingest_manifest(conn, mpath: Path) -> None:
         """INSERT OR REPLACE INTO folder_runs
         (run_id, folder, load_date, status,
         tables_total, tables_extracted, tables_skipped, tables_failed,
-        tables_paused, exit_code, finished_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        tables_paused, tables_not_scheduled, as_of, anchor_date,
+        exit_code, finished_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             env["run_id"],
             env["folder"],
@@ -217,6 +224,9 @@ def ingest_manifest(conn, mpath: Path) -> None:
             counts["tables_skipped"],
             counts["tables_failed"],
             counts["tables_paused"],
+            counts["tables_not_scheduled"],
+            env.get("as_of"),
+            env.get("anchor_date"),
             wrapper_exit,
             env.get("finished_at"),
         ),
@@ -245,6 +255,10 @@ def ingest_manifest(conn, mpath: Path) -> None:
                 t.get("pause_end"),
                 t.get("pause_reason"),
                 t.get("days_elapsed"),
+                t.get("type"),
+                t.get("coverage_kind"),
+                t.get("coverage_from"),
+                t.get("coverage_to"),
             ),
         )
 
