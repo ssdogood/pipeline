@@ -48,7 +48,7 @@ def ldap_cfg():
     """
     setup_logging()
     config_file = _env_folder() / "extractors" / "ad_to_stg.yaml"
-    cfg = load_config(config_file, LDAP_CONFIG_SCHEMA)
+    cfg = load_config(str(config_file), LDAP_CONFIG_SCHEMA)
     if cfg is None:
         pytest.fail(
             f"integration prerequisite failed: {config_file} did not load/"

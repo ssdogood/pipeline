@@ -51,7 +51,7 @@ def ora_cfg():
     """Real oracle_to_stg.yaml; fails loudly if it cannot load/validate."""
     setup_logging()
     config_file = _env_folder() / "extractors" / "oracle_to_stg.yaml"
-    cfg = load_config(config_file, ORACLE_CONFIG_SCHEMA)
+    cfg = load_config(str(config_file), ORACLE_CONFIG_SCHEMA)
     if cfg is None:
         pytest.fail(
             f"integration prerequisite failed: {config_file} did not "
@@ -62,7 +62,7 @@ def ora_cfg():
 
 @pytest.fixture(scope="module")
 def ora_settings():
-    settings = load_settings(_env_folder() / "settings.yaml")
+    settings = load_settings(str(_env_folder() / "settings.yaml"))
     if settings is None:
         pytest.fail(
             "integration prerequisite failed: <env-folder>/settings.yaml "
