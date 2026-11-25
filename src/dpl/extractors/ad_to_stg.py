@@ -209,8 +209,17 @@ def _build_stats(
     error: str | None = None,
     output_path: str | None = None,
     children: dict[str, int] | None = None,
+    anchor_date: date | None = None,
 ) -> dict[str, Any]:
-    """Assemble a manifest-ready stats entry for one table."""
+    """Assemble a manifest-ready stats entry for one table.
+
+    PT-015 (B5): with the folder's anchor_date, the entry carries the
+    table's as-of story: declared type + coverage statement from
+    asof.coverage_statement. MIRROR of oracle (R4). Recorded for
+    EVERY status - including not_scheduled/paused/skipped - so the
+    manifest states what the batch WOULD have covered. Additive:
+    absent only when no anchor is passed.
+    """
     stats: dict[str, Any] = {
         "connection": table_cfg["connection"],
         "schema": table_cfg["schema"],
@@ -226,6 +235,26 @@ def _build_stats(
     if children:
         stats["child_tables"] = children
         stats["child_rows_written"] = sum(children.values())
+    if anchor_date is not None:
+        table_type = asof.validate_table_type(
+            table_cfg.get("type"),
+            f"[{table_cfg['connection']}] table {table_cfg['name']}",
+        )
+        stats["type"] = table_type
+        window = 1
+        if table_type == "transaction":
+            window = asof.validate_window_days(
+                table_cfg.get("window_days"),
+                f"[{table_cfg['connection']}] table {table_cfg['name']}",
+            )
+        cov = asof.coverage_statement(table_type, anchor_date, window)
+        cov_from = cov["from"]
+        cov_to = cov["to"]
+        stats["coverage_kind"] = cov["kind"]
+        stats["coverage_from"] = (
+            cov_from.isoformat() if isinstance(cov_from, date) else None
+        )
+        stats["coverage_to"] = cov_to.isoformat() if isinstance(cov_to, date) else None
     return stats
 
 
@@ -274,6 +303,7 @@ def _task_for(
     pos: int | None = None,
     total: int | None = None,
     paused_override: bool = False,
+    anchor_date: date | None = None,
 ):
     """Build the per-table task for the folder worker (B1).
 
@@ -329,7 +359,9 @@ def _task_for(
         # rides the same 'paused_override' path, absent for cron).
         if paused_state == PAUSED:
             tlog.info("%s", pause_line)
-            paused_stats = _build_stats(table_cfg, load_date, "paused")
+            paused_stats = _build_stats(
+                table_cfg, load_date, "paused", anchor_date=anchor_date
+            )
             paused_stats.update(pause_fields)
             return paused_stats
 
@@ -356,7 +388,9 @@ def _task_for(
             )
             if existing_dir:
                 tlog.info("skipping (%s exists)", existing_dir)
-                return _build_stats(table_cfg, load_date, "skipped")
+                return _build_stats(
+                    table_cfg, load_date, "skipped", anchor_date=anchor_date
+                )
 
         rule = _rules_for(rules, folder, table_name)
         dedup_parsed = rule.get("dedup")
@@ -451,6 +485,7 @@ def _task_for(
                 duration_sec=time.time() - start,
                 output_path=parent_stats.get("output_dir"),
                 children=child_stats,
+                anchor_date=anchor_date,
             )
 
     return attempt
@@ -723,6 +758,13 @@ def extract_folder(
     # NON-DUE connection is stamped loudly in the log and envelope.
     conn_due = schedule.is_due_connection(conn_cfg, load_date)
     due = conn_due or bool(ctx.get("ignore_schedule"))
+    # PT-015 (B5): anchor computed ONCE per folder - the folder's one
+    # clock for coverage statements. MIRROR of oracle (R4).
+    as_of_declared = (
+        conn_cfg["as_of"] if isinstance(conn_cfg.get("as_of"), str) else "T-0"
+    )
+    lag = asof.AS_OF_LAGS[as_of_declared]
+    anchor_date = asof.anchor(load_date, lag)
     if not due:
         rlog.info(
             "[%s] not scheduled today (%s) - %d table(s) skipped "
@@ -735,7 +777,7 @@ def extract_folder(
         for t in folder_tables:
             state, _ = state_for(t, conn_cfg)
             status = "paused" if state == PAUSED else "not_scheduled"
-            results.append(_build_stats(t, load_date, status))
+            results.append(_build_stats(t, load_date, status, anchor_date=anchor_date))
         return _finish_envelope(
             ctx,
             folder,
@@ -745,6 +787,8 @@ def extract_folder(
             profile,
             runs_root,
             rlog,
+            as_of_declared=as_of_declared,
+            anchor_date=anchor_date,
         )
     overridden = bool(ctx.get("ignore_schedule")) and not conn_due
     if overridden:
@@ -806,7 +850,9 @@ def extract_folder(
         if oc["status"] == "ok":
             stats = oc["result"]
         else:
-            stats = _build_stats(t, load_date, "failed", error=oc["error"])
+            stats = _build_stats(
+                t, load_date, "failed", error=oc["error"], anchor_date=anchor_date
+            )
         stats["attempts"] = oc["attempts"]
         results.append(stats)
 
@@ -831,6 +877,8 @@ def extract_folder(
         rlog,
         folder_failed,
         overridden,
+        as_of_declared,
+        anchor_date,
     )
 
 
@@ -845,6 +893,8 @@ def _finish_envelope(
     rlog: Any,
     folder_failed: bool = False,
     schedule_overridden: bool = False,
+    as_of_declared: str | None = None,
+    anchor_date: date | None = None,
 ) -> dict[str, Any]:
     """Shared envelope tail for extract_folder (normal + not-due paths).
 
@@ -865,6 +915,10 @@ def _finish_envelope(
         # folder-level fields (as before)
         "folder": folder,
         "load_date": load_date.isoformat(),
+        # PT-015 (B5): the folder's as-of story - declared lag +
+        # computed anchor. Additive: absent in pre-B5 manifests.
+        "as_of": as_of_declared,
+        "anchor_date": (anchor_date.isoformat() if anchor_date is not None else None),
         "tables": results,
         # operator summary counts (Part B request, 2026-11-14)
         "tables_total": len(results),

@@ -375,7 +375,7 @@ class TestIgnoreSchedule:
 
         err = validate_ignore_schedule_pairing(True, None, None)
         assert err is not None and "--ignore-schedule" in err
-        assert "--connection" not in err   # extractor hint: tables only
+        assert "--connection" not in err  # extractor hint: tables only
         werr = validate_ignore_schedule_pairing(
             True, None, None, has_connection_flag=True
         )
@@ -383,3 +383,120 @@ class TestIgnoreSchedule:
         assert validate_ignore_schedule_pairing(True, ["T1"], None) is None
         assert validate_ignore_schedule_pairing(True, None, "ora_db") is None
         assert validate_ignore_schedule_pairing(False, None, None) is None
+
+
+class TestAsOfManifest:
+    """B5: the manifest carries the folder's as-of story - envelope
+    (as_of, anchor_date) and per-table type/coverage - for EVERY
+    status, including skips. Both extractors."""
+
+    def test_envelope_asof_fields(
+        self, neutral: None, settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = _cfg(schedule={"on": ["wed"]})
+        cfg["connections"]["ora_db"]["as_of"] = "T-2"
+        ctx = orx.prepare_run(cfg, settings)
+        opened: list[str] = []
+        monkeypatch.setattr(
+            orx, "run_folder_tables", lambda *a, **k: opened.append(str(a[0])) or []
+        )
+        env = orx.extract_folder(ctx, cfg, settings, WED, "stg")
+        assert env["as_of"] == "T-2"
+        assert env["anchor_date"] == "2026-11-23"  # WED - 2
+        assert opened == ["stg"]
+
+    def test_absent_asof_defaults_t0_anchor_today(
+        self, neutral: None, settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = _cfg(schedule={"on": ["wed"]})  # no as_of declared
+        ctx = orx.prepare_run(cfg, settings)
+        monkeypatch.setattr(orx, "run_folder_tables", lambda *a, **k: [])
+        env = orx.extract_folder(ctx, cfg, settings, WED, "stg")
+        assert env["as_of"] == "T-0"
+        assert env["anchor_date"] == "2026-11-25"  # today
+
+    def test_master_table_coverage_snapshot(
+        self, neutral: None, settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = _cfg(schedule={"on": ["wed"]})
+        cfg["connections"]["ora_db"]["as_of"] = "T-1"
+        for t in cfg["tables"]:
+            t["type"] = "master"
+            t.pop("window_days", None)  # master refuses window_days
+        ctx = orx.prepare_run(cfg, settings)
+        monkeypatch.setattr(orx, "run_folder_tables", lambda *a, **k: [])
+        env = orx.extract_folder(ctx, cfg, settings, WED, "stg")
+        for r in env["tables"]:
+            assert r["type"] == "master"
+            assert r["coverage_kind"] == "snapshot-as-of"
+            assert r["coverage_from"] is None
+            assert r["coverage_to"] == "2026-11-24"  # WED - 1
+
+    def test_transaction_table_coverage_window(
+        self, neutral: None, settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = _cfg(schedule={"on": ["wed"]})
+        cfg["connections"]["ora_db"]["as_of"] = "T-2"
+        for t in cfg["tables"]:
+            t["type"] = "transaction"
+            t["window_days"] = 3
+        ctx = orx.prepare_run(cfg, settings)
+        monkeypatch.setattr(orx, "run_folder_tables", lambda *a, **k: [])
+        env = orx.extract_folder(ctx, cfg, settings, WED, "stg")
+        for r in env["tables"]:
+            assert r["coverage_kind"] == "window"
+            # W-2 anchor 2026-11-23, window 3 -> 21..23
+            assert r["coverage_from"] == "2026-11-21"
+            assert r["coverage_to"] == "2026-11-23"
+
+    def test_skipped_day_still_records_would_be_coverage(
+        self, neutral: None, settings: dict[str, Any]
+    ) -> None:
+        """The B3 skip path also carries the as-of story - the
+        manifest must say WHAT the missing batch would have covered."""
+        cfg = _cfg(schedule={"on": ["sun"]})
+        cfg["connections"]["ora_db"]["as_of"] = "T-2"
+        for t in cfg["tables"]:
+            t["type"] = "master"
+            t.pop("window_days", None)
+        ctx = orx.prepare_run(cfg, settings)
+        env = orx.extract_folder(ctx, cfg, settings, WED, "stg")
+        assert env["tables_not_scheduled"] == 2
+        assert env["as_of"] == "T-2"
+        assert env["anchor_date"] == "2026-11-23"
+        for r in env["tables"]:
+            assert r["status"] == "not_scheduled"
+            assert r["coverage_to"] == "2026-11-23"
+
+    def test_history_ingest_mirror_not_scheduled(self, neutral: None) -> None:
+        """update_history._summary_counts: envelope value wins when
+        int, else computed from tables - true 0 for legacy envelopes."""
+        from dpl.wrapper.update_history import _summary_counts
+
+        env = {
+            "tables": [
+                {"status": "extracted"},
+                {"status": "not_scheduled"},
+            ],
+            "tables_total": 2,
+            "tables_extracted": 1,
+            "tables_skipped": 0,
+            "tables_failed": 0,
+        }
+        counts = _summary_counts(env)
+        assert counts["tables_not_scheduled"] == 1
+        env["tables_not_scheduled"] = 5  # envelope value wins
+        assert _summary_counts(env)["tables_not_scheduled"] == 5
+        # legacy envelope: none of the four keys - computed fallback
+        legacy = {"tables": [{"status": "extracted"}]}
+        assert _summary_counts(legacy)["tables_not_scheduled"] == 0
+
+    def test_ad_mirror_asof_envelope(
+        self, neutral: None, settings: dict[str, Any]
+    ) -> None:
+        cfg = TestADMirror()._ad_cfg({"on": ["sun"]})
+        ctx = adx.prepare_run(cfg, settings)
+        env = adx.extract_folder(ctx, cfg, settings, WED, "ad-main")
+        assert env["as_of"] == "T-0"
+        assert env["anchor_date"] == "2026-11-25"
+        assert env["tables"][0]["coverage_kind"] == "snapshot-as-of"
