@@ -98,5 +98,6 @@ reportMissingImports = "warning"
 # (executionEnvironments only takes root/paths/version/platform);
 # the top-level `strict` path list is the sanctioned per-file ratchet.
 strict = [
-    "src/dpl/lib/schedule.py", "tests/unit/test_schedule.py"
+    "src/dpl/lib/schedule.py", "tests/unit/test_schedule.py",
+    "src/dpl/lib/asof.py", "tests/unit/test_asof.py",
 ]

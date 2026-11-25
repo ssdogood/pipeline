@@ -48,7 +48,7 @@ from typing import Any
 
 import polars as pl
 
-from dpl.lib import pass_mgr
+from dpl.lib import asof, pass_mgr
 from dpl.lib.common import (
     FAILURE_STATUSES,
     landing_dir,
@@ -496,6 +496,60 @@ def prepare_run(
                 f"'schedule' - schedule is a connection-level key "
                 f"(REQ-032-9); feeds with different cadences belong "
                 f"in separate connection entries")
+
+    # PT-015 (B2): as_of + type/window_days validation. Universal
+    # contract (operator ruling 2026-11-25: dev/test break-once is
+    # DELIBERATE - production ships clean): every table declares
+    # type; transaction tables declare window_days (= the width the
+    # QUERY pulls); as_of is connection-level only (table-level is
+    # refused). Absent as_of at connection level = T-0 + loud warning
+    # per run (REQ-015-3) - the warning fires here, once per
+    # connection per run, before extraction starts.
+    for conn_name, conn_cfg in cfg["connections"].items():
+        if conn_cfg.get("type") != SOURCE_TYPE:
+            continue
+        if "as_of" in conn_cfg:
+            tctx = f"pipe ad connection '{conn_name}'"
+            asof.validate_as_of(conn_cfg["as_of"], tctx)
+        else:
+            rlog.warning(
+                "connection '%s' declares no 'as_of' - assuming T-0 "
+                "(live snapshot as of extraction); write 'as_of: T-0' "
+                "in the yaml to silence this warning",
+                conn_name)
+    for t in cfg["tables"]:
+        conn_name = t["connection"]
+        conn_cfg = cfg["connections"].get(conn_name)
+        if conn_cfg is None or conn_cfg.get("type") != SOURCE_TYPE:
+            continue
+        tctx = f"pipe ad connection '{conn_name}' table '{t['name']}'"
+        if "as_of" in t:
+            raise ValueError(
+                f"{tctx}: 'as_of' at table level is refused - as_of "
+                f"is a CONNECTION-level key (REQ-015-10); a "
+                f"connection's feeds share one lag (if a genuine "
+                f"mixed-lag case appears, table-level as_of becomes "
+                f"a DESIGNED extension)")
+        if "type" not in t:
+            raise ValueError(
+                f"{tctx}: table 'type' is REQUIRED (master | "
+                f"transaction) - the taxonomy has no safe default; "
+                f"the manifest coverage record depends on it")
+        table_type = asof.validate_table_type(t["type"], tctx)
+        if table_type == "transaction":
+            if "window_days" not in t:
+                raise ValueError(
+                    f"{tctx}: 'window_days' is REQUIRED for "
+                    f"transaction tables - it declares the width "
+                    f"the QUERY pulls and drives the manifest "
+                    f"coverage statement (REQ-015-7)")
+            asof.validate_window_days(t["window_days"], tctx)
+        elif "window_days" in t:
+            raise ValueError(
+                f"{tctx}: 'window_days' on a master table is "
+                f"nonsensical - a snapshot has no pull window; "
+                f"remove the key")
+
 
     # PT-014: --tables naming paused tables without --paused-table
     # refuses THOSE tables loudly (the operator remedy is in the
