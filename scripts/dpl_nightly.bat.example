@@ -1,6 +1,14 @@
 @echo off
 REM ============================================================================
-REM DPL NIGHTLY EXTRACTION - Windows Task Scheduler runner (TEST TIER)
+REM DPL NIGHTLY EXTRACTION - Windows Task Scheduler runner (TEMPLATE)
+REM ----------------------------------------------------------------------------
+REM !! TEMPLATE ONLY - DO NOT COMMIT YOUR ADJUSTED COPY !!
+REM   1. Copy this file somewhere the scheduled task can call it - the copy
+REM      is MACHINE-LOCAL: adjust its paths, never stage or commit it, and
+REM      never let it travel in bundles (the loud resolver refuses exactly
+REM      such arrivals - correctly).
+REM   2. Adjust the three path lines marked ADJUST below.
+REM   3. Register the task with the schtasks command in the footer.
 REM ----------------------------------------------------------------------------
 REM Purpose: one entry point for the scheduled job. The wrapper does ALL the
 REM work; this file only sets up the environment and calls it.
@@ -38,7 +46,10 @@ if not exist "%REPO_DIR%\logs" mkdir "%REPO_DIR%\logs"
 echo ================================================================ >> "%RUN_LOG%"
 echo [scheduler] fired %DATE% %TIME% >> "%RUN_LOG%"
 
-"%PYTHON_EXE%" -m dpl.wrapper.run %SETTINGS_ARG% >> "%RUN_LOG%" 2>&1
+REM Any arguments given to this script are passed to the wrapper - e.g.
+REM   dpl_nightly.bat --dry-run        (validation-only, extracts nothing)
+REM so a scheduler-registered bare invocation stays the nightly default.
+"%PYTHON_EXE%" -m dpl.wrapper.run %SETTINGS_ARG% %* >> "%RUN_LOG%" 2>&1
 set "RC=%ERRORLEVEL%"
 
 echo [scheduler] finished %DATE% %TIME% exit_code=%RC% >> "%RUN_LOG%"
