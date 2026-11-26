@@ -463,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
                     build_plan(
                         gk["max_parallel_connections"],
                         _namespaced_connections(pipe_conns),
+                        load_date,
                     )
                 )
             )
@@ -686,6 +687,7 @@ def main(argv: list[str] | None = None) -> int:
                         _namespaced_connections(
                             [(p.name, c) for p, _pc, c, _px in ready], work_folders
                         ),
+                        load_date,
                     )
                     owners = _folder_owners(ready)
 
@@ -873,8 +875,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = missed_day_payload(manifests)
         if payload:
             log.warning(
-                "schedule report: %s missed scheduled day(s) across "
-                "%s folder(s)",
+                "schedule report: %s missed scheduled day(s) across %s folder(s)",
                 payload["missed_count"],
                 payload["missed_folders"],
             )

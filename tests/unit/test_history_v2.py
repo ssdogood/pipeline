@@ -557,7 +557,8 @@ class TestIngestV2_2:
             ingest_manifest(conn, mpath)
             conn.commit()
             fr = conn.execute(
-                "SELECT tables_not_scheduled, as_of, anchor_date FROM folder_runs"
+                "SELECT tables_not_scheduled, as_of, anchor_date,"
+                " missed_days FROM folder_runs"
             ).fetchone()
             trs = conn.execute(
                 "SELECT table_name, table_type, coverage_kind,"
@@ -631,3 +632,50 @@ class TestIngestV2_2:
         row = got["table_runs"][0]
         assert row[1] is None and row[2] is None
         assert row[3] is None and row[4] is None
+
+    def test_missed_days_ingests_as_json_not_list(self, tmp_path: Path) -> None:
+        """Regression (office incident 2026-11-26): an envelope carrying a
+        B7 miss report must land as JSON text in folder_runs.missed_days -
+        SQLite cannot bind a Python list, and the raw list crashed the
+        post-run history ingest (exit 2, repeated re-reporting of the
+        same miss). The helper is the only serialization point."""
+        env = _envelope(
+            tables=[{"name": "T1", "status": "extracted"}],
+            counts={
+                "tables_total": 1,
+                "tables_extracted": 1,
+                "tables_skipped": 0,
+                "tables_failed": 0,
+                "tables_paused": 0,
+                "tables_not_scheduled": 0,
+            },
+        )
+        env["as_of"] = "T-2"
+        env["anchor_date"] = "2026-11-24"
+        env["missed_days"] = ["2026-11-25"]
+        env["missed_days_from"] = "2026-11-25"
+        env["missed_days_truncated"] = False
+        got = self._ingest(tmp_path, env)
+        raw = got["folder_runs"][3]
+        assert raw is not None, "missed_days column must be populated"
+        parsed = json.loads(raw)
+        assert parsed["days"] == ["2026-11-25"]
+        assert parsed["from"] == "2026-11-25"
+        assert parsed["truncated"] is False
+
+    def test_missless_envelope_ingests_null_column(self, tmp_path: Path) -> None:
+        """No miss -> column stays NULL (never an empty-string list)."""
+        env = _envelope(
+            tables=[{"name": "T1", "status": "extracted"}],
+            counts={
+                "tables_total": 1,
+                "tables_extracted": 1,
+                "tables_skipped": 0,
+                "tables_failed": 0,
+                "tables_paused": 0,
+                "tables_not_scheduled": 0,
+            },
+        )
+        env["missed_days"] = []
+        got = self._ingest(tmp_path, env)
+        assert got["folder_runs"][3] is None

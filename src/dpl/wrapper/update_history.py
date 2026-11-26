@@ -52,6 +52,7 @@ from dpl.lib.history_db import (
     open_db,
     validate_db_path,
 )
+from dpl.lib.missed_days import missed_days_json
 
 __func_msg__ = {
     "name": "update-history",
@@ -227,7 +228,7 @@ def ingest_manifest(conn, mpath: Path) -> None:
             counts["tables_not_scheduled"],
             env.get("as_of"),
             env.get("anchor_date"),
-            env.get("missed_days"),
+            missed_days_json(env),
             wrapper_exit,
             env.get("finished_at"),
         ),

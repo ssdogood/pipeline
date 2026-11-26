@@ -26,14 +26,15 @@ Safe-upgrade rule: a settings file WITHOUT an extraction: block yields
 max_parallel_connections=1 - byte-for-byte today's sequential behavior - plus
 a loud warning to set the block explicitly. The agreed operating defaults
 (max_parallel_connections 4) live in the shipped settings file, never hidden
-in code. The connector config schemas accept unknown keys by design, 
-so `extraction_config` is the sole enforcement point (concurrency 1, 
-retries 2, backoff 5, group unset); PRESENT-but-invalid values always 
+in code. The connector config schemas accept unknown keys by design,
+so `extraction_config` is the sole enforcement point (concurrency 1,
+retries 2, backoff 5, group unset); PRESENT-but-invalid values always
 fail loudly.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import math
 import re
 
@@ -68,10 +69,10 @@ def _int_ge(value: object, key: str, ctx: str, minimum: int) -> int:
     """Strict positive-int check. Booleans are NOT ints here (True == 1)."""
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(
-            f"{ctx}: '{key}' must be an integer >= {minimum}, got {value!r}")
+            f"{ctx}: '{key}' must be an integer >= {minimum}, got {value!r}"
+        )
     if value < minimum:
-        raise ValueError(
-            f"{ctx}: '{key}' must be >= {minimum}, got {value!r}")
+        raise ValueError(f"{ctx}: '{key}' must be >= {minimum}, got {value!r}")
     return value
 
 
@@ -103,15 +104,23 @@ def validate_global_extraction(settings: dict) -> dict:
         raise ValueError(
             f"{ctx}: 'max_parallel_folders' is retired - rename it to "
             f"'max_parallel_connections' (same meaning; folders are "
-            f"1:1 with connections)")
+            f"1:1 with connections)"
+        )
     return {
         "max_parallel_connections": _int_ge(
-            block.get("max_parallel_connections",
-                      GLOBAL_DEFAULTS["max_parallel_connections"]),
-            "max_parallel_connections", ctx, 1),
+            block.get(
+                "max_parallel_connections", GLOBAL_DEFAULTS["max_parallel_connections"]
+            ),
+            "max_parallel_connections",
+            ctx,
+            1,
+        ),
         "keepalive_minutes": _int_ge(
             block.get("keepalive_minutes", GLOBAL_DEFAULTS["keepalive_minutes"]),
-            "keepalive_minutes", ctx, 1),
+            "keepalive_minutes",
+            ctx,
+            1,
+        ),
     }
 
 
@@ -124,15 +133,15 @@ def _table_concurrency(value: object, ctx: str) -> int:
     Values above 2 are rejected here, not merely discouraged: the
     ceiling lives in validation, so no config can ever exceed it.
     """
-    if isinstance(value, bool) or not isinstance(value, int) \
-            or value not in (1, 2):
+    if isinstance(value, bool) or not isinstance(value, int) or value not in (1, 2):
         raise ValueError(
             f"{ctx}: 'table_concurrency' must be 1 or 2 "
-            f"(hard session ceiling: max_parallel_connections x 2), got {value!r}")
+            f"(hard session ceiling: max_parallel_connections x 2), got {value!r}"
+        )
     return value
 
-def validate_connection(pipe_name: str, conn_name: str,
-                        conn_cfg: dict) -> dict:
+
+def validate_connection(pipe_name: str, conn_name: str, conn_cfg: dict) -> dict:
     """Validate one connection's knobs; return its normalized summary.
 
     Raises ValueError naming pipe, connection, key and range. Unknown
@@ -144,15 +153,19 @@ def validate_connection(pipe_name: str, conn_name: str,
         "folder": conn_cfg["folder"],
         "type": conn_cfg["type"],
         "table_concurrency": _table_concurrency(
-            conn_cfg.get("table_concurrency", CONN_DEFAULTS["table_concurrency"]),
-            ctx),
+            conn_cfg.get("table_concurrency", CONN_DEFAULTS["table_concurrency"]), ctx
+        ),
         "retries": _int_ge(
-            conn_cfg.get("retries", CONN_DEFAULTS["retries"]),
-            "retries", ctx, 0),
+            conn_cfg.get("retries", CONN_DEFAULTS["retries"]), "retries", ctx, 0
+        ),
         "retry_backoff_seconds": _int_ge(
-            conn_cfg.get("retry_backoff_seconds",
-                         CONN_DEFAULTS["retry_backoff_seconds"]),
-            "retry_backoff_seconds", ctx, 1),
+            conn_cfg.get(
+                "retry_backoff_seconds", CONN_DEFAULTS["retry_backoff_seconds"]
+            ),
+            "retry_backoff_seconds",
+            ctx,
+            1,
+        ),
     }
 
     if "serial_group" in conn_cfg:
@@ -161,8 +174,14 @@ def validate_connection(pipe_name: str, conn_name: str,
             raise ValueError(
                 f"{ctx}: 'serial_group' must match "
                 f"^[a-z0-9][a-z0-9_-]*$ (lowercase letters, digits, "
-                f"'-', '_', not starting with '-'/'_'), got {group!r}")
+                f"'-', '_', not starting with '-'/'_'), got {group!r}"
+            )
         out["serial_group"] = group
+    # PT-032 (B8): forward the schedule block (validated upstream by the
+    # connector schemas at Tier-1) so the dry-run banner can render the
+    # due/not-due set. Absent = due every day (no change to plan math).
+    if "schedule" in conn_cfg:
+        out["schedule"] = conn_cfg["schedule"]
     return out
 
 
@@ -175,8 +194,9 @@ def validate_pipe_connections(pipe_name: str, cfg: dict) -> dict[str, dict]:
 
 
 # ------------------------------------------------------------------- plan ---
-def build_plan(max_parallel_connections: int,
-               connections: dict[str, dict]) -> dict:
+def build_plan(
+    max_parallel_connections: int, connections: dict[str, dict], plan_date: dt.date
+) -> dict:
     """Fold validated connections into the schedulable plan.
 
     - Duplicate folders across pipes raise: two connections writing one
@@ -190,12 +210,16 @@ def build_plan(max_parallel_connections: int,
     folders: list[str] = []
     for name, c in connections.items():
         if c["folder"] in folders:
-            clash = next(n for n, cc in connections.items()
-                         if cc["folder"] == c["folder"] and n != name)
+            clash = next(
+                n
+                for n, cc in connections.items()
+                if cc["folder"] == c["folder"] and n != name
+            )
             raise ValueError(
                 f"duplicate folder '{c['folder']}' across connections "
                 f"'{clash}' and '{name}' - two connections must never "
-                f"write one folder")
+                f"write one folder"
+            )
         folders.append(c["folder"])
 
     groups: dict[str, list[str]] = {}
@@ -205,8 +229,7 @@ def build_plan(max_parallel_connections: int,
             groups.setdefault(g, []).append(name)
 
     ungrouped = [n for n, c in connections.items() if not c.get("serial_group")]
-    max_conc = max((c["table_concurrency"] for c in connections.values()),
-                   default=1)
+    max_conc = max((c["table_concurrency"] for c in connections.values()), default=1)
     return {
         "max_parallel_connections": max_parallel_connections,
         "connections": connections,
@@ -214,7 +237,42 @@ def build_plan(max_parallel_connections: int,
         "ungrouped": ungrouped,
         "tasks": len(ungrouped) + len(groups),
         "worst_case_sessions": max_parallel_connections * max_conc,
+        "plan_date": plan_date,
     }
+
+
+def format_schedule_visibility(conns: dict[str, dict], plan_date: dt.date) -> list[str]:
+    """Due/not-due lines for the plan date - one line per connection.
+
+    Same is_due the extractors use at run time (schedule.is_due via
+    the connection-summary shim), so the banner can never disagree
+    with the run's decider. As-of (T-0/T-1/T-2) is NOT part of this
+    block: schedule says WHEN, as_of says HOW FAR BACK - and dry-run
+    shows due-set, not coverage math.
+    """
+    import datetime as dt_
+    import textwrap
+
+    from dpl.lib import schedule as schedule_mod
+
+    del dt_, textwrap  # placeholders dropped; only schedule_mod needed
+
+    due: list[str] = []
+    not_due: list[str] = []
+    for name, c in conns.items():
+        if "schedule" in c:
+            if schedule_mod.is_due_connection(c, plan_date):
+                due.append(name)
+            else:
+                not_due.append(name)
+    lines = [
+        "",
+        f"schedule (for {plan_date.isoformat()}):",
+        f"  due      : {', '.join(due) if due else '(none)'}",
+        f"  not due  : {', '.join(not_due) if not_due else '(none)'}",
+        ("  (connections without a schedule are due every day - not listed above)"),
+    ]
+    return lines
 
 
 def format_plan(plan: dict) -> str:
@@ -229,7 +287,7 @@ def format_plan(plan: dict) -> str:
     w_conn = max([len("connection")] + [len(n) for n in conns]) + 2
     w_type = max([len("type")] + [len(c["type"]) for c in conns.values()]) + 2
     w_fold = max([len("folder")] + [len(c["folder"]) for c in conns.values()]) + 2
-    w_num = len("backoff") + 2          # right-aligned numeric columns
+    w_num = len("backoff") + 2  # right-aligned numeric columns
 
     header = (
         f"{'connection':<{w_conn}}{'type':<{w_type}}{'folder':<{w_fold}}"
@@ -240,12 +298,16 @@ def format_plan(plan: dict) -> str:
 
     lines = [
         "=" * width,
-        " " * (math.floor(width / 2) - 8)  + "EXTRACTION PLAN",
+        " " * (math.floor(width / 2) - 8) + "EXTRACTION PLAN",
         "=" * width,
-        (f"max_parallel_connections : {plan['max_parallel_connections']}"
-         "  (settings: extraction.max_parallel_connections)"),
-        ("keepalive_minutes    : see settings (driver keepalive: Oracle uses"
-        " expire_time; AD ruling: reconnect on drop - no keepalive)"),
+        (
+            f"max_parallel_connections : {plan['max_parallel_connections']}"
+            "  (settings: extraction.max_parallel_connections)"
+        ),
+        (
+            "keepalive_minutes    : see settings (driver keepalive: Oracle uses"
+            " expire_time; AD ruling: reconnect on drop - no keepalive)"
+        ),
         "",
         header,
     ]
@@ -260,17 +322,28 @@ def format_plan(plan: dict) -> str:
         lines.append("")
         lines.append("serial groups (members NEVER run in parallel):")
         for g, members in plan["serial_groups"].items():
-            lines.append(f"  {g}: {', '.join(members)}"
-                         "  -> one chain (config order)")
+            lines.append(f"  {g}: {', '.join(members)}  -> one chain (config order)")
     max_conc = max((c["table_concurrency"] for c in conns.values()), default=1)
     lines += [
         "",
-        (f"schedulable tasks   : {plan['tasks']} "
-         f"({len(plan['ungrouped'])} free folder(s) + "
-         f"{len(plan['serial_groups'])} chain(s))"),
-        (f"worst-case sessions : {plan['worst_case_sessions']} "
-         f"(= max_parallel_connections {plan['max_parallel_connections']} x "
-         f"max table_concurrency {max_conc})"),
-        "=" * width,
+        (
+            f"schedulable tasks   : {plan['tasks']} "
+            f"({len(plan['ungrouped'])} free folder(s) + "
+            f"{len(plan['serial_groups'])} chain(s))"
+        ),
+        (
+            f"worst-case sessions : {plan['worst_case_sessions']} "
+            f"(= max_parallel_connections {plan['max_parallel_connections']} x "
+            f"max table_concurrency {max_conc})"
+        ),
     ]
+    # PT-032 (B8, design 4): schedule visibility - which connections are
+    # due today, which are not. Rendered only when at least one summary
+    # carries a schedule block, so unscheduled legacy configs see no new
+    # banner. The date is the run date, stated (schedule questions are
+    # date questions); weekend/month-end edge words come from the same
+    # schedule.is_due the extractors use at run time.
+    if any("schedule" in c for c in conns.values()):
+        lines += format_schedule_visibility(conns, plan["plan_date"])
+    lines += ["=" * width]
     return "\n".join(lines)
