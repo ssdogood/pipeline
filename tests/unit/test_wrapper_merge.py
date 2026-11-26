@@ -8,6 +8,8 @@ groups spanning pipes fold into ONE chain, duplicate folders raise.
 """
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 
 from dpl.lib.extraction_config import build_plan
@@ -77,7 +79,7 @@ def test_serial_group_spans_pipes_as_one_chain():
         ("p1", {"a": _conn("f1", serial="box-a")}),
         ("p2", {"b": _conn("f2", serial="box-a")}),
     ])
-    plan = build_plan(1, merged)
+    plan = build_plan(1, merged, dt.date(2026, 11, 25))
     assert plan["serial_groups"] == {"box-a": ["p1::a", "p2::b"]}
     assert plan["ungrouped"] == []
     assert plan["tasks"] == 1          # one chain, not two folders
@@ -89,4 +91,4 @@ def test_duplicate_folder_across_pipes_raises_loudly():
         ("p2", {"b": _conn("dup")}),
     ])
     with pytest.raises(ValueError, match="duplicate folder"):
-        build_plan(1, merged)
+        build_plan(1, merged, dt.date(2026, 11, 25))

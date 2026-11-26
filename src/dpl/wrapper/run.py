@@ -66,6 +66,7 @@ from dpl.lib.extraction_config import (
 )
 from dpl.lib.folder_runner import jobs_from_plan, run_jobs
 from dpl.lib.logger import setup_logging
+from dpl.lib.schedule import validate_ignore_schedule_pairing
 from dpl.wrapper.profiles import load_wrapper_config, resolve_profile
 from dpl.wrapper.update_history import (
     open_db,
@@ -103,21 +104,22 @@ EXIT_CONFIG = 3
 # PT-040 4f: the laptop-era constant is retired - kept as a name only,
 # assigned None, so any accidental reference fails immediately rather
 # than pointing at a path that no longer exists.
-LEGACY_SETTINGS_PATH = None   # retired: settings live in the env folder
-EXTRACTOR_DIR = Path("config/development/extractors")   # default; resolved at runtime
-RUN_REGISTRY = Path("config/development/run.yaml")      # default; resolved at runtime
-WRAPCFG_PATH = "config/development/wrapper.yaml"        # default; resolved at runtime
+LEGACY_SETTINGS_PATH = None  # retired: settings live in the env folder
+EXTRACTOR_DIR = Path("config/development/extractors")  # default; resolved at runtime
+RUN_REGISTRY = Path("config/development/run.yaml")  # default; resolved at runtime
+WRAPCFG_PATH = "config/development/wrapper.yaml"  # default; resolved at runtime
 
 
 # ----------------------------------------------------------- run registry ---
 @dataclass
 class Pipe:
     """One registered extraction pipe, fully self-describing."""
-    name: str          # yaml stem, e.g. 'oracle_to_stg' - from run.yaml
-    path: str          # the extractor yaml (relative path)
-    source_type: str   # the ONE shared type across all its connections
-    master: str        # schema_master_<name>.csv (naming convention)
-    connector: dict    # CONNECTORS[source_type] entry
+
+    name: str  # yaml stem, e.g. 'oracle_to_stg' - from run.yaml
+    path: str  # the extractor yaml (relative path)
+    source_type: str  # the ONE shared type across all its connections
+    master: str  # schema_master_<name>.csv (naming convention)
+    connector: dict  # CONNECTORS[source_type] entry
     connections: dict  # parsed connections: mapping (name -> cfg) - PT-034 dispatch
 
 
@@ -127,7 +129,8 @@ def _load_run_registry(path: Path = RUN_REGISTRY) -> list[str]:
         raise ValueError(
             f"run registry not found: {path}. Create it listing the "
             f"pipes (yaml stems in {EXTRACTOR_DIR}) that the wrapper "
-            f"should execute, e.g.\npipes:\n  - oracle_to_stg")
+            f"should execute, e.g.\npipes:\n  - oracle_to_stg"
+        )
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
@@ -137,12 +140,14 @@ def _load_run_registry(path: Path = RUN_REGISTRY) -> list[str]:
     if not isinstance(pipes, list) or not pipes:
         raise ValueError(
             f"{path}: must contain a non-empty 'pipes:' list of yaml "
-            f"stems, e.g.\npipes:\n  - oracle_to_stg")
+            f"stems, e.g.\npipes:\n  - oracle_to_stg"
+        )
     seen: set[str] = set()
     for entry in pipes:
         if not isinstance(entry, str) or not entry.strip():
-            raise ValueError(f"{path}: every pipes: entry must be a "
-                            f"yaml stem string; got {entry!r}")
+            raise ValueError(
+                f"{path}: every pipes: entry must be a yaml stem string; got {entry!r}"
+            )
         if entry in seen:
             raise ValueError(f"{path}: pipe '{entry}' registered twice")
         seen.add(entry)
@@ -156,17 +161,22 @@ def _route_pipe(name: str, extractor_dir: Path) -> Pipe:
     if not yml.is_file():
         raise ValueError(
             f"run.yaml registers pipe '{name}' but {yml} does not exist "
-            f"- remove the registration or restore the file")
+            f"- remove the registration or restore the file"
+        )
 
     try:
         raw = yaml.safe_load(yml.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise ValueError(f"{yml}: invalid YAML: {exc}") from exc
-    if not isinstance(raw, dict) or \
-            not isinstance(raw.get("connections"), dict) or not raw["connections"]:
+    if (
+        not isinstance(raw, dict)
+        or not isinstance(raw.get("connections"), dict)
+        or not raw["connections"]
+    ):
         raise ValueError(
             f"{yml}: no connections: block - a pipe yaml must declare at "
-            f"least one connection")
+            f"least one connection"
+        )
 
     types = {
         str(conn.get("type")).lower()
@@ -176,11 +186,13 @@ def _route_pipe(name: str, extractor_dir: Path) -> Pipe:
     if not types:
         raise ValueError(
             f"{yml}: connections declare no 'type' - cannot route this "
-            f"pipe to a connector")
+            f"pipe to a connector"
+        )
     if len(types) > 1:
         raise ValueError(
             f"{yml}: mixed source types {sorted(types)} - one extractor "
-            f"yaml serves exactly one connector type; split the file")
+            f"yaml serves exactly one connector type; split the file"
+        )
 
     stype = types.pop()
     connector = CONNECTORS.get(stype)
@@ -188,7 +200,8 @@ def _route_pipe(name: str, extractor_dir: Path) -> Pipe:
         raise ValueError(
             f"{yml}: unknown source type '{stype}' - no connector "
             f"registered in dpl/lib/connectors.py (known types: "
-            f"{sorted(CONNECTORS)})")
+            f"{sorted(CONNECTORS)})"
+        )
 
     return Pipe(
         name=name,
@@ -200,8 +213,9 @@ def _route_pipe(name: str, extractor_dir: Path) -> Pipe:
     )
 
 
-def load_registered_pipes(registry_path: Path = RUN_REGISTRY,
-                          extractor_dir: Path = EXTRACTOR_DIR) -> list[Pipe]:
+def load_registered_pipes(
+    registry_path: Path = RUN_REGISTRY, extractor_dir: Path = EXTRACTOR_DIR
+) -> list[Pipe]:
     """THE pipe list: exactly the run.yaml registrations, in order.
 
     Raises ValueError on any registry/routing problem (caller converts
@@ -217,9 +231,11 @@ def load_registered_pipes(registry_path: Path = RUN_REGISTRY,
     unregistered = sorted(on_disk - set(registered))
     if unregistered:
         log = get_run_logger("dpl.wrapper")
-        log.info("unregistered yaml(s) present, ignored: %s "
-                 "(register in the env folder's run.yaml to run them)",
-                 ", ".join(unregistered))
+        log.info(
+            "unregistered yaml(s) present, ignored: %s "
+            "(register in the env folder's run.yaml to run them)",
+            ", ".join(unregistered),
+        )
     return pipes
 
 
@@ -238,9 +254,10 @@ def _notify(event: str, run_id: str, data: dict[str, object]) -> None:
     nlog = get_run_logger("dpl.wrapper", run_id=run_id)
     try:
         from dpl.lib.email_service import send_email
+
         r = send_email(caller=event, run_id=run_id, data=data)
         nlog.info("email %s: %s (%s)", event, r.outcome, r.send_id)
-    except Exception as exc:              # noqa: BLE001 - email is never fatal
+    except Exception as exc:  # noqa: BLE001 - email is never fatal
         nlog.error("email event %s could not fire: %s", event, exc)
 
 
@@ -250,6 +267,7 @@ def _notify(event: str, run_id: str, data: dict[str, object]) -> None:
 # every pipe's folder jobs into a single plan and executes them through
 # folder_runner. These two pure functions are the merge; both are
 # covered by tests/unit/test_wrapper_merge.py.
+
 
 def _namespaced_connections(
     pipe_conns: list[tuple[str, dict[str, dict]]],
@@ -268,24 +286,29 @@ def _namespaced_connections(
     merged: dict[str, dict] = {}
     for pipe_name, conns in pipe_conns:
         for cname, summary in conns.items():
-            if folders_with_work is not None \
-                    and summary["folder"] not in folders_with_work:
+            if (
+                folders_with_work is not None
+                and summary["folder"] not in folders_with_work
+            ):
                 continue
             merged[f"{pipe_name}::{cname}"] = summary
     return merged
 
 
-def _folder_owners(ready: list[tuple[Any, Any, dict, dict]]
-                   ) -> dict[str, tuple[Any, Any, dict]]:
+def _folder_owners(
+    ready: list[tuple[Any, Any, dict, dict]],
+) -> dict[str, tuple[Any, Any, dict]]:
     """Map every prepared folder to its owning (pipe, cfg, ctx).
 
     Folder names are globally unique across pipes (build_plan raises
     on duplicates), so this is a strict 1:1 routing table from the
     scheduler's folder jobs back to the pipe that extracts them.
     """
-    return {summary["folder"]: (pipe, cfg, ctx)
-            for pipe, cfg, conns, ctx in ready
-            for summary in conns.values()}
+    return {
+        summary["folder"]: (pipe, cfg, ctx)
+        for pipe, cfg, conns, ctx in ready
+        for summary in conns.values()
+    }
 
 
 def _validate_connection_name(pipes: list[Pipe], name: str) -> str | None:
@@ -295,40 +318,66 @@ def _validate_connection_name(pipes: list[Pipe], name: str) -> str | None:
     exit 3). Pure - unit-tested in test_prepare_selection.py."""
     holders = [p.name for p in pipes if name in (p.connections or {})]
     if not holders:
-        return (f"connection '{name}' is not declared on any "
-                f"registered pipe (checked: "
-                f"{', '.join(p.name for p in pipes) or 'none'}) - fix "
-                f"the name or register its pipe in the env folder's run.yaml")
+        return (
+            f"connection '{name}' is not declared on any "
+            f"registered pipe (checked: "
+            f"{', '.join(p.name for p in pipes) or 'none'}) - fix "
+            f"the name or register its pipe in the env folder's run.yaml"
+        )
     return None
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m wrapper.run",
-        description="DPL orchestration wrapper (default profile: inc)")
-    parser.add_argument("--profile", default="inc",
-                        help="profile name from wrapper.yaml (default: inc)")
+        description="DPL orchestration wrapper (default profile: inc)",
+    )
     parser.add_argument(
-        "--tables", default=None,
-        help="comma-separated table names - extract ONLY these "
-             "(default: all tables)")
-    parser.add_argument("--paused-table", action="store_true",
-                        help="with --tables naming paused table(s), "
-                             "lift their TABLE-level pause for this run "
-                             "(folder-level pauses are never liftable)")
-    parser.add_argument("--connection", default=None,
-                        help="run ONLY this connection's tables "
-                             "(combine with --tables for intersection; "
-                             "naming a paused connection without "
-                             "--paused-table is refused)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="validate configs and print the extraction "
-                             "plan (connections, serial groups, worst-case "
-                             "sessions); run NOTHING")
-    parser.add_argument("--settings", default=None,
-                        help="path to settings yaml "
-                             "(default: <environment folder>/settings.yaml; "
-                             "env override DPL_SETTINGS)")
+        "--profile", default="inc", help="profile name from wrapper.yaml (default: inc)"
+    )
+    parser.add_argument(
+        "--tables",
+        default=None,
+        help="comma-separated table names - extract ONLY these (default: all tables)",
+    )
+    parser.add_argument(
+        "--paused-table",
+        action="store_true",
+        help="with --tables naming paused table(s), "
+        "lift their TABLE-level pause for this run "
+        "(folder-level pauses are never liftable)",
+    )
+    parser.add_argument(
+        "--connection",
+        default=None,
+        help="run ONLY this connection's tables "
+        "(combine with --tables for intersection; "
+        "naming a paused connection without "
+        "--paused-table is refused)",
+    )
+    parser.add_argument(
+        "--ignore-schedule",
+        action="store_true",
+        help="with --tables and/or --connection naming the "
+        "target, extract it TODAY even though its "
+        "schedule says otherwise (deliberate "
+        "off-schedule pull; stamped in log and "
+        "manifest)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate configs and print the extraction "
+        "plan (connections, serial groups, worst-case "
+        "sessions); run NOTHING",
+    )
+    parser.add_argument(
+        "--settings",
+        default=None,
+        help="path to settings yaml "
+        "(default: <environment folder>/settings.yaml; "
+        "env override DPL_SETTINGS)",
+    )
     args = parser.parse_args(argv)
 
     setup_logging()
@@ -355,8 +404,9 @@ def main(argv: list[str] | None = None) -> int:
     extractor_dir = env.folder / "extractors"
     run_registry = env.folder / "run.yaml"
     wrapcfg_path = str(env.folder / "wrapper.yaml")
-    settings_path = args.settings or _settings_path_from_env() \
-        or str(env.folder / "settings.yaml")
+    settings_path = (
+        args.settings or _settings_path_from_env() or str(env.folder / "settings.yaml")
+    )
 
     wcfg = load_wrapper_config(wrapcfg_path)
     settings = load_settings(settings_path)
@@ -371,8 +421,9 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_CONFIG
 
     try:
-        pipes = load_registered_pipes(registry_path=run_registry,
-                                      extractor_dir=extractor_dir)
+        pipes = load_registered_pipes(
+            registry_path=run_registry, extractor_dir=extractor_dir
+        )
     except ValueError as e:
         log.error("run registry / pipe routing failed - aborting: %s", e)
         return EXIT_CONFIG
@@ -398,14 +449,24 @@ def main(argv: list[str] | None = None) -> int:
             for pipe in pipes:
                 cfg = load_config(pipe.path, pipe.connector["schema"])
                 if cfg is None:
-                    log.error("dry run: pipe %s config failed validation (%s)",
-                              pipe.name, pipe.path)
+                    log.error(
+                        "dry run: pipe %s config failed validation (%s)",
+                        pipe.name,
+                        pipe.path,
+                    )
                     return EXIT_CONFIG
                 pipe_conns.append(
-                    (pipe.name, validate_pipe_connections(pipe.name, cfg)))
-            print(format_plan(build_plan(
-                gk["max_parallel_connections"],
-                _namespaced_connections(pipe_conns))))
+                    (pipe.name, validate_pipe_connections(pipe.name, cfg))
+                )
+            print(
+                format_plan(
+                    build_plan(
+                        gk["max_parallel_connections"],
+                        _namespaced_connections(pipe_conns),
+                        load_date,
+                    )
+                )
+            )
             log.info("dry run: plan valid - nothing was executed")
         except ValueError as e:
             log.error("dry run failed: %s", e)
@@ -425,6 +486,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         validate_secrets_layout()
         from dpl.lib import pass_mgr
+
         pass_mgr.init(env.folder / "pass_mgr.yaml")
     except (ValueError, FileNotFoundError) as e:
         log.error("vault unavailable - aborting: %s", e)
@@ -439,18 +501,29 @@ def main(argv: list[str] | None = None) -> int:
     run_id = make_run_id(prefix=rid["prefix"], ts_format=rid["ts_format"])
     log = get_run_logger("dpl.wrapper", run_id=run_id)
 
-    only_tables = ([t.strip() for t in args.tables.split(",")]
-                   if args.tables else None)
+    only_tables = [t.strip() for t in args.tables.split(",")] if args.tables else None
     only_connection = args.connection
     # PT-014/PT-039: --paused-table modifies a SELECTION (--tables or
     # --connection); alone it would change nothing, so refuse it
     # loudly (exit 3, nothing ran).
     paused_override = bool(args.paused_table)
     if paused_override and not (only_tables or only_connection):
-        log.error("--paused-table modifies --tables/--connection "
-                  "selections only - rerun as: --tables <names> "
-                  "--paused-table (or --connection <name> "
-                  "--paused-table)")
+        log.error(
+            "--paused-table modifies --tables/--connection "
+            "selections only - rerun as: --tables <names> "
+            "--paused-table (or --connection <name> "
+            "--paused-table)"
+        )
+        return EXIT_CONFIG
+    # PT-032 (B4): --ignore-schedule requires a NAMED target
+    # (Option-B ruling) - bare flag would silently broaden the run
+    # to every connection.
+    ignore_schedule = bool(getattr(args, "ignore_schedule", False))
+    _pair_err = validate_ignore_schedule_pairing(
+        ignore_schedule, only_tables, only_connection
+    )
+    if _pair_err is not None:
+        log.error("%s", _pair_err)
         return EXIT_CONFIG
     # PT-039: connection name validated against ALL registered pipes
     # up front - a typo is a config error (exit 3), never a silent
@@ -460,17 +533,24 @@ def main(argv: list[str] | None = None) -> int:
         if err:
             log.error("%s", err)
             return EXIT_CONFIG
-    log.info("wrapper start: profile=%s run_id=%s tables=%s "
-             "connection=%s",
-             args.profile, run_id, only_tables or "all",
-             only_connection or "all")
+    log.info(
+        "wrapper start: profile=%s run_id=%s tables=%s connection=%s",
+        args.profile,
+        run_id,
+        only_tables or "all",
+        only_connection or "all",
+    )
 
     # Tier-3 event (dormant by default; config-governed)
-    _notify("run_started", run_id, {
-        "run_id": run_id,
-        "profile": args.profile,
-        "tables": ", ".join(only_tables) if only_tables else "all",
-    })
+    _notify(
+        "run_started",
+        run_id,
+        {
+            "run_id": run_id,
+            "profile": args.profile,
+            "tables": ", ".join(only_tables) if only_tables else "all",
+        },
+    )
 
     # ------------------------------------------------------------------
     # History: insert the 'running' row so a crash leaves a visible stub
@@ -483,11 +563,11 @@ def main(argv: list[str] | None = None) -> int:
             "INSERT OR REPLACE INTO runs "
             "(run_id, profile, started_at, finished_at, status, exit_code) "
             "VALUES (?,?,?,?,?,NULL)",
-            (run_id, args.profile, _utc_now_iso(), None, "running"))
+            (run_id, args.profile, _utc_now_iso(), None, "running"),
+        )
         conn.commit()
     except sqlite3.Error as exc:
-        log.error("history db unreachable: %s - continuing without history",
-                  exc)
+        log.error("history db unreachable: %s - continuing without history", exc)
         conn = None
         history_failed = True
 
@@ -507,15 +587,17 @@ def main(argv: list[str] | None = None) -> int:
                 dispatch = importlib.import_module("dpl.lib.schema_dispatch")
                 for pipe in pipes:
                     decision = dispatch.evaluate(
-                        pipe.name, pipe.connector, pipe.connections,
-                        pipe.source_type)
+                        pipe.name, pipe.connector, pipe.connections, pipe.source_type
+                    )
                     log.info("%s", decision.message)
                     if decision.action == "skip":
                         continue
                     if decision.action == "fail":
                         log.error(
                             "generate_schemas(%s): pipe failed dispatch - "
-                            "continuing with remaining pipes", pipe.name)
+                            "continuing with remaining pipes",
+                            pipe.name,
+                        )
                         continue
                     gen_mod = importlib.import_module(decision.generator)
                     rc = gen_mod.generate_schemas(
@@ -525,13 +607,17 @@ def main(argv: list[str] | None = None) -> int:
                         dry_run=False,
                         settings_path=settings_path,
                         source_type=pipe.source_type,
-                        paused_override=paused_override)
+                        paused_override=paused_override,
+                    )
                     if rc != 0:
                         log.warning(
                             "generate_schemas(%s) returned %s - continuing "
                             "(partial introspection failures; affected "
                             "tables fail loudly at extraction if it "
-                            "matters)", pipe.name, rc)
+                            "matters)",
+                            pipe.name,
+                            rc,
+                        )
 
             elif name == "reconcile_pending":
                 # Merge every registered pipe's master CSV that exists.
@@ -540,8 +626,9 @@ def main(argv: list[str] | None = None) -> int:
                     if Path(pipe.master).exists():
                         master.update(load_schema_master(pipe.master))
                 resolved = reconcile_pending(master)
-                log.info("reconciled pending entries: %s",
-                         resolved if resolved else "none")
+                log.info(
+                    "reconciled pending entries: %s", resolved if resolved else "none"
+                )
 
             elif name == "extract":
                 # Phase 4 C2: ONE merged scheduler for all pipes (Option B).
@@ -554,8 +641,11 @@ def main(argv: list[str] | None = None) -> int:
                 for pipe in pipes:
                     cfg = load_config(pipe.path, pipe.connector["schema"])
                     if cfg is None:
-                        log.error("pipe %s: config failed validation (%s)",
-                                  pipe.name, pipe.path)
+                        log.error(
+                            "pipe %s: config failed validation (%s)",
+                            pipe.name,
+                            pipe.path,
+                        )
                         extract_failed = True
                         failed_pipes.append(pipe.name)
                         continue
@@ -567,16 +657,18 @@ def main(argv: list[str] | None = None) -> int:
                         failed_pipes.append(pipe.name)
                         continue
                     try:
-                        ext_mod = importlib.import_module(
-                            pipe.connector["extractor"])
+                        ext_mod = importlib.import_module(pipe.connector["extractor"])
                         ctx = ext_mod.prepare_run(
-                            cfg, settings, only_tables=only_tables,
+                            cfg,
+                            settings,
+                            only_tables=only_tables,
                             run_id=run_id,
                             paused_override=paused_override,
-                            only_connection=only_connection)
-                    except Exception as exc:                    # noqa: BLE001 - pipe boundary: a bad pipe never kills the healthy ones
-                        log.error("pipe %s prepare failed: %s",
-                                  pipe.name, exc)
+                            only_connection=only_connection,
+                            ignore_schedule=ignore_schedule,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - pipe boundary: a bad pipe never kills the healthy ones
+                        log.error("pipe %s prepare failed: %s", pipe.name, exc)
                         extract_failed = True
                         failed_pipes.append(pipe.name)
                         continue
@@ -593,32 +685,44 @@ def main(argv: list[str] | None = None) -> int:
                     plan = build_plan(
                         gk["max_parallel_connections"],
                         _namespaced_connections(
-                            [(p.name, c) for p, _pc, c, _px in ready],
-                            work_folders))
+                            [(p.name, c) for p, _pc, c, _px in ready], work_folders
+                        ),
+                        load_date,
+                    )
                     owners = _folder_owners(ready)
 
                     _force = step.get("force", False)
 
-                    def make_task(folder, _owners=owners,
-                                  _ext=ext_by_pipe,
-                                  _force=_force):
+                    def make_task(
+                        folder, _owners=owners, _ext=ext_by_pipe, _force=_force
+                    ):
                         pipe, cfg, ctx = _owners[folder]
 
                         def task():
                             return _ext[pipe.name].extract_folder(
-                                ctx, cfg, settings, load_date, folder,
-                                force=_force, run_id=run_id,
-                                profile=args.profile)
+                                ctx,
+                                cfg,
+                                settings,
+                                load_date,
+                                folder,
+                                force=_force,
+                                run_id=run_id,
+                                profile=args.profile,
+                            )
+
                         return task
 
-                    log.info("extract: %d folder job(s), max_parallel=%d "
-                             "(worst-case sessions=%d)", plan["tasks"],
-                             gk["max_parallel_connections"],
-                             plan["worst_case_sessions"])
+                    log.info(
+                        "extract: %d folder job(s), max_parallel=%d "
+                        "(worst-case sessions=%d)",
+                        plan["tasks"],
+                        gk["max_parallel_connections"],
+                        plan["worst_case_sessions"],
+                    )
 
                     outcomes = run_jobs(
-                        jobs_from_plan(plan, make_task),
-                        gk["max_parallel_connections"])
+                        jobs_from_plan(plan, make_task), gk["max_parallel_connections"]
+                    )
 
                     for folder, (status, value) in outcomes.items():
                         if status == "ok":
@@ -628,9 +732,12 @@ def main(argv: list[str] | None = None) -> int:
                             # continue-on-failure - the crash is recorded,
                             # siblings already ran; no envelope for this
                             # folder, tomorrow's disk-as-truth re-extracts.
-                            log.error("folder '%s' failed: %s: %s",
-                                      folder, type(value).__name__,
-                                      str(value)[:300])
+                            log.error(
+                                "folder '%s' failed: %s: %s",
+                                folder,
+                                type(value).__name__,
+                                str(value)[:300],
+                            )
                             extract_failed = True
                             pipe_name = owners[folder][0].name
                             if pipe_name not in failed_pipes:
@@ -638,23 +745,22 @@ def main(argv: list[str] | None = None) -> int:
 
             elif name == "update_history":
                 ingested, skipped = update_history(
-                    settings, history_db, days=manifest_days)
-                log.info("history: %s ingested, %s up to date",
-                         ingested, skipped)
+                    settings, history_db, days=manifest_days
+                )
+                log.info("history: %s ingested, %s up to date", ingested, skipped)
 
             elif name == "housekeeping":
                 prune_old_landing(
                     Path(settings["paths"]["landing_root"]),
-                    days=wcfg["retention"]["landing_days"])
-                prune_old_runs(
-                    Path(settings["paths"]["runs_root"]),
-                    days=manifest_days)
+                    days=wcfg["retention"]["landing_days"],
+                )
+                prune_old_runs(Path(settings["paths"]["runs_root"]), days=manifest_days)
 
             else:
                 # profiles.py validates the vocabulary; unreachable
                 log.error("unknown step '%s' - skipping", name)
 
-        except Exception as exc:                                # noqa: BLE001 - step boundary: log failure, continue remaining steps
+        except Exception as exc:  # noqa: BLE001 - step boundary: log failure, continue remaining steps
             log.error("step '%s' failed: %s", name, exc)
             if name == "extract":
                 extract_failed = True
@@ -687,11 +793,9 @@ def main(argv: list[str] | None = None) -> int:
                     "exit_code": exit_code,
                     "run_finished_at": _utc_now_iso(),
                 }
-                mfile.write_text(json.dumps(env, indent=2),
-                                 encoding="utf-8")
+                mfile.write_text(json.dumps(env, indent=2), encoding="utf-8")
         except OSError as exc:
-            log.error("could not append wrapper state to %s manifest: %s",
-                      folder, exc)
+            log.error("could not append wrapper state to %s manifest: %s", folder, exc)
 
     # ------------------------------------------------------------------
     # Close out: final state in the DB, then re-ingest manifests so the
@@ -700,12 +804,16 @@ def main(argv: list[str] | None = None) -> int:
     if conn is not None:
         try:
             conn.execute(
-                "UPDATE runs SET finished_at=?, status=?, exit_code=? "
-                "WHERE run_id=?",
-                (_utc_now_iso(),
-                 "partial_failure" if extract_failed
-                 else ("history_error" if history_failed else "success"),
-                 exit_code, run_id))
+                "UPDATE runs SET finished_at=?, status=?, exit_code=? WHERE run_id=?",
+                (
+                    _utc_now_iso(),
+                    "partial_failure"
+                    if extract_failed
+                    else ("history_error" if history_failed else "success"),
+                    exit_code,
+                    run_id,
+                ),
+            )
             conn.commit()
         except sqlite3.Error as exc:
             log.error("final history write failed: %s", exc)
@@ -719,8 +827,11 @@ def main(argv: list[str] | None = None) -> int:
         try:
             update_history(settings, history_db, days=manifest_days)
         except (sqlite3.Error, OSError, ValueError) as exc:
-            log.error("post-run history ingest failed: %s - repair with "
-                       "`python -m wrapper.update_history`", exc)
+            log.error(
+                "post-run history ingest failed: %s - repair with "
+                "`python -m wrapper.update_history`",
+                exc,
+            )
             history_failed = True
             exit_code = EXIT_HISTORY
 
@@ -732,47 +843,92 @@ def main(argv: list[str] | None = None) -> int:
     # and never fatal (FR-17: notifications can't touch the exit code).
     try:
         from dpl.lib.pause_digest import digest_payload, stale_pause_entries
+
         stale_days = (settings.get("pause") or {}).get("stale_days", 14)
         pipe_cfgs: dict[str, dict] = {}
         for p in pipes:
             c = load_config(p.path, p.connector["schema"])
             if c is not None:
                 pipe_cfgs[p.name] = c
-        payload = digest_payload(
-            stale_pause_entries(pipe_cfgs, stale_days), stale_days)
+        payload = digest_payload(stale_pause_entries(pipe_cfgs, stale_days), stale_days)
         if payload:
-            log.info("pause digest: %d stale pause(s), threshold %d "
-                     "day(s)", payload["stale_count"], stale_days)
+            log.info(
+                "pause digest: %d stale pause(s), threshold %d day(s)",
+                payload["stale_count"],
+                stale_days,
+            )
             payload["run_id"] = run_id
             _notify("pause_stale", run_id, payload)
         else:
-            log.debug("pause digest: nothing stale at threshold %d "
-                      "day(s)", stale_days)
-    except Exception as exc:               # noqa: BLE001 - never fatal
+            log.debug("pause digest: nothing stale at threshold %d day(s)", stale_days)
+    except Exception as exc:  # noqa: BLE001 - never fatal
         log.error("pause digest could not be evaluated: %s", exc)
+
+    # ── PT-032 B7: missed-scheduled-day report (once per run) ────
+    # Pure aggregate over the run's envelopes -> ONE email when any
+    # folder reports missed due-days. Override runs report too (the
+    # override extracts, it never silences - design 3.4). Never fatal
+    # (FR-17): a broken email stack cannot damage a data run.
+    try:
+        from dpl.lib.missed_days import missed_day_payload
+
+        payload = missed_day_payload(manifests)
+        if payload:
+            log.warning(
+                "schedule report: %s missed scheduled day(s) across %s folder(s)",
+                payload["missed_count"],
+                payload["missed_folders"],
+            )
+            payload["run_id"] = run_id
+            _notify("schedule_missed", run_id, payload)
+        else:
+            log.debug("schedule report: no missed scheduled days")
+    except Exception as exc:  # noqa: BLE001 - never fatal
+        log.error("missed-day report could not be evaluated: %s", exc)
 
     # ── Email events: fire after final state is known, before exit ──
     # Exactly one terminal event per run. Tier protection for
     # run_failed lives in config.py (enabled: false -> load error).
     if exit_code == EXIT_OK:
-        _notify("run_completed", run_id, {
-            "run_id": run_id, "profile": args.profile,
-            "pipes": str(len(pipes)), "status": "success",
-        })
+        _notify(
+            "run_completed",
+            run_id,
+            {
+                "run_id": run_id,
+                "profile": args.profile,
+                "pipes": str(len(pipes)),
+                "status": "success",
+            },
+        )
     else:
-        status = ("partial_failure" if extract_failed
-                  else ("history_error" if history_failed else "success"))
-        _notify("run_failed", run_id, {
-            "run_id": run_id, "profile": args.profile,
-            "status": status, "exit_code": str(exit_code),
-            "failed_pipes": ", ".join(sorted(set(failed_pipes)))
-            if failed_pipes else "unknown (see log)",
-        })
+        status = (
+            "partial_failure"
+            if extract_failed
+            else ("history_error" if history_failed else "success")
+        )
+        _notify(
+            "run_failed",
+            run_id,
+            {
+                "run_id": run_id,
+                "profile": args.profile,
+                "status": status,
+                "exit_code": str(exit_code),
+                "failed_pipes": ", ".join(sorted(set(failed_pipes)))
+                if failed_pipes
+                else "unknown (see log)",
+            },
+        )
 
-    log.info("wrapper done: run_id=%s profile=%s exit=%s%s",
-             run_id, args.profile, exit_code,
-             " (run `python -m wrapper.update_history` to repair history)"
-             if exit_code == EXIT_HISTORY else "")
+    log.info(
+        "wrapper done: run_id=%s profile=%s exit=%s%s",
+        run_id,
+        args.profile,
+        exit_code,
+        " (run `python -m wrapper.update_history` to repair history)"
+        if exit_code == EXIT_HISTORY
+        else "",
+    )
     return exit_code
 
 
@@ -782,6 +938,7 @@ def _settings_path_from_env() -> str | None:
     PT-040 4c: the legacy hardcoded default is GONE - when no override
     exists, settings come from the active environment folder."""
     import os
+
     return os.environ.get("DPL_SETTINGS") or None
 
 

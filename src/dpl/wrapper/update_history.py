@@ -36,6 +36,7 @@ CLI; connections and pragmas come from open_db() there. Schema is
 installed by scripts/init_history_db.py (v2: includes one-time legacy
 rename).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -51,6 +52,7 @@ from dpl.lib.history_db import (
     open_db,
     validate_db_path,
 )
+from dpl.lib.missed_days import missed_days_json
 
 __func_msg__ = {
     "name": "update-history",
@@ -70,9 +72,28 @@ log = get_run_logger("dpl.history")
 #: (v2.1/PT-014: the four pause fields ride along; NULL whenever the
 #: table was not paused or the manifest predates PT-014)
 TABLE_RUN_COLUMNS: tuple[str, ...] = (
-    "run_id", "folder", "table_name", "connection", "schema", "status",
-    "rows_read", "rows_written", "duration_sec", "output_path", "error",
-    "attempts", "pause_start", "pause_end", "pause_reason", "days_elapsed",
+    "run_id",
+    "folder",
+    "table_name",
+    "connection",
+    "schema",
+    "status",
+    "rows_read",
+    "rows_written",
+    "duration_sec",
+    "output_path",
+    "error",
+    "attempts",
+    "pause_start",
+    "pause_end",
+    "pause_reason",
+    "days_elapsed",
+    # v2.2 (PT-032/015): the table's as-of story; NULL whenever the
+    # manifest predates B5 (additive - old manifests never fail)
+    "table_type",
+    "coverage_kind",
+    "coverage_from",
+    "coverage_to",
 )
 
 #: the four original envelope-level count keys mirrored into folder_runs
@@ -80,15 +101,19 @@ TABLE_RUN_COLUMNS: tuple[str, ...] = (
 #: tests/unit/test_history_v2.py; v0.3.0-era four-key manifests must
 #: keep mirroring throughout the 90-day retention window).
 _FOUR_COUNT_KEYS: tuple[str, ...] = (
-    "tables_total", "tables_extracted", "tables_skipped", "tables_failed",
+    "tables_total",
+    "tables_extracted",
+    "tables_skipped",
+    "tables_failed",
 )
 #: v2.1/PT-014 addition: mirrored when the envelope carries it, else
 #: computed - an old envelope yields a true 0, never NULL.
 _PAUSED_COUNT_KEY = "tables_paused"
 
 
-def discover_manifests(runs_root: str | Path, days: int = 90
-                       ) -> list[tuple[str, str, Path]]:
+def discover_manifests(
+    runs_root: str | Path, days: int = 90
+) -> list[tuple[str, str, Path]]:
     """Walk <runs_root>/<YYYY-MM-DD>/<folder>/_manifest_*.json.
 
     Returns [(run_id, folder, path)] - only date-named dirs inside the
@@ -123,28 +148,32 @@ def _summary_counts(env: dict) -> dict[str, int]:
     old four-key envelope records a true computed 0, never NULL.
     """
     tables = env.get("tables", [])
-    computed_paused = sum(
-        1 for t in tables if t.get("status") == "paused")
+    computed_paused = sum(1 for t in tables if t.get("status") == "paused")
+    # PT-032 (B3): same mirror-compute doctrine as paused - the count
+    # rides the envelope when present, else computed from the tables
+    # (a legacy envelope yields a true 0, never NULL).
+    computed_not_sched = sum(1 for t in tables if t.get("status") == "not_scheduled")
 
-    picked = {k: env[k] for k in _FOUR_COUNT_KEYS
-              if isinstance(env.get(k), int)}
+    picked = {k: env[k] for k in _FOUR_COUNT_KEYS if isinstance(env.get(k), int)}
     if len(picked) == len(_FOUR_COUNT_KEYS):
         paused = env.get(_PAUSED_COUNT_KEY)
         return {
             **picked,
-            _PAUSED_COUNT_KEY:
-                paused if isinstance(paused, int) else computed_paused,
+            _PAUSED_COUNT_KEY: paused if isinstance(paused, int) else computed_paused,
+            "tables_not_scheduled": (
+                ns
+                if isinstance(ns := env.get("tables_not_scheduled"), int)
+                else computed_not_sched
+            ),
         }
 
     return {
         "tables_total": len(tables),
-        "tables_extracted": sum(
-            1 for t in tables if t.get("status") == "extracted"),
-        "tables_skipped": sum(
-            1 for t in tables if t.get("status") == "skipped"),
-        "tables_failed": sum(
-            1 for t in tables if t.get("status") == "failed"),
+        "tables_extracted": sum(1 for t in tables if t.get("status") == "extracted"),
+        "tables_skipped": sum(1 for t in tables if t.get("status") == "skipped"),
+        "tables_failed": sum(1 for t in tables if t.get("status") == "failed"),
         "tables_paused": computed_paused,
+        "tables_not_scheduled": computed_not_sched,
     }
 
 
@@ -166,51 +195,85 @@ def ingest_manifest(conn, mpath: Path) -> None:
              finished_at=MAX(runs.finished_at, excluded.finished_at),
              status=CASE WHEN runs.status IN ('running','sqlite_error')
                          THEN excluded.status ELSE runs.status END""",
-        (env["run_id"], env["profile"], env["started_at"],
-         env["finished_at"], env["status"]))
+        (
+            env["run_id"],
+            env["profile"],
+            env["started_at"],
+            env["finished_at"],
+            env["status"],
+        ),
+    )
 
     # --- folder_runs: THE manifest-file row (PT-001) ---
     wrapper = env.get("wrapper")
-    wrapper_exit = (wrapper.get("exit_code")
-                    if isinstance(wrapper, dict) else None)
+    wrapper_exit = wrapper.get("exit_code") if isinstance(wrapper, dict) else None
     counts = _summary_counts(env)
     conn.execute(
         """INSERT OR REPLACE INTO folder_runs
         (run_id, folder, load_date, status,
         tables_total, tables_extracted, tables_skipped, tables_failed,
-        tables_paused, exit_code, finished_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-        (env["run_id"], env["folder"], env.get("load_date"),
-         env.get("status", "unknown"),
-         counts["tables_total"], counts["tables_extracted"],
-         counts["tables_skipped"], counts["tables_failed"],
-         counts["tables_paused"], wrapper_exit, env.get("finished_at")))
+        tables_paused, tables_not_scheduled, as_of, anchor_date,
+        missed_days, exit_code, finished_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            env["run_id"],
+            env["folder"],
+            env.get("load_date"),
+            env.get("status", "unknown"),
+            counts["tables_total"],
+            counts["tables_extracted"],
+            counts["tables_skipped"],
+            counts["tables_failed"],
+            counts["tables_paused"],
+            counts["tables_not_scheduled"],
+            env.get("as_of"),
+            env.get("anchor_date"),
+            missed_days_json(env),
+            wrapper_exit,
+            env.get("finished_at"),
+        ),
+    )
 
     # --- table_runs: explicit columns (no positional-VALUES trap) ---
     placeholders = ", ".join("?" * len(TABLE_RUN_COLUMNS))
     columns = ", ".join(TABLE_RUN_COLUMNS)
     for t in env.get("tables", []):
         conn.execute(
-            f"INSERT OR REPLACE INTO table_runs ({columns}) "
-            f"VALUES ({placeholders})",
-            (env["run_id"], env["folder"], t["name"].lower(),
-             t.get("connection"), t.get("schema"), t["status"],
-             t.get("rows_read"), t.get("rows_written"),
-             t.get("duration_sec"), t.get("output_path"),
-             t.get("error"), t.get("attempts"),
-             t.get("pause_start"), t.get("pause_end"),
-             t.get("pause_reason"), t.get("days_elapsed")))
+            f"INSERT OR REPLACE INTO table_runs ({columns}) VALUES ({placeholders})",
+            (
+                env["run_id"],
+                env["folder"],
+                t["name"].lower(),
+                t.get("connection"),
+                t.get("schema"),
+                t["status"],
+                t.get("rows_read"),
+                t.get("rows_written"),
+                t.get("duration_sec"),
+                t.get("output_path"),
+                t.get("error"),
+                t.get("attempts"),
+                t.get("pause_start"),
+                t.get("pause_end"),
+                t.get("pause_reason"),
+                t.get("days_elapsed"),
+                t.get("type"),
+                t.get("coverage_kind"),
+                t.get("coverage_from"),
+                t.get("coverage_to"),
+            ),
+        )
 
 
 def existing_identities(conn) -> set[tuple[str, str, str]]:
     """(run_id, folder, table_name) pairs already persisted."""
-    rows = conn.execute(
-        "SELECT run_id, folder, table_name FROM table_runs").fetchall()
+    rows = conn.execute("SELECT run_id, folder, table_name FROM table_runs").fetchall()
     return set(rows)
 
 
-def update_history(settings: dict, db_path: Path, days: int = 90,
-                   dry_run: bool = False) -> tuple[int, int]:
+def update_history(
+    settings: dict, db_path: Path, days: int = 90, dry_run: bool = False
+) -> tuple[int, int]:
     """Entry point for both CLI and (slice 4) wrapper.
 
     Differential backfill: ingest every manifest in the window whose
@@ -231,13 +294,15 @@ def update_history(settings: dict, db_path: Path, days: int = 90,
                 raise RuntimeError(
                     f"history schema is not installed in {db_path}; run "
                     f"'python scripts/init_history_db.py' once, then "
-                    f"retry") from exc
+                    f"retry"
+                ) from exc
             raise
         todo, skipped = [], 0
         for run_id, folder, mpath in discovered:
             env = json.loads(mpath.read_text(encoding="utf-8"))
-            triples = {(run_id, folder, t["name"].lower())
-                       for t in env.get("tables", [])}
+            triples = {
+                (run_id, folder, t["name"].lower()) for t in env.get("tables", [])
+            }
             if triples <= known:
                 skipped += 1
                 continue
@@ -261,30 +326,33 @@ def update_history(settings: dict, db_path: Path, days: int = 90,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m dpl.wrapper.update_history",
-        description="Ingest manifest envelopes into the SQLite history DB")
+        description="Ingest manifest envelopes into the SQLite history DB",
+    )
     parser.add_argument("--db", help="DB path (default: derived from settings)")
-    parser.add_argument("--settings", default=None,
-                        help="path to settings yaml "
-                             "(default: <environment folder>/settings.yaml)")
-    parser.add_argument("--days", type=int, default=90,
-                        help="backfill window == manifest retention")
+    parser.add_argument(
+        "--settings",
+        default=None,
+        help="path to settings yaml (default: <environment folder>/settings.yaml)",
+    )
+    parser.add_argument(
+        "--days", type=int, default=90, help="backfill window == manifest retention"
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
     from dpl.lib.environment import resolve_environment
-    settings_path = args.settings or str(
-        resolve_environment().folder / "settings.yaml")
+
+    settings_path = args.settings or str(resolve_environment().folder / "settings.yaml")
     settings = load_settings(settings_path)
     if settings is None:
-        return 3                                        # config error
+        return 3  # config error
 
     db_path = Path(args.db) if args.db else default_db_path(settings)
     try:
-        ingested, skipped = update_history(settings, db_path,
-                                           days=args.days,
-                                           dry_run=args.dry_run)
-        print(f"history: {ingested} ingested, {skipped} up to date "
-              f"-> {db_path}")
+        ingested, skipped = update_history(
+            settings, db_path, days=args.days, dry_run=args.dry_run
+        )
+        print(f"history: {ingested} ingested, {skipped} up to date -> {db_path}")
         return 0
     except (ValueError, DbError, RuntimeError, OSError) as exc:
         log.error("history update failed: %s", exc)

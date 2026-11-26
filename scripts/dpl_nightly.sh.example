@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# =============================================================================
+# DPL NIGHTLY EXTRACTION - POSIX runner (cron / launchd) - TEMPLATE
+# -----------------------------------------------------------------------------
+# !! TEMPLATE ONLY - DO NOT COMMIT YOUR ADJUSTED COPY !!
+#   1. Copy this file somewhere the scheduler can call it - the copy is
+#      MACHINE-LOCAL: adjust its paths, never stage or commit it, and never
+#      let it travel in bundles (the loud resolver refuses exactly such
+#      arrivals - correctly).
+#   2. Adjust the three path lines marked ADJUST below.
+#   3. Register with cron per the footer recipe.
+#
+# UNTESTED DISCLAIMER: no Linux/macOS scheduled host existed when this was
+# written (validated hosts: Windows office tier via .bat twin). Shake down
+# on the FIRST real POSIX tier before trusting it; treat the first run as
+# its acceptance test.
+# -----------------------------------------------------------------------------
+# Purpose: one entry point for the scheduled job. The wrapper does ALL the
+# work; this file only sets up the environment and calls it.
+#
+# PT-032 note: the job fires EVERY day - the per-connection "schedule:" in
+# the extractor yamls decides which days each connection extracts. Do NOT
+# put any date logic in this file.
+# =============================================================================
+
+# ----- ADJUST -----------------------------------------------------------------
+REPO_DIR="/opt/dpl/pipeline"                      # repo checkout on this host
+PYTHON_EXE="/opt/dpl/pipeline/.venv/bin/python"   # the editable-install python
+SETTINGS_ARG=""
+# Optional: SETTINGS_ARG="--settings /opt/dpl/config/settings.yaml"
+# Only if settings.yaml is NOT in the default environment-folder spot.
+# ------------------------------------------------------------------------------
+
+set -u
+cd "$REPO_DIR" || { echo "[dpl-nightly] FATAL: repo dir not found: $REPO_DIR"; exit 10; }
+
+# Per-machine log of the SCHEDULER'S OWN view (did cron fire, exit code).
+# The wrapper writes its detailed log itself - logs/dpl_pipeline.log.
+mkdir -p "$REPO_DIR/logs"
+RUN_LOG="$REPO_DIR/logs/scheduler_runs.log"
+
+{
+  echo "================================================================"
+  echo "[scheduler] fired $(date '+%Y-%m-%d %H:%M:%S')"
+} >> "$RUN_LOG"
+
+# Any arguments given to this script are passed to the wrapper - e.g.
+#   dpl_nightly.sh --dry-run        (validation-only, extracts nothing)
+# so a scheduler-registered bare invocation stays the nightly default.
+"$PYTHON_EXE" -m dpl.wrapper.run $SETTINGS_ARG "$@" >> "$RUN_LOG" 2>&1
+RC=$?
+
+echo "[scheduler] finished $(date '+%Y-%m-%d %H:%M:%S') exit_code=$RC" >> "$RUN_LOG"
+exit $RC
+
+# =============================================================================
+# HOW TO REGISTER THE JOB (one-time):
+#   crontab -e
+#     # m h dom mon dow  command
+#     0 21 * * * /opt/dpl/scripts/dpl_nightly.sh
+#   (21:00 local daily - pick the same time you'd use in prod.)
+#
+# HOW TO TEST IT RIGHT NOW (without waiting for 21:00):
+#   /opt/dpl/scripts/dpl_nightly.sh ; echo "exit=$?"
+#
+# HOW TO SEE LAST RESULTS:
+#   grep -A2 "scheduler" "$REPO_DIR/logs/scheduler_runs.log" | tail -20
+#
+# HOW TO PAUSE IT DELIBERATELY (provoked missed-day test):
+#   Comment the crontab line, skip the night, uncomment it the next morning.
+#   Then the next due run should fire the missed-day email/outbox report.
+#
+# HOW TO REMOVE AFTER VALIDATION:
+#   Delete the crontab line.
+#
+# Exit-code map (wrapper): 0 ok | 1 extraction failure | 3 config error.
+# =============================================================================

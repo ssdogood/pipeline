@@ -1,0 +1,92 @@
+@echo off
+REM ============================================================================
+REM DPL NIGHTLY EXTRACTION - Windows Task Scheduler runner (TEMPLATE)
+REM ----------------------------------------------------------------------------
+REM !! TEMPLATE ONLY - DO NOT COMMIT YOUR ADJUSTED COPY !!
+REM   1. Copy this file somewhere the scheduled task can call it - the copy
+REM      is MACHINE-LOCAL: adjust its paths, never stage or commit it, and
+REM      never let it travel in bundles (the loud resolver refuses exactly
+REM      such arrivals - correctly).
+REM   2. Adjust the three path lines marked ADJUST below.
+REM   3. Register the task with the schtasks command in the footer.
+REM ----------------------------------------------------------------------------
+REM Purpose: one entry point for the scheduled job. The wrapper does ALL the
+REM work; this file only sets up the environment and calls it.
+REM
+REM PT-032 office validation note: the job fires EVERY day, exactly as
+REM production will - the per-connection "schedule:" in the extractor yamls
+REM decides which days each connection actually extracts. That is the whole
+REM point of the test: a due night and a non-due night, both with the job
+REM firing. So do NOT put any date logic in this file.
+REM
+REM ADJUST THE THREE LINES BELOW FOR THIS MACHINE, then never touch it again:
+REM ============================================================================
+
+set "REPO_DIR=C:\dpl\pipeline"
+set "PYTHON_EXE=C:\dpl\pipeline\.venv\Scripts\python.exe"
+set "SETTINGS_ARG="
+REM (Optional) set "SETTINGS_ARG=--settings C:\dpl\config\settings.yaml"
+REM Only if the settings file is NOT in the default environment-folder spot.
+
+REM ============================================================================
+REM From here down: do not edit.
+REM ============================================================================
+
+cd /d "%REPO_DIR%"
+if errorlevel 1 (
+    echo [dpl-nightly] FATAL: repo dir not found: %REPO_DIR%
+    exit /b 10
+)
+
+REM Per-machine log of the SCHEDULER'S OWN view (did the task fire, exit code).
+REM The wrapper writes its detailed log itself - logs\dpl_pipeline.log.
+set "RUN_LOG=%REPO_DIR%\logs\scheduler_runs.log"
+if not exist "%REPO_DIR%\logs" mkdir "%REPO_DIR%\logs"
+
+echo ================================================================ >> "%RUN_LOG%"
+echo [scheduler] fired %DATE% %TIME% >> "%RUN_LOG%"
+
+REM Any arguments given to this script are passed to the wrapper - e.g.
+REM   dpl_nightly.bat --dry-run        (validation-only, extracts nothing)
+REM so a scheduler-registered bare invocation stays the nightly default.
+"%PYTHON_EXE%" -m dpl.wrapper.run %SETTINGS_ARG% %* >> "%RUN_LOG%" 2>&1
+set "RC=%ERRORLEVEL%"
+
+echo [scheduler] finished %DATE% %TIME% exit_code=%RC% >> "%RUN_LOG%"
+
+REM Exit code map (from the wrapper):
+REM   0 = ok  |  1 = extraction failure  |  3 = config error (nothing ran)
+REM The task records the exit code in Task Scheduler's Last Run Result -
+REM check there each morning, plus the missed-day email/outbox report.
+exit /b %RC%
+
+REM ============================================================================
+REM HOW TO REGISTER THE JOB (one-time, in an elevated Command Prompt):
+REM ----------------------------------------------------------------------------
+REM   schtasks /Create /TN "DPL Nightly Extraction" ^
+REM     /TR "C:\dpl\pipeline\scripts\dpl_nightly.bat" ^
+REM     /SC DAILY /ST 21:00 /RU SYSTEM /RL HIGHEST /F
+REM
+REM   - /ST 21:00      : 21:00 local. Pick the same time you'd use in prod.
+REM   - /RU SYSTEM     : runs without anyone logged in. If the Oracle/AD
+REM                      credentials need a logged-in network session instead,
+REM                      use /RU <your-user> /RP <password> (see note below).
+REM   - /RL HIGHEST    : avoids low-privilege surprises with file writes.
+REM
+REM HOW TO TEST IT RIGHT NOW (without waiting for 21:00):
+REM   schtasks /Run /TN "DPL Nightly Extraction"
+REM   ...then check: schtasks /Query /TN "DPL Nightly Extraction" /V /FO LIST
+REM
+REM HOW TO SEE LAST RESULT AFTER A NIGHT:
+REM   schtasks /Query /TN "DPL Nightly Extraction" /V /FO LIST | findstr /C:"Last Result" /C:"Last Run Time"
+REM
+REM HOW TO PAUSE IT DELIBERATELY (for the provoked missed-day test):
+REM   schtasks /Change /TN "DPL Nightly Extraction" /DISABLE
+REM   (skip the night; next morning:)
+REM   schtasks /Change /TN "DPL Nightly Extraction" /ENABLE
+REM   Then re-enable and run the next due night - the missed-day email should
+REM   fire (or appear in the dry-run outbox on the test tier).
+REM
+REM REMOVING IT AFTER VALIDATION:
+REM   schtasks /Delete /TN "DPL Nightly Extraction" /F
+REM ============================================================================

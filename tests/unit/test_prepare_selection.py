@@ -24,13 +24,19 @@ _EVERGREEN = {"start": "1970-01-01", "end": "2999-12-31",
 
 def _cfg(pause=None, table_pauses=None):
     conns: dict = {"ora_db": {"type": "oracle", "folder": "stg",
-                              "retries": 1, "retry_backoff_seconds": 1}}
+                              "retries": 1, "retry_backoff_seconds": 1,
+                              "as_of": "T-0"}}
     if pause is not None:
         conns["ora_db"]["pause"] = dict(pause)
     tables = []
     for name in ("T1", "T2", "T3"):
         t: dict = {"connection": "ora_db", "schema": "STG", "name": name,
-                   "query": f"SELECT 1 FROM STG.{name}"}
+                   "query": f"SELECT 1 FROM STG.{name}",
+                   # PT-015 B2: universal table contract - type required.
+                   # T1 exercises master; T2/T3 transaction + window.
+                   "type": "master" if name == "T1" else "transaction"}
+        if t["type"] == "transaction":
+            t["window_days"] = 3
         if table_pauses and name in table_pauses:
             t["pause"] = dict(table_pauses[name])
         tables.append(t)
@@ -107,11 +113,12 @@ def test_override_suppresses_refusal(neutral, settings):
 
 def test_ad_mirror_same_contract(neutral, settings):
     conns = {"ad_main": {"type": "ldap", "folder": "ad-main",
-                         "page_size": 5}}
+                         "page_size": 5, "as_of": "T-0"}}
     tables = []
     for name in ("subd-users", "subd-groups"):
         t: dict = {"connection": "ad_main", "schema": "AD", "name": name,
-                   "search_base": "ou=x", "filter": "(objectClass=*)"}
+                   "search_base": "ou=x", "filter": "(objectClass=*)",
+                   "type": "master"}
         if name == "subd-users":
             t["pause"] = dict(_EVERGREEN)
         tables.append(t)
@@ -165,15 +172,16 @@ def test_connection_absent_on_this_pipe_is_quiet(neutral, settings):
 
 def test_ad_connection_scope_mirror(neutral, settings):
     conns: dict = {"ad_main": {"type": "ldap", "folder": "ad-main",
-                                "page_size": 5},
+                                "page_size": 5, "as_of": "T-0"},
                    "ad_other": {"type": "ldap", "folder": "ad-other",
-                                "page_size": 5}}
+                                "page_size": 5, "as_of": "T-0"}}
     tables: list = []
     for cname, name in (("ad_main", "subd-users"),
                         ("ad_other", "subd-groups")):
         tables.append({"connection": cname, "schema": "AD",
                        "name": name, "search_base": "ou=x",
-                       "filter": "(objectClass=*)"})
+                       "filter": "(objectClass=*)",
+                       "type": "master"})
     ctx = adx.prepare_run({"connections": conns, "tables": tables},
                           settings, only_connection="ad_other")
     assert _names(ctx) == ["subd-groups"]
@@ -195,3 +203,89 @@ def test_wrapper_connection_name_validation():
     err = wrap._validate_connection_name(pipes, "ora_db_typo")
     assert err is not None and "ora_db_typo" in err \
         and "oracle_to_stg" in err
+
+# ── PT-015 B2: as_of / type / window_days validation (universal contract) ──
+
+def test_as_of_invalid_refused(neutral, settings):
+    """as_of outside T-0|T-1|T-2 refuses loudly at prepare_run."""
+    cfg = _cfg()
+    cfg["connections"]["ora_db"]["as_of"] = "T-3"
+    with pytest.raises(ValueError, match="must be one of"):
+        orx.prepare_run(cfg, settings)
+
+
+def test_as_of_absent_warns_but_proceeds(neutral, settings, caplog):
+    """REQ-015-3: absent as_of = assumed T-0 + loud warning per run."""
+    cfg = _cfg()
+    del cfg["connections"]["ora_db"]["as_of"]
+    with caplog.at_level("WARNING"):
+        ctx = orx.prepare_run(cfg, settings)
+    assert _names(ctx) == ["T1", "T2", "T3"]       # proceeds, T-0 assumed
+    assert "assuming T-0" in caplog.text
+    assert "ora_db" in caplog.text
+
+
+def test_table_type_absent_refused(neutral, settings):
+    """REQ-015-6: type is REQUIRED on every table (no safe default)."""
+    cfg = _cfg()
+    del cfg["tables"][0]["type"]
+    with pytest.raises(ValueError, match="table 'type' is REQUIRED"):
+        orx.prepare_run(cfg, settings)
+
+
+def test_table_type_invalid_refused(neutral, settings):
+    cfg = _cfg()
+    cfg["tables"][0]["type"] = "snapshot"
+    with pytest.raises(ValueError, match="must be one of"):
+        orx.prepare_run(cfg, settings)
+
+
+def test_transaction_without_window_days_refused(neutral, settings):
+    """REQ-015-7: window_days REQUIRED for transaction tables."""
+    cfg = _cfg()
+    del cfg["tables"][1]["window_days"]
+    with pytest.raises(ValueError, match="'window_days' is REQUIRED"):
+        orx.prepare_run(cfg, settings)
+
+
+def test_window_days_on_master_refused(neutral, settings):
+    """A snapshot has no pull window - the key is nonsensical."""
+    cfg = _cfg()
+    cfg["tables"][0]["window_days"] = 3
+    with pytest.raises(ValueError, match="nonsensical"):
+        orx.prepare_run(cfg, settings)
+
+
+def test_window_days_zero_refused(neutral, settings):
+    cfg = _cfg()
+    cfg["tables"][1]["window_days"] = 0
+    with pytest.raises(ValueError, match=">= 1"):
+        orx.prepare_run(cfg, settings)
+
+
+def test_table_level_as_of_refused(neutral, settings):
+    """REQ-015-10: as_of at table level - loud refusal, extension only."""
+    cfg = _cfg()
+    cfg["tables"][0]["as_of"] = "T-1"
+    with pytest.raises(ValueError, match="CONNECTION-level"):
+        orx.prepare_run(cfg, settings)
+
+
+def test_as_of_mismatch_between_connections_quiet(neutral, settings):
+    """Different connections MAY declare different lags (per-connection
+    key) - only table-level mixing is refused."""
+    cfg = _cfg()
+    cfg["connections"]["ora_db"]["as_of"] = "T-2"
+    ctx = orx.prepare_run(cfg, settings)
+    assert _names(ctx) == ["T1", "T2", "T3"]
+
+
+def test_ad_type_contract_mirror(neutral, settings):
+    """AD extractor enforces the same contract (R4 mirror discipline)."""
+    conns: dict = {"ad_main": {"type": "ldap", "folder": "ad-main",
+                                "page_size": 5, "as_of": "T-0"}}
+    tables: list = [{"connection": "ad_main", "schema": "AD",
+                     "name": "subd-users", "search_base": "ou=x",
+                     "filter": "(objectClass=*)"}]  # no type: refused
+    with pytest.raises(ValueError, match="table 'type' is REQUIRED"):
+        adx.prepare_run({"connections": conns, "tables": tables}, settings)

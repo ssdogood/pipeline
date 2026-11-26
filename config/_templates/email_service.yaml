@@ -30,6 +30,8 @@ callers:
   # Copy, rename, enable - create the template file first.
   # run_started/run_completed/run_failed/pause_stale are event callers
   # (protected/enabled semantics - see config.py PROTECTED_CALLERS).
+  # PT-032 B7: schedule_missed - one mail per run with missed
+  # scheduled day(s). MAIL BUDGET: 1/run (only when a miss exists).
   run_failed:
     enabled: true
     to: [REPLACE_ME_OPS_RECIPIENT]

@@ -1,0 +1,16 @@
+<html><body style="font-family: sans-serif;">
+<h2>DPL missed-schedule report</h2>
+<p>Scheduled extraction day(s) that ran nowhere.</p>
+<table>
+<tr><td>Run ID:</td><td>${run_id}</td></tr>
+<tr><td>Missed day(s):</td><td>${missed_count}</td></tr>
+<tr><td>Affected folder(s):</td><td>${missed_folders}</td></tr>
+</table>
+<pre>${missed_lines}</pre>
+<p>A missed day means the machine was off, or the run failed, on a day
+this connection was scheduled to extract. Recovery, if the source
+still holds the data:</p>
+<pre>python -m dpl.wrapper.run --connection &lt;name&gt; --ignore-schedule</pre>
+<p>The override extracts despite the schedule; the report above is
+never silenced by it.</p>
+</body></html>

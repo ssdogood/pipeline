@@ -34,6 +34,9 @@ Schema v2.1 (PT-014 Commit 2, 2026-11-19):
                   re-ingested pre-PT-014 manifests - files stay the
                   record of record either way).
   - folder_runs : + tables_paused (mirrors the envelope count).
+  - v2.2 (PT-032/015): folder_runs + tables_not_scheduled, as_of,
+    anchor_date; table_runs + table_type, coverage_kind/from/to.
+  - v2.2 (B7): folder_runs + missed_days (JSON miss report).
   Applied by init_db() as additive ALTER TABLE, in place and lossless -
   unlike the v1 rename, old rows simply keep their NULLs.
 
@@ -57,6 +60,7 @@ so interleaved writers queue briefly instead of failing.
 Canonical time (FR-20): created_at must be ISO-8601 UTC with 'Z',
 enforced at this module's write gate via dpl.lib.timefmt.require_utc_z.
 """
+
 from __future__ import annotations
 
 import os
@@ -127,6 +131,10 @@ CREATE TABLE IF NOT EXISTS folder_runs (
     tables_skipped   INTEGER,
     tables_failed    INTEGER,
     tables_paused    INTEGER,        -- v2.1 (PT-014): mirrors envelope count
+    tables_not_scheduled INTEGER,    -- v2.2 (PT-032): schedule-skip mirror
+    as_of            TEXT,           -- v2.2 (PT-015): declared lag (T-0|T-1|T-2)
+    anchor_date      TEXT,           -- v2.2 (PT-015): computed anchor (run-N)
+    missed_days      TEXT,           -- v2.2 (PT-032 B7): JSON miss report
     exit_code        INTEGER,        -- from envelope wrapper.exit_code (pre-0.3.0: NULL)
     finished_at      TEXT,
     PRIMARY KEY (run_id, folder)
@@ -148,6 +156,10 @@ CREATE TABLE IF NOT EXISTS table_runs (
     pause_end    TEXT,               -- (NULL when the table was not paused)
     pause_reason TEXT,
     days_elapsed INTEGER,
+    table_type   TEXT,               -- v2.2 (PT-015): master | transaction
+    coverage_kind TEXT,              -- v2.2 (PT-015): snapshot-as-of | window
+    coverage_from TEXT,              -- v2.2 (PT-015): NULL for snapshots
+    coverage_to   TEXT,              -- v2.2 (PT-015): the anchor for this row
     PRIMARY KEY (run_id, folder, table_name)
 );
 CREATE TABLE IF NOT EXISTS email_sends (
@@ -168,8 +180,17 @@ CREATE TABLE IF NOT EXISTS email_sends (
 
 #: exact key set accepted by record_email_send - no extras, no omissions
 EMAIL_SEND_ROW_KEYS: tuple[str, ...] = (
-    "send_id", "caller", "created_at", "mode", "outcome", "error_class",
-    "attempts_used", "recipient_count", "subject", "error_summary", "run_id",
+    "send_id",
+    "caller",
+    "created_at",
+    "mode",
+    "outcome",
+    "error_class",
+    "attempts_used",
+    "recipient_count",
+    "subject",
+    "error_summary",
+    "run_id",
     "finished_at",
 )
 
@@ -183,6 +204,7 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 # ---------------------------------------------------------------------------
 # Connections (the ONLY sqlite3.connect calls in the pipeline)
 # ---------------------------------------------------------------------------
+
 
 def open_db(db_path: Path) -> sqlite3.Connection:
     """Open the history DB with safe-concurrency pragmas. Caller closes.
@@ -218,19 +240,26 @@ def _migrate_legacy(conn: sqlite3.Connection, existing: set[str]) -> bool:
     if "table_runs" not in existing:
         return False
     if "attempts" in _table_columns(conn, "table_runs"):
-        return False                      # already v2: idempotent re-run
+        return False  # already v2: idempotent re-run
 
-    clashes = [f"{t}_legacy" for t in _LEGACY_TABLES
-               if t in existing and f"{t}_legacy" in existing]
+    clashes = [
+        f"{t}_legacy"
+        for t in _LEGACY_TABLES
+        if t in existing and f"{t}_legacy" in existing
+    ]
     if clashes:
         raise RuntimeError(
             f"history migration blocked: {clashes} already exist - "
-            f"move or remove them before re-running init")
+            f"move or remove them before re-running init"
+        )
     for table in _LEGACY_TABLES:
         if table in existing:
             conn.execute(f"ALTER TABLE {table} RENAME TO {table}_legacy")
-            log.info("history v1 '%s' renamed to '%s' (kept, not migrated)",
-                     table, f"{table}_legacy")
+            log.info(
+                "history v1 '%s' renamed to '%s' (kept, not migrated)",
+                table,
+                f"{table}_legacy",
+            )
     return True
 
 
@@ -249,34 +278,92 @@ def _migrate_v2_1(conn: sqlite3.Connection) -> bool:
     so a half-upgraded database re-runs to completion and a v2.1
     database is a clean no-op. Returns True when any column was added.
     """
-    tables = {r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
     if "table_runs" not in tables:
-        return False          # fresh DB: the v2.1 DDL already has them
-    if "pause_reason" in _table_columns(conn, "table_runs") \
-            and "tables_paused" in _table_columns(conn, "folder_runs"):
-        return False          # already v2.1: idempotent re-run
+        return False  # fresh DB: the v2.1 DDL already has them
+    if "pause_reason" in _table_columns(
+        conn, "table_runs"
+    ) and "tables_paused" in _table_columns(conn, "folder_runs"):
+        return False  # already v2.1: idempotent re-run
 
     additions: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
-        ("table_runs", (
-            ("pause_start", "TEXT"),
-            ("pause_end", "TEXT"),
-            ("pause_reason", "TEXT"),
-            ("days_elapsed", "INTEGER"),
-        )),
-        ("folder_runs", (
-            ("tables_paused", "INTEGER"),
-        )),
+        (
+            "table_runs",
+            (
+                ("pause_start", "TEXT"),
+                ("pause_end", "TEXT"),
+                ("pause_reason", "TEXT"),
+                ("days_elapsed", "INTEGER"),
+            ),
+        ),
+        ("folder_runs", (("tables_paused", "INTEGER"),)),
     )
     added = False
     for table, cols in additions:
         if table not in tables:
-            continue          # nothing to alter (DDL creates v2.1 shape)
+            continue  # nothing to alter (DDL creates v2.1 shape)
         present = _table_columns(conn, table)
         for col, decl in cols:
             if col not in present:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
                 log.info("history v2.1: %s gained column %s", table, col)
+                added = True
+    return added
+
+
+def _migrate_v2_2(conn: sqlite3.Connection) -> bool:
+    """Additive v2.1 -> v2.2 upgrade (PT-032/015, 2026-11-25).
+
+    Same doctrine as _migrate_v2_1: CREATE IF NOT EXISTS never adds
+    columns, so a deployed v2.1 database gains its schedule/as-of
+    columns here. Lossless and in place - plain ALTER TABLE ADD
+    COLUMN; existing rows keep their NULLs. Marker: 'table_runs'
+    exists but lacks 'coverage_kind'. Every column is individually
+    idempotent (checked, skipped when present), so a half-upgraded
+    database re-runs to completion and a v2.2 database is a no-op.
+    Returns True when any column was added.
+    """
+    tables = {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "table_runs" not in tables:
+        return False  # fresh DB: the v2.2 DDL already has them
+    if "coverage_kind" in _table_columns(
+        conn, "table_runs"
+    ) and "missed_days" in _table_columns(conn, "folder_runs"):
+        return False  # already v2.2: idempotent re-run
+
+    additions: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+        (
+            "table_runs",
+            (
+                ("table_type", "TEXT"),
+                ("coverage_kind", "TEXT"),
+                ("coverage_from", "TEXT"),
+                ("coverage_to", "TEXT"),
+            ),
+        ),
+        (
+            "folder_runs",
+            (
+                ("tables_not_scheduled", "INTEGER"),
+                ("as_of", "TEXT"),
+                ("anchor_date", "TEXT"),
+            ("missed_days", "TEXT"),
+            ),
+        ),
+    )
+    added = False
+    for table, cols in additions:
+        if table not in tables:
+            continue  # nothing to alter (DDL creates v2.2 shape)
+        present = _table_columns(conn, table)
+        for col, decl in cols:
+            if col not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                log.info("history v2.2: %s gained column %s", table, col)
                 added = True
     return added
 
@@ -293,22 +380,29 @@ def init_db(db_path: Path) -> dict[str, Any]:
     conn = sqlite3.connect(db_path)
     try:
         existing = {
-            r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'")
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         migrated = _migrate_legacy(conn, existing)
         conn.executescript(DDL)
-        # v2.1 upgrade AFTER the DDL (see _migrate_v2_1 docstring)
+        # v2.1/v2.2 upgrades AFTER the DDL (see _migrate_v2_* docstrings)
         upgraded = _migrate_v2_1(conn)
+        upgraded_v2_2 = _migrate_v2_2(conn)
         conn.commit()
         journal = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
         tables = [
-            r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "ORDER BY name")
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            )
         ]
-        return {"tables": tables, "journal_mode": journal,
-                "migrated": migrated, "upgraded_v2_1": upgraded}
+        return {
+            "tables": tables,
+            "journal_mode": journal,
+            "migrated": migrated,
+            "upgraded_v2_1": upgraded,
+            "upgraded_v2_2": upgraded_v2_2,
+        }
     finally:
         conn.close()
 
@@ -316,6 +410,7 @@ def init_db(db_path: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # DB path rules (moved verbatim from wrapper/update_history.py)
 # ---------------------------------------------------------------------------
+
 
 def default_db_path(settings: dict) -> Path:
     """Default: <landing_root>/_history/dpl_history.db."""
@@ -329,15 +424,17 @@ def validate_db_path(db_path: Path, settings: dict) -> None:
     try:
         rel = db_path.relative_to(landing)
     except ValueError:
-        return                      # outside landing entirely: fine
+        return  # outside landing entirely: fine
     if rel.parts and rel.parts[0][:4].isdigit():
         raise ValueError(
             f"history db path must not live inside a landing data "
-            f"directory: {db_path} (under {landing / rel.parts[0]})")
+            f"directory: {db_path} (under {landing / rel.parts[0]})"
+        )
 
 
-def resolve_db_path(db_path: Path | str | None = None,
-                    *, settings_file: str | None = None) -> Path:
+def resolve_db_path(
+    db_path: Path | str | None = None, *, settings_file: str | None = None
+) -> Path:
     """Resolve which DB file to use. Precedence (loud about every step):
     1. explicit db_path argument (tests, wrapper overrides)
     2. $DPL_HISTORY_DB environment variable
@@ -352,14 +449,15 @@ def resolve_db_path(db_path: Path | str | None = None,
     if settings_file is None:
         # PT-040 4b: no override -> the ACTIVE environment folder.
         from dpl.lib.environment import resolve_environment
-        settings_file = str(
-            resolve_environment().folder / "settings.yaml")
+
+        settings_file = str(resolve_environment().folder / "settings.yaml")
     settings = load_settings(settings_file)
     if settings is None:
         raise ValueError(
             f"cannot resolve history db path: settings file "
             f"{settings_file!r} failed to load; pass db_path=, set "
-            f"${ENV_DB}, or fix the settings file")
+            f"${ENV_DB}, or fix the settings file"
+        )
     path = default_db_path(settings)
     validate_db_path(path, settings)
     return path
@@ -369,8 +467,8 @@ def resolve_db_path(db_path: Path | str | None = None,
 # The email history write gate (FR-18)
 # ---------------------------------------------------------------------------
 
-def record_email_send(row: dict, *,
-                      db_path: Path | str | None = None) -> None:
+
+def record_email_send(row: dict, *, db_path: Path | str | None = None) -> None:
     """Persist ONE resolved email send as a single email_sends row.
 
     Contract: row keys must be EXACTLY EMAIL_SEND_ROW_KEYS; created_at
@@ -385,7 +483,8 @@ def record_email_send(row: dict, *,
     if missing or unknown:
         raise ValueError(
             f"email_sends row must contain exactly {EMAIL_SEND_ROW_KEYS}; "
-            f"missing: {missing}, unknown: {unknown}")
+            f"missing: {missing}, unknown: {unknown}"
+        )
     require_utc_z(row["created_at"])
     if row["finished_at"] is not None:
         require_utc_z(row["finished_at"])
@@ -396,11 +495,15 @@ def record_email_send(row: dict, *,
         conn.execute(
             f"INSERT INTO email_sends ({', '.join(EMAIL_SEND_ROW_KEYS)}) "
             f"VALUES ({', '.join('?' * len(EMAIL_SEND_ROW_KEYS))})",
-            tuple(row[k] for k in EMAIL_SEND_ROW_KEYS))
+            tuple(row[k] for k in EMAIL_SEND_ROW_KEYS),
+        )
         conn.commit()
-        log.debug("email_sends row written: send_id=%s caller=%s "
-                  "outcome=%s", row["send_id"], row["caller"],
-                  row["outcome"])
+        log.debug(
+            "email_sends row written: send_id=%s caller=%s outcome=%s",
+            row["send_id"],
+            row["caller"],
+            row["outcome"],
+        )
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
             raise RuntimeError(

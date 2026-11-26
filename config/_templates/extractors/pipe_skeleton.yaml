@@ -28,6 +28,13 @@ oracle_example:
       retry_backoff_seconds: 30
       serial_group: REPLACE_ME_OR_NONE   # sessions sharing a serial group run
                                         # sequentially (one DB session at a time)
+      # PT-032/015 (connection level only; see docs/Schedules and As-Of
+      # Operator Guide.md):
+      # as_of: T-0|T-1|T-2               # how far back "today" reaches;
+                                        # absent = T-0 with a loud warning
+      # schedule:                        # WHICH days this connection extracts
+      #   on: [tue, wed]                 #   weekdays and/or 1-31/'last'
+      #   except: [sun, mon]             #   'on' and 'except' never together
       users: REPLACE_ME_VAULT_REF        # vault ref - NEVER a plaintext secret
 
   transforms: []               # optional pipeline transforms (oracle only)
@@ -37,6 +44,9 @@ oracle_example:
       schema: REPLACE_ME_DB_SCHEMA
       name: REPLACE_ME_TABLE_NAME
       query: REPLACE_ME_SQL_QUERY
+      type: master             # REQUIRED: master | transaction (PT-015-6)
+      window_days: 3           # transactions ONLY (pull width; refused on
+                               # masters); see the as-of operator guide
       pause: null              # table-level pause: null | tag (see pause docs)
 
 ldap_example:
@@ -51,6 +61,9 @@ ldap_example:
       table_concurrency: 1
       retries: 3
       retry_backoff_seconds: 30
+      # PT-032/015: as_of: T-0|T-1|T-2 and schedule: on:/except: also live
+      # here at connection level (identical rules to the oracle example
+      # above; see docs/Schedules and As-Of Operator Guide.md).
       users: REPLACE_ME_VAULT_REF
 
   tables:
@@ -59,3 +72,4 @@ ldap_example:
       schema: REPLACE_ME_AD_SCHEMA
       search_base: REPLACE_ME_DN
       filter: REPLACE_ME_LDAP_FILTER
+      type: master             # REQUIRED: master | transaction (PT-015-6)
