@@ -25,9 +25,33 @@ import string
 from datetime import date
 from pathlib import Path
 
+import duckdb
 import polars as pl
+import pytest
+from cryptography.fernet import Fernet
 
+from dpl.lib import stg_keys
 from dpl.lib.write_parquet import write_table
+
+
+# ------------------------------------------------------------------ PT-048
+@pytest.fixture(autouse=True)
+def _stg_key_for_oracle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Autouse PT-048 fixture: every legacy writer test gets a scratch
+    key bin with a provisioned key for its source name(s). Always-on
+    encryption (R-12) means no write can happen without one."""
+    root = tmp_path / "envtree"
+    (root / "config" / "development").mkdir(parents=True)
+    (root / "secrets").mkdir(parents=True)
+    (root / "config" / "environment.yaml").write_text(
+        "environment: development\n", encoding="utf-8"
+    )
+    master = root / "master.key"
+    master.write_text(Fernet.generate_key().decode(), encoding="utf-8")
+    stg_keys.poke_reset()
+    stg_keys.init(project_root=root, master_path=master)
+    # NOTE: extend this list if the source= grep shows names beyond oracle
+    stg_keys.provision(["oracle"], date(2026, 10, 17))
 
 
 # ------------------------------------------------------------------ helpers
@@ -49,13 +73,32 @@ def _writer_settings(root: Path) -> dict:
 
 
 def _read_back(path_pattern: str) -> pl.DataFrame:
-    """Polars lazy read-back for efficiency."""
-    return pl.scan_parquet(path_pattern).collect()
+    """PT-048: files are encrypted; read back via DuckDB with the
+    provisioned day key (Polars' reader cannot decrypt them).
+    fetchall() - tuples all the way down, no Arrow API variance."""
+    con = duckdb.connect()
+    try:
+        key_name = stg_keys.key_name("oracle")
+        material = stg_keys.get("oracle", date(2026, 10, 17))
+        con.execute(f"PRAGMA add_parquet_key('{key_name}', '{material}')")
+        cursor = con.execute(
+            f"SELECT * FROM read_parquet('{path_pattern}', "
+            f"encryption_config={{footer_key: '{key_name}'}})"
+        )
+        cols = [d[0] for d in cursor.description]
+        rows = cursor.fetchall()
+        return pl.DataFrame(rows, schema=cols, orient="row")
+    finally:
+        con.close()
 
 
 def _glob_table(table: str, settings: dict, load_date: date) -> Path:
-    return Path(settings["paths"]["landing_root"]) / load_date.isoformat() \
-        / "oracle" / table
+    return (
+        Path(settings["paths"]["landing_root"])
+        / load_date.isoformat()
+        / "oracle"
+        / table
+    )
 
 
 # ------------------------------------------------------------------ cleansing
@@ -71,27 +114,36 @@ def test_basic_cleanse_unicode(tmp_path):
     load_date = date(2026, 10, 17)
 
     batches = [
-        pl.DataFrame({
-            "code": [" ab ", "AB"],
-            "desc_en": ["x  y\tz", "abc"],
-            "desc_el": ["α β γ", "δ  ε  ζ"],     # Greek
-            "desc_ru": ["привет", "мир\tмир"],    # Cyrillic (tab inside)
-            "desc_ja": ["あ い", "う え"],        # Japanese (double space)
-            "amount": [1, 2],                    # numeric: untouched
-        }),
-        pl.DataFrame({
-            "code": ["   aB   "],                 # near-dupe on `code` after upper
-            "desc_en": ["X Y Z"],
-            "desc_el": ["θ"],
-            "desc_ru": ["тест"],
-            "desc_ja": ["かきく"],
-            "amount": [3],
-        }),
+        pl.DataFrame(
+            {
+                "code": [" ab ", "AB"],
+                "desc_en": ["x  y\tz", "abc"],
+                "desc_el": ["α β γ", "δ  ε  ζ"],  # Greek
+                "desc_ru": ["привет", "мир\tмир"],  # Cyrillic (tab inside)
+                "desc_ja": ["あ い", "う え"],  # Japanese (double space)
+                "amount": [1, 2],  # numeric: untouched
+            }
+        ),
+        pl.DataFrame(
+            {
+                "code": ["   aB   "],  # near-dupe on `code` after upper
+                "desc_en": ["X Y Z"],
+                "desc_el": ["θ"],
+                "desc_ru": ["тест"],
+                "desc_ja": ["かきく"],
+                "amount": [3],
+            }
+        ),
     ]
 
     stats = write_table(
-        cfg, settings, "oracle", "SMOKE1", load_date,
-        iter(batches), dedup_columns=["CODE"],
+        cfg,
+        settings,
+        "oracle",
+        "SMOKE1",
+        load_date,
+        iter(batches),
+        dedup_columns=["CODE"],
     )
 
     assert stats["published"], f"publish failed: {stats}"
@@ -111,11 +163,12 @@ def test_basic_cleanse_unicode(tmp_path):
 
     # the surviving row is the FIRST occurrence: batch 1, row 1 (earliest arrival)
     assert list(df["desc_en"].to_list()) == ["X Y Z"]
-    assert list(df["desc_el"].to_list()) == ["Α Β Γ"]      # Greek upper, collapsed
-    assert list(df["desc_ru"].to_list()) == ["ПРИВЕТ"]     # Cyrillic upper
-    assert list(df["desc_ja"].to_list()) == ["あ い".upper()] or \
-        list(df["desc_ja"].to_list()) == ["あ い"]         # ja has no case
-    assert list(df["amount"].to_list()) == [1]             # numeric untouched
+    assert list(df["desc_el"].to_list()) == ["Α Β Γ"]  # Greek upper, collapsed
+    assert list(df["desc_ru"].to_list()) == ["ПРИВЕТ"]  # Cyrillic upper
+    assert list(df["desc_ja"].to_list()) == ["あ い".upper()] or list(
+        df["desc_ja"].to_list()
+    ) == ["あ い"]  # ja has no case
+    assert list(df["amount"].to_list()) == [1]  # numeric untouched
 
     # _stage_seq never reaches the published parquet
     assert "_stage_seq" not in df.columns, df.columns
@@ -134,7 +187,7 @@ def test_no_transforms(tmp_path):
     assert "dedup_columns" not in stats and "duplicates_removed" not in stats, stats
 
     df = _read_back(str(_glob_table("no_xform", settings, load_date) / "*.parquet"))
-    assert df["code"][0] == " AbC ", df["code"][0]   # unchanged
+    assert df["code"][0] == " AbC ", df["code"][0]  # unchanged
     assert "_stage_seq" not in df.columns, df.columns
 
 
@@ -147,8 +200,15 @@ def test_dedup_include_first_wins(tmp_path):
 
     batches = [pl.DataFrame({"key": ["a", "a"], "payload": ["first", "second"]})]
 
-    stats = write_table(cfg, settings, "oracle", "dedup_inc", load_date,
-                        iter(batches), dedup_columns=["KEY"])
+    stats = write_table(
+        cfg,
+        settings,
+        "oracle",
+        "dedup_inc",
+        load_date,
+        iter(batches),
+        dedup_columns=["KEY"],
+    )
 
     assert stats["rows_read"] == 2 and stats["rows_written"] == 1, stats
     assert stats["duplicates_removed"] == 1, stats
@@ -167,14 +227,25 @@ def test_dedup_exclude_mode(tmp_path):
     settings = _writer_settings(tmp_path)
     load_date = date(2026, 10, 17)
 
-    batches = [pl.DataFrame({
-        "key": ["a", "a", "b"],            # partition columns after exclusion
-        "value": [10, 10, 20],
-        "updated_at": ["t1", "t2", "t3"]   # excluded: differences here ignored
-    })]
+    batches = [
+        pl.DataFrame(
+            {
+                "key": ["a", "a", "b"],  # partition columns after exclusion
+                "value": [10, 10, 20],
+                "updated_at": ["t1", "t2", "t3"],  # excluded: differences here ignored
+            }
+        )
+    ]
 
-    stats = write_table(cfg, settings, "oracle", "dedup_exc", load_date,
-                        iter(batches), dedup_columns=["-UPDATED_AT"])
+    stats = write_table(
+        cfg,
+        settings,
+        "oracle",
+        "dedup_exc",
+        load_date,
+        iter(batches),
+        dedup_columns=["-UPDATED_AT"],
+    )
 
     assert stats["dedup_mode"] == "exclude", stats
     assert stats["dedup_columns"] == ["key", "value"], stats
@@ -195,13 +266,24 @@ def test_dedup_all_mode(tmp_path):
     settings = _writer_settings(tmp_path)
     load_date = date(2026, 10, 17)
 
-    batches = [pl.DataFrame({
-        "a": ["x", "x", "y"],
-        "b": [1, 1, 3],
-    })]
+    batches = [
+        pl.DataFrame(
+            {
+                "a": ["x", "x", "y"],
+                "b": [1, 1, 3],
+            }
+        )
+    ]
 
-    stats = write_table(cfg, settings, "oracle", "dedup_all", load_date,
-                        iter(batches), dedup_columns="all")
+    stats = write_table(
+        cfg,
+        settings,
+        "oracle",
+        "dedup_all",
+        load_date,
+        iter(batches),
+        dedup_columns="all",
+    )
 
     assert stats["dedup_mode"] == "all", stats
     assert stats["dedup_columns"] == ["a", "b"], stats
@@ -220,11 +302,18 @@ def test_dedup_none_keyword(tmp_path):
 
     batches = [pl.DataFrame({"a": ["x", "x"]})]
 
-    stats = write_table(cfg, settings, "oracle", "dedup_none", load_date,
-                        iter(batches), dedup_columns="NONE")
+    stats = write_table(
+        cfg,
+        settings,
+        "oracle",
+        "dedup_none",
+        load_date,
+        iter(batches),
+        dedup_columns="NONE",
+    )
 
     assert stats["dedup"] is False, stats
-    assert stats["rows_written"] == 2, stats     # duplicate kept
+    assert stats["rows_written"] == 2, stats  # duplicate kept
     assert "dedup_columns" not in stats and "duplicates_removed" not in stats
 
 
@@ -240,16 +329,30 @@ def test_missing_dedup_col_raises(tmp_path):
 
     # include-mode typo
     try:
-        write_table(cfg, settings, "oracle", "bad_inc", load_date,
-                    iter(batches), dedup_columns=["NOPE"])
+        write_table(
+            cfg,
+            settings,
+            "oracle",
+            "bad_inc",
+            load_date,
+            iter(batches),
+            dedup_columns=["NOPE"],
+        )
         raise AssertionError("should have raised")
     except ValueError as e:
         assert "nope" in str(e), f"error message: {e}"
 
     # exclude-mode typo
     try:
-        write_table(cfg, settings, "oracle", "bad_exc", load_date,
-                    iter(batches), dedup_columns=["-NOPE"])
+        write_table(
+            cfg,
+            settings,
+            "oracle",
+            "bad_exc",
+            load_date,
+            iter(batches),
+            dedup_columns=["-NOPE"],
+        )
         raise AssertionError("should have raised")
     except ValueError as e:
         assert "nope" in str(e), f"error message: {e}"
@@ -267,8 +370,15 @@ def test_exclude_everything_raises(tmp_path):
     batches = [pl.DataFrame({"a": [1]})]
 
     try:
-        write_table(cfg, settings, "oracle", "exc_all", load_date,
-                    iter(batches), dedup_columns=["-a"])
+        write_table(
+            cfg,
+            settings,
+            "oracle",
+            "exc_all",
+            load_date,
+            iter(batches),
+            dedup_columns=["-a"],
+        )
         raise AssertionError("should have raised")
     except ValueError as e:
         assert "no dedup key left" in str(e), f"error message: {e}"
@@ -283,8 +393,15 @@ def test_sort_desc(tmp_path):
 
     batches = [pl.DataFrame({"ts": [3, 1, 2], "id": [10, 20, 30]})]
 
-    stats = write_table(cfg, settings, "oracle", "sort_desc", load_date,
-                        iter(batches), sort_spec=[("ts", "desc")])
+    stats = write_table(
+        cfg,
+        settings,
+        "oracle",
+        "sort_desc",
+        load_date,
+        iter(batches),
+        sort_spec=[("ts", "desc")],
+    )
 
     assert stats["published"] and stats["sort_columns"] == ["ts"], stats
     df = _read_back(str(_glob_table("sort_desc", settings, load_date) / "*.parquet"))
@@ -298,19 +415,33 @@ def test_sort_mixed_directions(tmp_path):
     settings = _writer_settings(tmp_path)
     load_date = date(2026, 10, 17)
 
-    batches = [pl.DataFrame({
-        "grp": ["b", "a", "a", "b"],
-        "val": [1, 2, 1, 2],
-    })]
+    batches = [
+        pl.DataFrame(
+            {
+                "grp": ["b", "a", "a", "b"],
+                "val": [1, 2, 1, 2],
+            }
+        )
+    ]
 
-    stats = write_table(cfg, settings, "oracle", "sort_mix", load_date,
-                        iter(batches),
-                        sort_spec=[("grp", "asc"), ("val", "desc")])
+    stats = write_table(
+        cfg,
+        settings,
+        "oracle",
+        "sort_mix",
+        load_date,
+        iter(batches),
+        sort_spec=[("grp", "asc"), ("val", "desc")],
+    )
 
     assert stats["published"], stats
     df = _read_back(str(_glob_table("sort_mix", settings, load_date) / "*.parquet"))
-    assert list(zip(df["grp"].to_list(), df["val"].to_list())) == \
-        [("a", 2), ("a", 1), ("b", 2), ("b", 1)], df
+    assert list(zip(df["grp"].to_list(), df["val"].to_list())) == [
+        ("a", 2),
+        ("a", 1),
+        ("b", 2),
+        ("b", 1),
+    ], df
 
 
 def test_sort_tiebreak_is_arrival_order(tmp_path):
@@ -324,8 +455,15 @@ def test_sort_tiebreak_is_arrival_order(tmp_path):
         pl.DataFrame({"key": ["x"], "payload": ["later"]}),
     ]
 
-    write_table(cfg, settings, "oracle", "sort_tie", load_date,
-                iter(batches), sort_spec=[("key", "asc")])
+    write_table(
+        cfg,
+        settings,
+        "oracle",
+        "sort_tie",
+        load_date,
+        iter(batches),
+        sort_spec=[("key", "asc")],
+    )
 
     df = _read_back(str(_glob_table("sort_tie", settings, load_date) / "*.parquet"))
     assert df["payload"].to_list() == ["p1", "p2", "later"], df["payload"].to_list()
@@ -340,8 +478,15 @@ def test_sort_typo_raises(tmp_path):
     batches = [pl.DataFrame({"a": [1]})]
 
     try:
-        write_table(cfg, settings, "oracle", "bad_sort", load_date,
-                    iter(batches), sort_spec=[("nope", "asc")])
+        write_table(
+            cfg,
+            settings,
+            "oracle",
+            "bad_sort",
+            load_date,
+            iter(batches),
+            sort_spec=[("nope", "asc")],
+        )
         raise AssertionError("should have raised")
     except ValueError as e:
         assert "nope" in str(e), f"error message: {e}"
@@ -361,13 +506,24 @@ def test_multi_part_sorted_seam(tmp_path):
     rows = 40_000
     blob = ["".join(rnd.choices(string.ascii_letters, k=200)) for _ in range(rows)]
     # feed seq in REVERSE order so accidental pass-through fails the test
-    batches = [pl.DataFrame({
-        "seq": list(range(rows - 1, -1, -1)),
-        "blob": blob,
-    })]
+    batches = [
+        pl.DataFrame(
+            {
+                "seq": list(range(rows - 1, -1, -1)),
+                "blob": blob,
+            }
+        )
+    ]
 
-    stats = write_table(cfg, settings, "oracle", "sort_split", load_date,
-                        iter(batches), sort_spec=[("seq", "asc")])
+    stats = write_table(
+        cfg,
+        settings,
+        "oracle",
+        "sort_split",
+        load_date,
+        iter(batches),
+        sort_spec=[("seq", "asc")],
+    )
 
     assert stats["published"] and stats["parts"] >= 2, f"expected split: {stats}"
     out = _glob_table("sort_split", settings, load_date)
@@ -432,8 +588,7 @@ def test_midstream_failure(tmp_path):
         raise RuntimeError("simulated connection drop")
 
     try:
-        write_table(cfg, settings, "oracle", "fail_mid", load_date,
-                    failing_batches())
+        write_table(cfg, settings, "oracle", "fail_mid", load_date, failing_batches())
     except RuntimeError:
         pass
 

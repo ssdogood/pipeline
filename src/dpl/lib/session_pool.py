@@ -49,6 +49,7 @@ from contextlib import AbstractContextManager
 from typing import Any, Self
 
 from dpl.lib.logger import get_run_logger
+from dpl.lib.write_parquet import StgVerificationError  # PT-048 B2
 
 __func_msg__ = {
     "name": "session pool",
@@ -71,15 +72,15 @@ log = get_run_logger("dpl.session_pool")
 # ORA-/DPI- code in the message is the only discriminator.
 SESSION_CLASS_SUBSTRINGS = (
     # Oracle transport / TNS
-    "ORA-03113",          # end-of-file on communication channel
-    "ORA-03114",          # not connected to ORACLE
-    "ORA-03135",          # connection lost contact
-    "ORA-12170",          # TNS: connect timeout
-    "ORA-12541",          # TNS: no listener
-    "ORA-12571",          # TNS: packet writer failed
-    "DPI-1080",           # network connection was lost (thin-mode drop)
-    "DPY-4011",           # database or network closed the connection
-    "DPY-4033",           # database closed the connection because the connection's idle time
+    "ORA-03113",  # end-of-file on communication channel
+    "ORA-03114",  # not connected to ORACLE
+    "ORA-03135",  # connection lost contact
+    "ORA-12170",  # TNS: connect timeout
+    "ORA-12541",  # TNS: no listener
+    "ORA-12571",  # TNS: packet writer failed
+    "DPI-1080",  # network connection was lost (thin-mode drop)
+    "DPY-4011",  # database or network closed the connection
+    "DPY-4033",  # database closed the connection because the connection's idle time
     # generic transport (matches yesterday's RETRYABLE_ERRORS set)
     "ConnectionReset",
     "ConnectionRefused",
@@ -97,7 +98,12 @@ SESSION_CLASS_SUBSTRINGS = (
 # Exceptions whose TYPE alone means transport. ConnectionError covers
 # ConnectionResetError/ConnectionRefusedError/ConnectionAbortedError.
 # Deliberately NOT OSError (disk-full is a data-class problem).
-SESSION_CLASS_TYPES = (ConnectionError, TimeoutError, EOFError)
+SESSION_CLASS_TYPES = (
+    ConnectionError,
+    TimeoutError,
+    EOFError,
+    StgVerificationError,  # PT-048 B2: verification failure = session-class (retryable); writer purges parts, so a retry starts clean
+)
 
 
 def classify_error(exc: BaseException) -> str:
@@ -117,6 +123,7 @@ def classify_error(exc: BaseException) -> str:
 
 # --- FolderSession -------------------------------------------------------------
 
+
 class FolderSession:
     """One long-lived connection shared by a folder's tables.
 
@@ -134,8 +141,9 @@ class FolderSession:
     keepalive through the factory (see ora_connect.connect expire_time).
     """
 
-    def __init__(self, connect_factory: Callable[[], AbstractContextManager],
-                 label: str = "-") -> None:
+    def __init__(
+        self, connect_factory: Callable[[], AbstractContextManager], label: str = "-"
+    ) -> None:
         self._factory = connect_factory
         self._label = label
         self._cm: AbstractContextManager | None = None
@@ -163,9 +171,10 @@ class FolderSession:
         if self._cm is not None:
             try:
                 self._cm.__exit__(None, None, None)
-            except Exception as exc:                    # noqa: BLE001 - teardown of a possibly-dead transport; the triggering failure is the story, not this
-                log.debug("[%s] close during reset raised (ignored): %s",
-                          self._label, exc)
+            except Exception as exc:  # noqa: BLE001 - teardown of a possibly-dead transport; the triggering failure is the story, not this
+                log.debug(
+                    "[%s] close during reset raised (ignored): %s", self._label, exc
+                )
         self._cm = None
         self.conn = None
 
@@ -182,6 +191,7 @@ class FolderSession:
 
 
 # --- retry loop -----------------------------------------------------------------
+
 
 def run_with_retry(
     session: FolderSession,
@@ -214,18 +224,29 @@ def run_with_retry(
             if classify(exc) != "session":
                 raise
             if attempts > retries:
-                log.error("[%s] session-class failure persisted after %d "
-                          "attempt(s): %s", session._label, attempts, exc)
+                log.error(
+                    "[%s] session-class failure persisted after %d attempt(s): %s",
+                    session._label,
+                    attempts,
+                    exc,
+                )
                 raise
-            log.warning("[%s] session-class failure (attempt %d/%d), "
-                        "resetting session and retrying in %ss: %s",
-                        session._label, attempts, retries + 1,
-                        backoff_seconds, str(exc)[:300])
+            log.warning(
+                "[%s] session-class failure (attempt %d/%d), "
+                "resetting session and retrying in %ss: %s",
+                session._label,
+                attempts,
+                retries + 1,
+                backoff_seconds,
+                str(exc)[:300],
+            )
             session.reset()
             if backoff_seconds:
                 sleeper(backoff_seconds)
 
+
 # --- folder table-worker ---------------------------------------------------------
+
 
 def run_folder_tables(
     folder_label: str,
@@ -285,7 +306,8 @@ def run_folder_tables(
 
     def worker(worker_id: int) -> None:
         session = FolderSession(
-            connect_factory, label=f"{folder_label}/lane{worker_id}")
+            connect_factory, label=f"{folder_label}/lane{worker_id}"
+        )
         try:
             while True:
                 idx = next_index()
@@ -300,31 +322,46 @@ def run_folder_tables(
 
                 try:
                     result, attempts = run_with_retry(
-                        session, counted, retries=retries,
+                        session,
+                        counted,
+                        retries=retries,
                         backoff_seconds=backoff_seconds,
-                        classify=classify, sleeper=sleeper)
-                    outcomes[idx] = {"name": name, "status": "ok",
-                                     "result": result, "error": None,
-                                     "attempts": attempts}
-                except Exception as exc:                    # noqa: BLE001 - lane isolation: record the failure, keep serving the queue
-                    log.warning("[%s] table '%s' failed after %d "
-                                "attempt(s) - continuing queue",
-                                folder_label, name,
-                                max(calls["n"], 1))
-                    outcomes[idx] = {"name": name, "status": "failed",
-                                    "result": None,
-                                    "error": str(exc)[:500],
-                                    "attempts": max(calls["n"], 1)}
+                        classify=classify,
+                        sleeper=sleeper,
+                    )
+                    outcomes[idx] = {
+                        "name": name,
+                        "status": "ok",
+                        "result": result,
+                        "error": None,
+                        "attempts": attempts,
+                    }
+                except Exception as exc:  # noqa: BLE001 - lane isolation: record the failure, keep serving the queue
+                    log.warning(
+                        "[%s] table '%s' failed after %d attempt(s) - continuing queue",
+                        folder_label,
+                        name,
+                        max(calls["n"], 1),
+                    )
+                    outcomes[idx] = {
+                        "name": name,
+                        "status": "failed",
+                        "result": None,
+                        "error": str(exc)[:500],
+                        "attempts": max(calls["n"], 1),
+                    }
         finally:
-            session.close()          # guaranteed lane shutdown
+            session.close()  # guaranteed lane shutdown
 
-    threads = [threading.Thread(target=worker, args=(w,),
-                                name=f"dpl-{folder_label}-lane{w}")
-               for w in range(n_workers)]
+    threads = [
+        threading.Thread(target=worker, args=(w,), name=f"dpl-{folder_label}-lane{w}")
+        for w in range(n_workers)
+    ]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
 
     # all slots filled unless tasks was mutated concurrently - it is not
-    return [o for o in outcomes]        # type: ignore[return-value]
+    return [o for o in outcomes]  # type: ignore[return-value]
+

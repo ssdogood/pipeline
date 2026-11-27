@@ -322,6 +322,12 @@ def _task_for(
         # net behavior as the old no-retry early return.
         declared = _declared_schema_for(schema_master, folder, table_name)
 
+        # PT-048 B2: StgVerificationError is session-class (retryable):
+        # parts already purged by the writer, so a fresh attempt starts
+        # from a clean landing dir. A second verification failure falls
+        # through the worker's normal attempt-exhaustion path (email +
+        # failed status + continue-on-failure). No bespoke retry here -
+        # the ONE retry lives in the existing health gate.
         rule = _rules_for(rules, folder, table_name)
         dedup_parsed = rule.get("dedup")
         sort_spec = rule.get("sort_spec") or []
@@ -670,9 +676,11 @@ def extract_folder(
     if conn_cfg.get("schedule") is not None:
         try:
             lasts = missed_days.fetch_last_success(
-                Path(settings["paths"]["landing_root"]) / "_history" / "dpl_history.db")
+                Path(settings["paths"]["landing_root"]) / "_history" / "dpl_history.db"
+            )
             miss_report = missed_days.missed_days_for_connection(
-                conn_cfg["schedule"], lasts.get(folder), load_date)
+                conn_cfg["schedule"], lasts.get(folder), load_date
+            )
         except Exception as exc:  # noqa: BLE001 - reporting never fatal
             rlog.warning("[%s] missed-day detection failed: %s", folder, exc)
     if not due:

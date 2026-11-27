@@ -396,6 +396,12 @@ def _task_for(
         dedup_parsed = rule.get("dedup")
         sort_spec = rule.get("sort_spec") or []
 
+        # PT-048 B2: verification failure of the parent OR any child
+        # writer purges that writer's parts (writer-owned) and raises;
+        # the whole-table retry unit is this extraction (parent +
+        # children re-extract together via the existing gate). Children
+        # of a failed verification retry with the parent - AD pulls once
+        # from LDAP and splits; children cannot re-extract alone.
         with ExitStack() as stack:
             pw = stack.enter_context(
                 ParquetWriter(
@@ -774,9 +780,11 @@ def extract_folder(
     if conn_cfg.get("schedule") is not None:
         try:
             lasts = missed_days.fetch_last_success(
-                Path(settings["paths"]["landing_root"]) / "_history" / "dpl_history.db")
+                Path(settings["paths"]["landing_root"]) / "_history" / "dpl_history.db"
+            )
             miss_report = missed_days.missed_days_for_connection(
-                conn_cfg["schedule"], lasts.get(folder), load_date)
+                conn_cfg["schedule"], lasts.get(folder), load_date
+            )
         except Exception as exc:  # noqa: BLE001 - reporting never fatal
             rlog.warning("[%s] missed-day detection failed: %s", folder, exc)
     if not due:

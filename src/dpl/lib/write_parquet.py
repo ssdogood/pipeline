@@ -50,6 +50,7 @@ from typing import Self
 import duckdb
 import polars as pl
 
+from dpl.lib import stg_keys
 from dpl.lib.common import landing_dir, parse_dedup_spec
 from dpl.lib.logger import get_run_logger
 
@@ -68,14 +69,27 @@ __func_msg__ = {
 log = get_run_logger("dpl.writer")
 
 
-WIDE_TABLE_WARNING_COLS = 10   # warn when 'all'-mode dedup sees more columns
+WIDE_TABLE_WARNING_COLS = 10  # warn when 'all'-mode dedup sees more columns
+
+
+class StgVerificationError(RuntimeError):
+    """Post-publish read-back verification failed (PT-048 R-13).
+
+    Raised only AFTER the offending table's published parts are
+    deleted and its (now empty) landing dir removed - staging holds
+    verified files or nothing. Extractor contract: catch, re-extract
+    the table ONCE; a second occurrence marks the table failed
+    (continue-on-failure doctrine)."""
+
 
 # ------------------------------------------------------------------ helpers
 def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 
 def _duckdb_session(settings: dict, scratch_root: Path) -> duckdb.DuckDBPyConnection:
     """Fresh in-memory DuckDB session, configured verbatim from settings.yaml."""
@@ -93,13 +107,16 @@ def _duckdb_session(settings: dict, scratch_root: Path) -> duckdb.DuckDBPyConnec
 
     return con
 
+
 def _column_types(con, table: str = "_stage") -> list[tuple[str, str]]:
     """[(column_name, UPPER(type)), ...] for the named table."""
     desc = con.execute(f"DESCRIBE {table}").fetchall()
     return [(r[0], r[1].upper()) for r in desc]
 
-def _resolve_dedup_columns(columns: list[tuple[str, str]],
-                           parsed: dict) -> list[str] | None:
+
+def _resolve_dedup_columns(
+    columns: list[tuple[str, str]], parsed: dict
+) -> list[str] | None:
     """Turn a parsed dedup spec into the final partition column list.
 
     Returns None when mode is 'none'. Validates that every referenced
@@ -152,8 +169,10 @@ def _resolve_dedup_columns(columns: list[tuple[str, str]],
         )
     return keep
 
-def _validate_sort_columns(sort_spec: list[tuple[str, str]],
-                           columns: list[tuple[str, str]]) -> None:
+
+def _validate_sort_columns(
+    sort_spec: list[tuple[str, str]], columns: list[tuple[str, str]]
+) -> None:
     """Every sort column must exist in the result set. Loud failure."""
     available = {name.lower() for name, _typ in columns}
     missing = [c for c, _d in sort_spec if c not in available]
@@ -163,8 +182,10 @@ def _validate_sort_columns(sort_spec: list[tuple[str, str]],
             f"Available columns: {sorted(available)}"
         )
 
-def _order_by_clause(sort_spec: list[tuple[str, str]],
-                     columns: list[tuple[str, str]]) -> str:
+
+def _order_by_clause(
+    sort_spec: list[tuple[str, str]], columns: list[tuple[str, str]]
+) -> str:
     """Build the ORDER BY clause for a table's sort spec.
 
     Returns '' when there is no sort (no ORDER BY at all - untouched
@@ -182,13 +203,13 @@ def _order_by_clause(sort_spec: list[tuple[str, str]],
     _validate_sort_columns(sort_spec, columns)
 
     terms = [
-        f"{_quote_ident(c)} {'DESC' if d == 'desc' else 'ASC'}"
-        for c, d in sort_spec
+        f"{_quote_ident(c)} {'DESC' if d == 'desc' else 'ASC'}" for c, d in sort_spec
     ]
     available = {name.lower() for name, _typ in columns}
     if "_stage_seq" in available:
-        terms.append('"_stage_seq" ASC')     # stable-sort tiebreak
+        terms.append('"_stage_seq" ASC')  # stable-sort tiebreak
     return "ORDER BY " + ", ".join(terms)
+
 
 def _build_cleanse_sql(con, cfg: dict, parsed: dict) -> str:
     """Build the cleansing SELECT over _stage.
@@ -207,7 +228,7 @@ def _build_cleanse_sql(con, cfg: dict, parsed: dict) -> str:
     upper = bool(transforms.get("uppercase"))
     collapse = bool(transforms.get("collapse_whitespace"))
 
-    columns = _column_types(con)               # includes _stage_seq
+    columns = _column_types(con)  # includes _stage_seq
     varchars = {name for name, typ in columns if typ == "VARCHAR"}
 
     exprs = []
@@ -237,11 +258,20 @@ def _build_cleanse_sql(con, cfg: dict, parsed: dict) -> str:
 
     return sql
 
-def _copy(con, sql: str, path: Path, compression: str,
-          level: int | None) -> None:
-    """COPY ... TO parquet. Tries COMPRESSION_LEVEL, falls back if this
-    DuckDB build rejects the option (warns once per attempt)."""
-    opts = f"FORMAT PARQUET, COMPRESSION {compression}"
+
+def _copy(
+    con, sql: str, path: Path, compression: str, level: int | None, key_name: str
+) -> None:
+    """COPY ... TO parquet, ENCRYPTED (PT-048 R-12, always-on).
+
+    Tries COMPRESSION_LEVEL, falls back if this DuckDB build rejects
+    the option (warns once per attempt) - the fallback reissues the
+    FULL option set including ENCRYPTION_CONFIG, so the encryption
+    guarantee survives both branches (pinned by test)."""
+    opts = (
+        f"FORMAT PARQUET, COMPRESSION {compression}, "
+        f"ENCRYPTION_CONFIG {{footer_key: '{key_name}'}}"
+    )
     if level is not None:
         try:
             con.execute(
@@ -252,12 +282,22 @@ def _copy(con, sql: str, path: Path, compression: str,
         except duckdb.Error as e:
             log.warning(
                 "COMPRESSION_LEVEL %d not accepted by this DuckDB (%s); "
-                "using codec default", level, e,
+                "using codec default",
+                level,
+                e,
             )
     con.execute(f"COPY ({sql}) TO '{path.as_posix()}' ({opts})")
 
-def _write_parts(con, settings: dict, from_sql: str, order_by: str,
-                 scratch_dir: Path, table: str) -> list[Path]:
+
+def _write_parts(
+    con,
+    settings: dict,
+    from_sql: str,
+    order_by: str,
+    scratch_dir: Path,
+    table: str,
+    key_name: str,
+) -> list[Path]:
     """Write {table}-NNNN.parquet parts into scratch_dir.
 
     Single file below max_file_mb; above it, parts are sized from the
@@ -275,7 +315,7 @@ def _write_parts(con, settings: dict, from_sql: str, order_by: str,
     max_bytes = int(writer_cfg.get("max_file_mb", 512)) * 1024 * 1024
 
     single = scratch_dir / f"{table}-0001.parquet"
-    _copy(con, f"{from_sql} {order_by}", single, compression, level)
+    _copy(con, f"{from_sql} {order_by}", single, compression, level, key_name)
 
     size = single.stat().st_size
     if size <= max_bytes:
@@ -298,11 +338,15 @@ def _write_parts(con, settings: dict, from_sql: str, order_by: str,
         _copy(
             con,
             f"{from_sql} {order_by} LIMIT {rows_per_part} OFFSET {offset}",
-            part, compression, level,
+            part,
+            compression,
+            level,
+            key_name,
         )
         parts.append(part)
 
     return parts
+
 
 # ----------------------------------------------------------------- public API
 class ParquetWriter:
@@ -319,13 +363,21 @@ class ParquetWriter:
     published parquet.
     """
 
-    def __init__(self, settings: dict, source: str, table: str,
-                 load_date: date, transforms: dict | None = None,
-                 dedup_columns=None,
-                 sort_spec: list[tuple[str, str]] | None = None,
-                 run_id: str | None = None) -> None:
+    def __init__(
+        self,
+        settings: dict,
+        source: str,
+        table: str,
+        load_date: date,
+        transforms: dict | None = None,
+        dedup_columns=None,
+        sort_spec: list[tuple[str, str]] | None = None,
+        run_id: str | None = None,
+    ) -> None:
         self.settings = settings
-        self.cfg = {"transforms": transforms or {}}   # _build_cleanse_sql reads transforms
+        self.cfg = {
+            "transforms": transforms or {}
+        }  # _build_cleanse_sql reads transforms
         self.source = source
         self.table = table.lower()
         self.load_date = load_date
@@ -335,8 +387,7 @@ class ParquetWriter:
         # bare module logger when no run_id is supplied (legacy callers,
         # tests) - those lines render run_id=- exactly as before.
         if run_id:
-            self._log = get_run_logger("dpl.writer", run_id=run_id,
-                                       table=self.table)
+            self._log = get_run_logger("dpl.writer", run_id=run_id, table=self.table)
         else:
             self._log = log
 
@@ -355,18 +406,25 @@ class ParquetWriter:
         self.sort_active = bool(self.sort_spec)
 
         self._keep_scratch = bool(
-            settings.get("writer", {}).get("keep_scratch_on_success", False))
+            settings.get("writer", {}).get("keep_scratch_on_success", False)
+        )
 
         self.scratch_root = Path(settings["paths"]["scratch_root"])
         self.landing_root = settings["paths"]["landing_root"]
-        self.tmp_dir = self.scratch_root / f"tmp_{source}_{self.table}_{uuid.uuid4().hex[:8]}"
+        self.tmp_dir = (
+            self.scratch_root / f"tmp_{source}_{self.table}_{uuid.uuid4().hex[:8]}"
+        )
         self.dest_dir = landing_dir(self.landing_root, load_date, source) / self.table
 
         self._con: duckdb.DuckDBPyConnection | None = None
+        # PT-048: day-key label + material, resolved at first session
+        # creation (append()); memory-only, session-local, never logged.
+        self._key_name: str = stg_keys.key_name(self.source)
+        self._key_material: str | None = None
         self._have_stage = False
         self._closed = False
         self._rows_read = 0
-        self._rows_staged = 0              # cumulative counter for _stage_seq
+        self._rows_staged = 0  # cumulative counter for _stage_seq
         self._start_wall = time.time()
 
         # heterogeneous stats bag: values are bool/int/float/str/None
@@ -382,7 +440,8 @@ class ParquetWriter:
             "end_time": None,
             "duration_sec": 0.0,
             "compression": settings.get("writer", {})
-                                 .get("compression", "zstd").lower(),
+            .get("compression", "zstd")
+            .lower(),
         }
         if self.dedup_active:
             self.stats["dedup_mode"] = self.parsed["mode"]
@@ -394,7 +453,8 @@ class ParquetWriter:
         """Stage one batch into _stage. Empty frames are ignored."""
         if self._closed:
             raise RuntimeError(
-                f"ParquetWriter for {self.source}.{self.table} already closed")
+                f"ParquetWriter for {self.source}.{self.table} already closed"
+            )
         if df is None or df.height == 0:
             return
 
@@ -406,13 +466,14 @@ class ParquetWriter:
             if self._con is None:
                 self.tmp_dir.mkdir(parents=True, exist_ok=True)
                 self._con = _duckdb_session(self.settings, self.scratch_root)
+                self._register_key(self._con)
             if not self._have_stage:
                 self._con.execute("CREATE TABLE _stage AS SELECT * FROM df LIMIT 0")
                 self._have_stage = True
             self._con.execute("INSERT INTO _stage SELECT * FROM df")
             self._rows_read += df.height
         except Exception:
-            self._release(keep=False)   # no dangling DuckDB locks on failure
+            self._release(keep=False)  # no dangling DuckDB locks on failure
             raise
 
     def close(self) -> dict:
@@ -423,8 +484,9 @@ class ParquetWriter:
 
         try:
             if self._con is None:
-                self._log.info("%s.%s: zero rows, nothing published",
-                               self.source, self.table)
+                self._log.info(
+                    "%s.%s: zero rows, nothing published", self.source, self.table
+                )
                 return _finish(self.stats, self._start_wall)
 
             clean_sql = _build_cleanse_sql(self._con, self.cfg, self.parsed)
@@ -432,9 +494,7 @@ class ParquetWriter:
             # the write-time projection below drops it
             self._con.execute(f"CREATE TABLE _clean AS {clean_sql}")
             self.stats["rows_read"] = self._rows_read
-            row = self._con.execute(
-                "SELECT count(*) FROM _clean"
-            ).fetchone()
+            row = self._con.execute("SELECT count(*) FROM _clean").fetchone()
             # count(*) always yields exactly one row; guard satisfies the
             # tuple | None signature of fetchone()
             self.stats["rows_written"] = row[0] if row is not None else 0
@@ -444,11 +504,13 @@ class ParquetWriter:
 
             if self.dedup_active:
                 self.stats["duplicates_removed"] = (
-                    self._rows_read - self.stats["rows_written"])
+                    self._rows_read - self.stats["rows_written"]
+                )
                 # snapshot the RESOLVED partition set against the published
                 # schema (visible only - never _stage_seq)
                 self.stats["dedup_columns"] = _resolve_dedup_columns(
-                    visible, self.parsed)
+                    visible, self.parsed
+                )
 
             # sort: validated against the real result set; the clause is
             # applied outermost in every write query by _write_parts
@@ -458,8 +520,15 @@ class ParquetWriter:
             select_list = ", ".join(_quote_ident(n) for n, _t in visible)
             from_sql = f"SELECT {select_list} FROM _clean"
 
-            parts = _write_parts(self._con, self.settings, from_sql,
-                                 order_by, self.tmp_dir, self.table)
+            parts = _write_parts(
+                self._con,
+                self.settings,
+                from_sql,
+                order_by,
+                self.tmp_dir,
+                self.table,
+                self._key_name,
+            )
 
             # ---- publish: clear stale parts, then move (same filesystem) ----
             self.dest_dir.mkdir(parents=True, exist_ok=True)
@@ -468,17 +537,29 @@ class ParquetWriter:
             for part in parts:
                 shutil.move(str(part), str(self.dest_dir / part.name))
 
+            # ---- PT-048 R-13: verify BEFORE declaring published -------
+            landed = [self.dest_dir / part.name for part in parts]
+            self._verify_parts(landed)
+
             self.stats["published"] = True
+            self.stats["verification_passed"] = True
             self.stats["output_dir"] = str(self.dest_dir)
             self.stats["parts"] = len(parts)
 
-            total_mb = sum(p.stat().st_size
-                           for p in self.dest_dir.glob("*.parquet")) / 1024**2
-            self._log.info("%s.%s published: %d rows read, %d rows written, "
-                           "%d part(s)%s, %.1f MB",
-                           self.source, self.table, self._rows_read,
-                           self.stats["rows_written"], len(parts),
-                           ", sorted" if self.sort_active else "", total_mb)
+            total_mb = (
+                sum(p.stat().st_size for p in self.dest_dir.glob("*.parquet")) / 1024**2
+            )
+            self._log.info(
+                "%s.%s published: %d rows read, %d rows written, "
+                "%d part(s)%s, %.1f MB, verified",
+                self.source,
+                self.table,
+                self._rows_read,
+                self.stats["rows_written"],
+                len(parts),
+                ", sorted" if self.sort_active else "",
+                total_mb,
+            )
             return _finish(self.stats, self._start_wall)
 
         finally:
@@ -499,27 +580,117 @@ class ParquetWriter:
         return False
 
     # -------------------------------------------------------------- internals
+    def _register_key(self, con: duckdb.DuckDBPyConnection) -> None:
+        """PT-048: resolve + register the day key into THIS session.
+
+        Loud refusal (R-12) when the bin holds no key for this
+        connection and load_date - never a silent plaintext write."""
+        self._key_material = stg_keys.get(self.source, self.load_date)
+        con.execute(
+            f"PRAGMA add_parquet_key('{self._key_name}', '{self._key_material}')"
+        )
+
+    def _verify_parts(self, landed: list[Path]) -> None:
+        """Lightweight mandatory verification (PT-048 R-13).
+
+        Fresh in-memory session (never the writer's own): per landed
+        part, a row count (forces footer + metadata decryption) and a
+        sum(hash()) over the first VARCHAR column (proves column-chunk
+        ciphertext decrypts). Part counts must total rows_written.
+        Any failure -> published parts deleted, the now-empty table
+        dir removed, StgVerificationError raised."""
+        assert self._key_name is not None and self._key_material is not None
+        con = duckdb.connect()
+        try:
+            con.execute(
+                f"PRAGMA add_parquet_key('{self._key_name}', '{self._key_material}')"
+            )
+            total = 0
+            for part in landed:
+                esc = part.as_posix()
+                cfg = f"encryption_config={{footer_key: '{self._key_name}'}}"
+                row = con.execute(
+                    f"SELECT count(*) FROM read_parquet('{esc}', {cfg})"
+                ).fetchone()
+                total += int(row[0] if row else 0)
+                desc = con.execute(
+                    f"DESCRIBE SELECT * FROM read_parquet('{esc}', {cfg})"
+                ).fetchall()
+                if desc:
+                    first_col = next(
+                        (r[0] for r in desc if (r[1] or "").upper() == "VARCHAR"),
+                        desc[0][0],
+                    )
+                    con.execute(
+                        f"SELECT sum(hash({_quote_ident(first_col)})) "
+                        f"FROM read_parquet('{esc}', {cfg})"
+                    ).fetchone()
+            if total != self.stats["rows_written"]:
+                raise ValueError(
+                    f"row count mismatch: wrote "
+                    f"{self.stats['rows_written']}, read back {total}"
+                )
+        except Exception as exc:
+            self._purge_published(landed, reason=exc)
+            raise StgVerificationError(
+                f"{self.source}.{self.table}: post-publish verification "
+                f"failed ({exc}) - parts purged, staging clean"
+            ) from exc
+        finally:
+            con.close()
+
+    def _purge_published(self, landed: list[Path], reason: object) -> None:
+        """Delete unverified artifacts; leave no empty husk dirs."""
+        for part in landed:
+            part.unlink(missing_ok=True)
+        try:
+            self.dest_dir.rmdir()  # succeeds only when empty
+        except OSError:
+            self._log.warning(
+                "%s.%s: landing dir %s not empty after purge - left in place",
+                self.source,
+                self.table,
+                self.dest_dir,
+            )
+        self.stats["verification_passed"] = False
+        self.stats["published"] = False
+        self.stats["output_dir"] = None
+        self._log.error(
+            "%s.%s: verification FAILED (%s) - parts purged",
+            self.source,
+            self.table,
+            reason,
+        )
+
     def _release(self, keep: bool) -> None:
         """Close the DuckDB session; remove scratch unless told to keep it."""
         if self._con is not None:
             try:
                 self._con.close()
-            except Exception:                                       # noqa: BLE001, S110 - best-effort teardown close; must not mask the primary error, nothing to log
+            except Exception:  # noqa: BLE001, S110 - best-effort teardown close; must not mask the primary error, nothing to log
                 pass
             self._con = None
         if not keep and self.tmp_dir.exists():
             shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
 
 def _finish(stats: dict, start_wall: float) -> dict:
     stats["end_time"] = _utc_now_iso()
     stats["duration_sec"] = round(time.time() - start_wall, 2)
     return stats
 
-def write_table(cfg: dict, settings: dict, source: str, table: str,
-                load_date: date, batches: Iterable[pl.DataFrame],
-                dedup_columns=None,
-                sort_spec: list[tuple[str, str]] | None = None,
-                run_id: str | None = None) -> dict:
+
+def write_table(
+    cfg: dict,
+    settings: dict,
+    source: str,
+    table: str,
+    load_date: date,
+    batches: Iterable[pl.DataFrame],
+    dedup_columns=None,
+    sort_spec: list[tuple[str, str]] | None = None,
+    run_id: str | None = None,
+) -> dict:
     """One-shot facade over ParquetWriter: stage, cleanse, publish. -> stats.
 
     Thin glue ONLY - all logic lives in ParquetWriter. `batches` is drained
@@ -530,7 +701,10 @@ def write_table(cfg: dict, settings: dict, source: str, table: str,
     # (same pattern as oracle_to_stg's wstats), never a live path.
     stats: dict | None = None
     with ParquetWriter(
-        settings, source=source, table=table, load_date=load_date,
+        settings,
+        source=source,
+        table=table,
+        load_date=load_date,
         transforms=cfg.get("transforms", {}),
         dedup_columns=dedup_columns,
         sort_spec=sort_spec,
@@ -541,6 +715,6 @@ def write_table(cfg: dict, settings: dict, source: str, table: str,
         stats = w.close()
     if stats is None:
         raise RuntimeError(
-            "internal error: writer returned no stats - "
-            "close() was not called?")
+            "internal error: writer returned no stats - close() was not called?"
+        )
     return stats
