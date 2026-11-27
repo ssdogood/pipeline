@@ -160,6 +160,25 @@ else
         || fail "Fernet key generation failed (activate the 'dpl' environment first: conda activate dpl)"
 fi
 
+# --- Step 6b: generate stg_keys master key (PT-048) ---------------------------
+# The staging-key bin has its OWN master key - independent blast radius
+# from the password vault (design 2.1). Same ceremony, separate lock.
+# Refuses overwrite like every other key in this script.
+STG_KEYS_DIR="$ENV_KEY_DIR/stg_keys"
+STG_MASTER="$STG_KEYS_DIR/key"
+
+if [ -f "$STG_MASTER" ]; then
+    echo ""
+    echo "stg_keys master already exists at $STG_MASTER - skipping (protected)."
+else
+    mkdir -p "$STG_KEYS_DIR"
+    chmod 700 "$STG_KEYS_DIR"
+    echo "Generating stg_keys master key..."
+    "$PYTHON_BIN" -c "from cryptography.fernet import Fernet; open('$STG_MASTER','wb').write(Fernet.generate_key())" \
+        || fail "stg_keys master generation failed (activate the 'dpl' environment first: conda activate dpl)"
+fi
+chmod 600 "$STG_MASTER" 2>/dev/null || true
+
 # --- Step 7: permissions + report --------------------------------------------
 chmod 600 "$AGE_PATH" "$FERNET_PATH"
 
@@ -173,6 +192,10 @@ echo "    age_key_file: ~/.dpl/keys/$ENV/sops-age/age.key"
 echo "    key_file:     ~/.dpl/keys/$ENV/fernet/key"
 echo ""
 echo "  (custom locations: use the paths you chose, in tilde form)"
+echo ""
+echo "  stg_keys bin master (PT-048) was also ensured at:"
+echo "    ~/.dpl/keys/$ENV/stg_keys/key"
+echo "  (no config entry needed - the bin locates it automatically)"
 echo ""
 echo "  Then run: ./run_offline_tests.sh"
 echo "=============================================="

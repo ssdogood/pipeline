@@ -18,6 +18,7 @@ MODULES = (
     "lib/ora_connect.py",
     "lib/ldap_connect.py",
     "lib/pass_mgr/__init__.py",
+    "lib/stg_keys.py",
     "lib/email_service/__init__.py",
     "lib/pause.py",
     "lib/pause_digest.py",

@@ -108,4 +108,6 @@ strict = [
     "src/dpl/lib/schedule.py", "tests/unit/test_schedule.py",
     "src/dpl/lib/asof.py", "tests/unit/test_asof.py",
     "src/dpl/lib/missed_days.py", "tests/unit/test_missed_days.py",
+    "src/dpl/lib/stg_keys.py", "tests/unit/test_stg_keys.py",
+    "tests/unit/test_stg_keys_edge.py",
 ]

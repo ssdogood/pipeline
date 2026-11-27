@@ -51,6 +51,7 @@ CONTEXT_DEFAULTS = {"run_id": "-", "table": "-"}
 
 ROOT_LOGGER_NAME = "dpl"
 
+
 class UtcFormatter(logging.Formatter):
     """Formatter whose asctime renders in UTC (doctrine: rev2 timestamps).
 
@@ -64,6 +65,7 @@ class UtcFormatter(logging.Formatter):
     """
 
     converter = time.gmtime
+
 
 def _load_config(path: Path = DEFAULT_CONFIG_PATH) -> dict:
     """Load logging config from YAML; fall back to built-in defaults if missing."""
@@ -82,9 +84,9 @@ def _default_config() -> dict:
             "standard": {
                 "()": "dpl.lib.logger.UtcFormatter",
                 "format": "%(asctime)s | tid=%(thread)d | %(name)s | "
-                          "%(funcName)s | %(levelname)-8s | "
-                          "run_id=%(run_id)s | table=%(table)s | "
-                          "%(message)s",
+                "%(funcName)s | %(levelname)-8s | "
+                "run_id=%(run_id)s | table=%(table)s | "
+                "%(message)s",
                 "datefmt": "%Y-%m-%dT%H:%M:%SZ",
                 "defaults": CONTEXT_DEFAULTS,
             },
@@ -101,7 +103,7 @@ def _default_config() -> dict:
                 "level": "DEBUG",
                 "formatter": "standard",
                 "filename": str(LOG_DIR / "dpl_pipeline.log"),
-                "maxBytes": 5242880,       # 5 MB
+                "maxBytes": 5242880,  # 5 MB
                 "backupCount": 30,
                 "encoding": "utf-8",
             },
@@ -119,7 +121,7 @@ def _default_config() -> dict:
             ROOT_LOGGER_NAME: {
                 "handlers": ["console", "file", "errors"],
                 "level": "DEBUG",
-                "propagate": False,   # children propagate HERE; stop at dpl
+                "propagate": False,  # children propagate HERE; stop at dpl
             },
         },
         "root": {
@@ -152,10 +154,9 @@ def setup_logging(config_path: Path | None = None) -> None:
     logging.config.dictConfig(config)
 
 
-
-def get_run_logger(name: str = ROOT_LOGGER_NAME,
-                   run_id: str = "-",
-                   table: str = "-") -> logging.LoggerAdapter:
+def get_run_logger(
+    name: str = ROOT_LOGGER_NAME, run_id: str = "-", table: str = "-"
+) -> logging.LoggerAdapter[logging.Logger]:
     """
     Run-scoped logger adapter: injects run_id and table into every record
     emitted through it, guaranteeing the formatter's context fields exist
@@ -172,4 +173,3 @@ def get_run_logger(name: str = ROOT_LOGGER_NAME,
     """
     logger = logging.getLogger(name)
     return logging.LoggerAdapter(logger, {"run_id": run_id, "table": table})
-
