@@ -29,7 +29,11 @@ _STRIP_V2_1_COLS = re.compile(
     r"|table_type[ \t]+TEXT"
     r"|coverage_kind[ \t]+TEXT"
     r"|coverage_from[ \t]+TEXT"
-    r"|coverage_to[ \t]+TEXT)"
+    r"|coverage_to[ \t]+TEXT"
+    # v2.3 (PT-048): stripped the same way - _v1_ddl must keep
+    # yielding the authentic v1 shape whatever the DDL grows
+    r"|encryption_key[ \t]+TEXT"
+    r"|verification_passed[ \t]+INTEGER)"
     r",([ \t]*--[^\n]*)?[ \t]*$\n?",
     flags=re.MULTILINE,
 )
@@ -679,3 +683,106 @@ class TestIngestV2_2:
         env["missed_days"] = []
         got = self._ingest(tmp_path, env)
         assert got["folder_runs"][3] is None
+
+
+# ── v2.3 (PT-048): stg encryption columns, in-place upgrade ────────────
+
+_STRIP_V2_3_COLS = re.compile(
+    r"^[ \t]+(?:encryption_key[ \t]+TEXT"
+    r"|verification_passed[ \t]+INTEGER)"
+    r",([ \t]*--[^\n]*)?[ \t]*$\n?",
+    flags=re.MULTILINE,
+)
+
+
+def _v2_2_ddl() -> str:
+    """Authentic v2.2: production DDL minus the PT-048 v2.3 columns."""
+    return _STRIP_V2_3_COLS.sub("", DDL)
+
+
+def _cols(conn, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def test_v2_3_upgrade_in_place_preserves_rows(tmp_path):
+    db_path = tmp_path / "v22.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(_v2_2_ddl())
+    conn.execute(
+        "INSERT INTO table_runs (run_id, folder, table_name, status) "
+        "VALUES ('r','stg','t1','extracted')"
+    )
+    conn.commit()
+    conn.close()
+
+    summary = init_db(db_path)
+    assert summary["migrated"] is False
+    assert summary["upgraded_v2_3"] is True
+
+    conn = sqlite3.connect(db_path)
+    assert {"encryption_key", "verification_passed"} <= _cols(conn, "table_runs")
+    row = conn.execute(
+        "SELECT encryption_key, verification_passed FROM table_runs "
+        "WHERE table_name = 't1'"
+    ).fetchone()
+    assert row == (None, None)  # pre-v2.3 row keeps its NULLs
+    conn.close()
+
+
+def test_v2_3_upgrade_idempotent_rerun(tmp_path):
+    db_path = tmp_path / "v22.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(_v2_2_ddl())
+    conn.commit()
+    conn.close()
+
+    init_db(db_path)
+    summary = init_db(db_path)  # re-run on the upgraded DB
+    assert summary["upgraded_v2_3"] is False
+
+
+def test_fresh_db_is_v2_3_without_migration(tmp_path):
+    db_path = tmp_path / "fresh.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(DDL)  # production DDL = v2.3 shape already
+    conn.commit()
+    conn.close()
+
+    summary = init_db(db_path)
+    assert summary["migrated"] is False
+    assert summary["upgraded_v2_3"] is False  # DDL already had the columns
+    conn = sqlite3.connect(db_path)
+    assert {"encryption_key", "verification_passed"} <= _cols(conn, "table_runs")
+    conn.close()
+
+
+# ── v2.3 (PT-048): encryption stamp ingest ─────────────────────────────
+
+
+def test_ingest_carries_encryption_stamp(db):
+    env = _envelope(tables=[_table()])
+    env["encryption_key"] = "stg.stg"  # envelope ROOT field (PT-048 R-14)
+    env["tables"][0]["verification_passed"] = True
+    _ingest(db, env)
+    conn = open_db(db)
+    try:
+        row = conn.execute(
+            "SELECT encryption_key, verification_passed FROM table_runs"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == ("stg.stg", 1)  # TRUE becomes SQLite INTEGER 1
+
+
+def test_ingest_legacy_manifest_yields_nulls(db):
+    """Pre-PT-048 manifest: no stamp fields anywhere - NULL, never 0."""
+    env = _envelope(tables=[_table()])
+    _ingest(db, env)
+    conn = open_db(db)
+    try:
+        row = conn.execute(
+            "SELECT encryption_key, verification_passed FROM table_runs"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == (None, None)

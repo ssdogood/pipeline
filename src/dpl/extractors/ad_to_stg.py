@@ -210,6 +210,7 @@ def _build_stats(
     output_path: str | None = None,
     children: dict[str, int] | None = None,
     anchor_date: date | None = None,
+    verification_passed: bool | None = None,
 ) -> dict[str, Any]:
     """Assemble a manifest-ready stats entry for one table.
 
@@ -235,6 +236,12 @@ def _build_stats(
     if children:
         stats["child_tables"] = children
         stats["child_rows_written"] = sum(children.values())
+    # PT-048 (R-14): MIRROR of oracle's stamp. Absence is MEANINGFUL -
+    # absent when nothing was published; present (true|false) only
+    # when every writer in this table's unit (parent + children)
+    # actually published and verified.
+    if verification_passed is not None:
+        stats["verification_passed"] = verification_passed
     if anchor_date is not None:
         table_type = asof.validate_table_type(
             table_cfg.get("type"),
@@ -471,10 +478,21 @@ def _task_for(
             _flush()
 
             parent_stats = pw.close()
+            # PT-048: retain each child's full close stats - the table's
+            # verification outcome is the CONJUNCTION over the whole
+            # extraction unit (parent + every child). A child that
+            # published nothing contributes vacuous True (absence
+            # semantics); any False poisons the whole entry, matching
+            # the whole-table retry unit.
+            child_closes = {mv: cws[mv].close() for mv in mv_columns}
             child_stats = {
-                child_names[mv]: cws[mv].close().get("rows_written", 0)
+                child_names[mv]: child_closes[mv].get("rows_written", 0)
                 for mv in mv_columns
             }
+            all_verified = all(
+                d.get("verification_passed", True)
+                for d in (parent_stats, *child_closes.values())
+            )
 
             tlog.info(
                 "completed (%d rows, %d child rows, %.1fs)",
@@ -492,6 +510,7 @@ def _task_for(
                 output_path=parent_stats.get("output_dir"),
                 children=child_stats,
                 anchor_date=anchor_date,
+                verification_passed=all_verified,
             )
 
     return attempt
@@ -874,7 +893,16 @@ def extract_folder(
             stats = oc["result"]
         else:
             stats = _build_stats(
-                t, load_date, "failed", error=oc["error"], anchor_date=anchor_date
+                t,
+                load_date,
+                "failed",
+                error=oc["error"],
+                anchor_date=anchor_date,
+                verification_passed=(
+                    False
+                    if "post-publish verification failed" in (oc["error"] or "")
+                    else None
+                ),
             )
         stats["attempts"] = oc["attempts"]
         results.append(stats)
@@ -940,6 +968,11 @@ def _finish_envelope(
         # folder-level fields (as before)
         "folder": folder,
         "load_date": load_date.isoformat(),
+        # PT-048 (R-14): MIRROR of oracle's envelope stamp (R4
+        # discipline) - day key at the root, once per folder; the
+        # reader trusts the manifest, never derives. Additive: absent
+        # in pre-PT-048 manifests.
+        "encryption_key": f"stg.{folder}",
         # PT-015 (B5): the folder's as-of story - declared lag +
         # computed anchor. Additive: absent in pre-B5 manifests.
         "as_of": as_of_declared,

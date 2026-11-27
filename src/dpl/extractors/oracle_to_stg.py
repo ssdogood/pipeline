@@ -144,6 +144,7 @@ def _build_stats(
     error: str | None = None,
     output_path: str | None = None,
     anchor_date: date | None = None,
+    verification_passed: bool | None = None,
 ) -> dict[str, Any]:
     """Assemble a manifest-ready stats entry for one table.
 
@@ -167,6 +168,11 @@ def _build_stats(
         "output_path": output_path,
         "error": error,
     }
+    # PT-048 (R-14): absence is MEANINGFUL - absent when nothing was
+    # published (skipped/paused/not_scheduled/zero-row), present
+    # (true|false) only when the writer actually published parts.
+    if verification_passed is not None:
+        stats["verification_passed"] = verification_passed
     if anchor_date is not None:
         table_type = asof.validate_table_type(
             table_cfg.get("type"),
@@ -376,6 +382,7 @@ def _task_for(
             duration_sec=time.time() - start,
             output_path=wstats.get("output_dir"),
             anchor_date=anchor_date,
+            verification_passed=wstats.get("verification_passed"),
         )
 
     return attempt
@@ -778,7 +785,16 @@ def extract_folder(
             # the clock now, and duration_sec is volatile-stripped by
             # the equivalence comparator anyway.
             stats = _build_stats(
-                t, load_date, "failed", error=oc["error"], anchor_date=anchor_date
+                t,
+                load_date,
+                "failed",
+                error=oc["error"],
+                anchor_date=anchor_date,
+                verification_passed=(
+                    False
+                    if "post-publish verification failed" in (oc["error"] or "")
+                    else None
+                ),
             )
         stats["attempts"] = oc["attempts"]
         results.append(stats)
@@ -845,6 +861,13 @@ def _finish_envelope(
         # folder-level fields (as before)
         "folder": folder,
         "load_date": load_date.isoformat(),
+        # PT-048 (R-14): the day key that encrypted this folder's
+        # parquet files - root-level ONCE (folder is 1:1 with the
+        # connection; every table wrote under this same key). The
+        # reader takes the manifest stamp as ground truth (R-18) -
+        # never derives, never guesses. Additive: absent in
+        # pre-PT-048 manifests.
+        "encryption_key": f"stg.{folder}",
         # PT-015 (B5): the folder's as-of story - the declared lag and
         # the computed anchor (run date - N). Both additive: absent in
         # manifests predating B5.

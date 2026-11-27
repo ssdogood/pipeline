@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import logging
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -327,6 +328,80 @@ def _validate_connection_name(pipes: list[Pipe], name: str) -> str | None:
     return None
 
 
+def _stg_connections_in_scope(
+    pipes: list, only_connection: str | None, only_tables: list[str] | None
+) -> list[str]:
+    """PT-048 B3: connection names that will actually extract tonight.
+
+    Scoping rules (PT-039 intersection semantics):
+      - --connection X -> [X] only
+      - --tables a,b -> the connection(s) owning those tables
+        (pipes is the wrapper's registered pipe list; each entry knows
+        its folder/connection name and its table set)
+      - neither -> every registered connection
+    Dormant connections get no day key (design 3: no growth).
+    """
+    if only_connection is not None:
+        return [only_connection]
+    names: list[str] = []
+    for pipe in pipes:
+        folder = getattr(pipe, "name", None)
+        if folder is None:
+            continue
+        if only_tables is not None:
+            tables = getattr(pipe, "tables", None) or []
+            if not any(t in tables for t in only_tables):
+                continue
+        names.append(folder)
+    return names
+
+
+def _ensure_staging_readme(landing_root: Path) -> None:
+    """PT-048 B3: the staging-root README invariant (design 7.1).
+
+    EVERY run checks; creates when absent, never touches an existing
+    copy (operator customizations survive forever). Sits at the root
+    beside the date folders - non-date-named, so _prune_date_dirs
+    protects it (locked by existing test).
+    """
+    readme = landing_root / "README.md"
+    if readme.is_file():
+        return
+    landing_root.mkdir(parents=True, exist_ok=True)
+    readme.write_text(_STG_README_TEXT, encoding="utf-8")
+    logging.getLogger("dpl.wrapper").info("staging README created at %s", readme)
+
+
+_STG_README_TEXT = """\
+# STAGING AREA - READ BEFORE DELETING OR MOVING ANYTHING
+
+The folders in this area (named YYYY-MM-DD) hold up to 10 days of
+extracted data kept for worst-case redo. They are cleaned AUTOMATICALLY
+by the nightly run's housekeeping - you never need to delete them.
+
+Each day-folder's parquet files are encrypted with a key that is kept
+in step with the folder itself:
+
+  - When housekeeping removes a day-folder, its key is deleted in the
+    same pass.
+  - The next nightly run deletes the key of ANY folder it cannot find
+    on disk - including one that was moved or deleted by hand.
+
+DO NOT hand-delete a date-folder unless absolutely necessary.
+
+DO NOT move data out of this area and back later - the day after the
+folder is missing, its key is gone and the moved-back data becomes
+PERMANENTLY unreadable. Recovery would be a full re-extract from the
+source systems. If you need a copy elsewhere: COPY it - never MOVE.
+
+IF A FOLDER IS MISSING BY ACCIDENT: act immediately. Its key survives
+only until the next nightly run completes - stopping tonight's run
+preserves the recovery window. Tell the pipeline operator at once.
+
+Non-date files at this root (like this README) are never pruned.
+"""
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m wrapper.run",
@@ -525,6 +600,30 @@ def main(argv: list[str] | None = None) -> int:
     if _pair_err is not None:
         log.error("%s", _pair_err)
         return EXIT_CONFIG
+
+    # ------------------------------------------------------------------
+    # PT-048 B3: stg key bin binding + day-key provisioning.
+    # init() binds the bin to THIS machine's active environment
+    # (resolver-driven, R-09); provision() runs ONCE per run, after
+    # selection is known but BEFORE any writer can exist - the single
+    # writer of the bin by construction (no concurrency at this point).
+    # Connections in scope only: --connection/--tables scoping is
+    # honored so dormant connections grow no keys (design 3).
+    # Absent master key file = loud config error (setup_secrets.sh
+    # not run on this machine): exit 3, never a silent plaintext night.
+    # ------------------------------------------------------------------
+    try:
+        from dpl.lib import stg_keys
+
+        stg_keys.init()
+        stg_keys.provision(
+            _stg_connections_in_scope(pipes, only_connection, only_tables), load_date
+        )
+        _ensure_staging_readme(Path(settings["paths"]["landing_root"]))
+    except (ValueError, FileNotFoundError) as e:
+        log.error("stg key bin unavailable - aborting: %s", e)
+        return EXIT_CONFIG
+
     # PT-039: connection name validated against ALL registered pipes
     # up front - a typo is a config error (exit 3), never a silent
     # zero-table night.
@@ -754,6 +853,16 @@ def main(argv: list[str] | None = None) -> int:
                     Path(settings["paths"]["landing_root"]),
                     days=wcfg["retention"]["landing_days"],
                 )
+                # PT-048 B3: paired key deletion + orphan sweep (one
+                # disk-truth pass AFTER the prune, so retention-removed
+                # folders kill their keys in the same step - R-15), then
+                # the day-granular snapshot of the stable overnight
+                # state (R-10). Swept key names are logged, never the
+                # material. A sweep failure is a step failure (logged,
+                # run continues) - orphaned keys are inert, and the
+                # next run's sweep retries the reconciliation.
+                stg_keys.sweep(Path(settings["paths"]["landing_root"]))
+                stg_keys.snapshot()
                 prune_old_runs(Path(settings["paths"]["runs_root"]), days=manifest_days)
 
             else:

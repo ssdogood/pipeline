@@ -37,6 +37,9 @@ Schema v2.1 (PT-014 Commit 2, 2026-11-19):
   - v2.2 (PT-032/015): folder_runs + tables_not_scheduled, as_of,
     anchor_date; table_runs + table_type, coverage_kind/from/to.
   - v2.2 (B7): folder_runs + missed_days (JSON miss report).
+  - v2.3 (PT-048): table_runs + encryption_key, verification_passed
+    (stg parquet encryption; envelope root key denormalized per row,
+    NULL for re-ingested pre-PT-048 manifests).
   Applied by init_db() as additive ALTER TABLE, in place and lossless -
   unlike the v1 rename, old rows simply keep their NULLs.
 
@@ -160,7 +163,9 @@ CREATE TABLE IF NOT EXISTS table_runs (
     coverage_kind TEXT,              -- v2.2 (PT-015): snapshot-as-of | window
     coverage_from TEXT,              -- v2.2 (PT-015): NULL for snapshots
     coverage_to   TEXT,              -- v2.2 (PT-015): the anchor for this row
-    PRIMARY KEY (run_id, folder, table_name)
+    encryption_key   TEXT,           -- v2.3 (PT-048): envelope root key, denorm per row
+    verification_passed INTEGER,     -- v2.3 (PT-048): 0/1 outcome; NULL when nothing published
+PRIMARY KEY (run_id, folder, table_name)
 );
 CREATE TABLE IF NOT EXISTS email_sends (
     send_id         TEXT PRIMARY KEY,
@@ -351,7 +356,7 @@ def _migrate_v2_2(conn: sqlite3.Connection) -> bool:
                 ("tables_not_scheduled", "INTEGER"),
                 ("as_of", "TEXT"),
                 ("anchor_date", "TEXT"),
-            ("missed_days", "TEXT"),
+                ("missed_days", "TEXT"),
             ),
         ),
     )
@@ -364,6 +369,53 @@ def _migrate_v2_2(conn: sqlite3.Connection) -> bool:
             if col not in present:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
                 log.info("history v2.2: %s gained column %s", table, col)
+                added = True
+    return added
+
+
+def _migrate_v2_3(conn: sqlite3.Connection) -> bool:
+    """Additive v2.2 -> v2.3 upgrade (PT-048, 2026-11-27).
+
+    Same doctrine as _migrate_v2_1/_migrate_v2_2: CREATE IF NOT EXISTS
+    never adds columns, so a deployed v2.2 database gains its
+    encryption columns here. Lossless and in place - plain ALTER TABLE
+    ADD COLUMN; existing rows keep their NULLs. Marker: 'table_runs'
+    exists but lacks 'verification_passed'. Every column is
+    individually idempotent (checked, skipped when present), so a
+    half-upgraded database re-runs to completion and a v2.3 database
+    is a no-op. Returns True when any column was added.
+
+    Columns land on table_runs only: the envelope's root-level
+    encryption_key denormalizes into each table row (folder is 1:1
+    with the key), and verification_passed is per-table by nature
+    (the manifest's per-table outcome, mirrored verbatim).
+    """
+    tables = {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "table_runs" not in tables:
+        return False  # fresh DB: the v2.3 DDL already has them
+    if "verification_passed" in _table_columns(conn, "table_runs"):
+        return False  # already v2.3: idempotent re-run
+
+    additions: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+        (
+            "table_runs",
+            (
+                ("encryption_key", "TEXT"),
+                ("verification_passed", "INTEGER"),
+            ),
+        ),
+    )
+    added = False
+    for table, cols in additions:
+        if table not in tables:
+            continue  # nothing to alter (DDL creates v2.3 shape)
+        present = _table_columns(conn, table)
+        for col, decl in cols:
+            if col not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                log.info("history v2.3: %s gained column %s", table, col)
                 added = True
     return added
 
@@ -388,6 +440,7 @@ def init_db(db_path: Path) -> dict[str, Any]:
         # v2.1/v2.2 upgrades AFTER the DDL (see _migrate_v2_* docstrings)
         upgraded = _migrate_v2_1(conn)
         upgraded_v2_2 = _migrate_v2_2(conn)
+        upgraded_v2_3 = _migrate_v2_3(conn)
         conn.commit()
         journal = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
         tables = [
@@ -402,6 +455,7 @@ def init_db(db_path: Path) -> dict[str, Any]:
             "migrated": migrated,
             "upgraded_v2_1": upgraded,
             "upgraded_v2_2": upgraded_v2_2,
+            "upgraded_v2_3": upgraded_v2_3,
         }
     finally:
         conn.close()

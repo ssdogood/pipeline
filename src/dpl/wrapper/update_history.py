@@ -94,6 +94,12 @@ TABLE_RUN_COLUMNS: tuple[str, ...] = (
     "coverage_kind",
     "coverage_from",
     "coverage_to",
+    # v2.3 (PT-048): stg encryption story. encryption_key mirrors the
+    # ENVELOPE ROOT field (one key per folder); verification_passed is
+    # the per-table outcome. Both NULL whenever the manifest predates
+    # PT-048 (additive - old manifests never fail ingest).
+    "encryption_key",
+    "verification_passed",
 )
 
 #: the four original envelope-level count keys mirrored into folder_runs
@@ -261,6 +267,8 @@ def ingest_manifest(conn, mpath: Path) -> None:
                 t.get("coverage_kind"),
                 t.get("coverage_from"),
                 t.get("coverage_to"),
+                env.get("encryption_key"),
+                t.get("verification_passed"),
             ),
         )
 
